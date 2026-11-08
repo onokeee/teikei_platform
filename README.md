@@ -33,19 +33,24 @@ pip install Flask Flask-SQLAlchemy waitress
 ```
 
 ```bash
-python app.py
+flask --app app run --host 0.0.0.0 --port 5000
 ```
 
 ブラウザで http://localhost:5000 を開きます。同じネットワークの他のPCからは `http://<このPCのIPアドレス>:5000` でアクセスできます。
 
-`python app.py` は開発用サーバーです。部署に公開して常時動かすときは waitress で起動します。
+- ポートは `--port` で変えます（例: `--port 8080`）。`--host 0.0.0.0` を付けないと同じPCからしか開けません。
+- `--app app` は `run` より前に書きます（`flask run --app app` はエラーになります）。`flask` コマンドが見つからないときは `python -m flask --app app run --host 0.0.0.0 --port 5000` と書きます。
+- `python app.py` でも起動できます。こちらはポートを `config.py` の `PORT` から読みます。
+
+`flask run` と `python app.py` は開発用サーバーです。部署に公開して常時動かすときは waitress で起動します。
 
 ```bash
-python app.py serve
+waitress-serve --host 0.0.0.0 --port 5000 --call app:create_app
 ```
 
-- 同時アクセスに強く、開発用サーバーの警告も出ません。ポートと処理スレッド数は `config.py` の `PORT` と `THREADS`（既定 8）で変えられます。
-- Windows のタスクスケジューラに「ログオン時に `python app.py serve` を実行（開始フォルダはこのフォルダ）」と登録しておくと、PCを再起動しても自動で立ち上がります。
+- 同時アクセスに強く、開発用サーバーの警告も出ません。ポートは `--port`、処理スレッド数は `--threads`（既定 4）で変えられます。
+- `python app.py serve` でも同じことができます。こちらはポートとスレッド数を `config.py` の `PORT` と `THREADS`（既定 8）から読みます。
+- Windows のタスクスケジューラに「ログオン時に `waitress-serve --host 0.0.0.0 --port 5000 --call app:create_app` を実行（開始フォルダはこのフォルダ）」と登録しておくと、PCを再起動しても自動で立ち上がります。
 
 ### テスト
 
@@ -57,7 +62,7 @@ python tests.py
 
 - 初回起動時に `instance/portal.sqlite3` が作られ、職場・業務領域のマスタと設定の初期値が入ります。既存DBへの列追加は起動時に自動で行います。
 - 「管理」→「デモデータを投入」で、回答者8人・業務26件・社員12人・月次アンケート4か月分の架空データが入ります。動きを確認したら「デモデータを削除」で消せます。
-- 設定はすべてプロジェクト直下の `config.py` に書きます（環境変数や .env は使いません）。ポートは `PORT`、管理者アカウントは `ADMIN_ID` / `ADMIN_PASSWORD`、社員ID照会は `LDAP_API_*`、AI連携は `ANTHROPIC_API_KEY` です。変えたら再起動します。
+- 設定はすべてプロジェクト直下の `config.py` に書きます（環境変数や .env は使いません）。ポートは `PORT`（`python app.py` / `python app.py serve` のとき。`flask run` と `waitress-serve` では `--port` で指定）、管理者アカウントは `ADMIN_ID` / `ADMIN_PASSWORD`、社員ID照会は `LDAP_API_*`、AI連携は `ANTHROPIC_API_KEY` です。変えたら再起動します。
 
 ## 業務マップ（1枚の流れ図）
 
@@ -182,7 +187,7 @@ AI連携は無くても動きます（ルールベースで同じ形式の分析
 
 1. Anthropic の API キーを用意する
 2. `config.py` の `ANTHROPIC_API_KEY` にキーを書く
-3. `python app.py` で再起動する。「管理」画面の「AI連携」に「Claude API 連携 有効」と出れば成功です
+3. アプリを再起動する（起動コマンドをいったん止めて、もう一度実行する）。「管理」画面の「AI連携」に「Claude API 連携 有効」と出れば成功です
 
 使用モデルは `config.py` の `ANTHROPIC_MODEL`（既定 `claude-opus-5-5`）。分類用途なので effort は low に設定し、安全分類で拒否された場合はサーバー側フォールバックを有効にしています。AIの推定は参考情報で、案件詳細の「担当者確認」を経て正式な情報になります。
 
@@ -217,7 +222,7 @@ AI連携は無くても動きます（ルールベースで同じ形式の分析
 ## ファイル構成
 
 ```
-app.py                 アプリ本体（Flask）。データモデル、集計、業務マップ、AI連携、初期データ、全画面のルート、テンプレート（TEMPLATES）、CSS/JS（STATIC）、起動（python app.py / python app.py serve）
+app.py                 アプリ本体（Flask）。データモデル、集計、業務マップ、AI連携、初期データ、全画面のルート、テンプレート（TEMPLATES）、CSS/JS（STATIC）、起動（flask --app app run ／ python app.py ／ python app.py serve）
 config.py              設定（ポート、管理者アカウント、LDAP API、APIキー）。ここだけ編集する
 ldap_auth.py           社員ID照会（社内 LDAP API / ldap3）。config.py と標準ライブラリだけに依存
 tests.py               スモークテスト6本（python tests.py）

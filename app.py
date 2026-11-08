@@ -1,7 +1,8 @@
 """PC定型業務ゼロ化プロジェクト ポータル（Flask + SQLite）。アプリ本体はこの1ファイル
 
-    python app.py          開発用サーバー（config.py の PORT、既定 5000）
-    python app.py serve    本番用サーバー（waitress）
+    flask --app app run --host 0.0.0.0 --port 5000                   開発用サーバー（ポートは --port で指定）
+    waitress-serve --host 0.0.0.0 --port 5000 --call app:create_app   本番用サーバー（waitress）
+    python app.py / python app.py serve                               上と同じ。ポートは config.py の PORT
     python tests.py        スモークテスト
 
 設定は config.py、社員ID照会は ldap_auth.py、データは instance/portal.sqlite3。
