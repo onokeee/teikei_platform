@@ -1,0 +1,9 @@
+# データベース・秘密鍵（バックアップは instance/ をコピー）
+instance/
+# Python
+__pycache__/
+*.pyc
+# エディタ・ツール
+.claude/
+.vscode/
+.idea/
