@@ -1,33 +1,27 @@
-"""PC定型業務ゼロ化プロジェクト 設定ファイル
+"""設定。すべてここに書く（環境変数や .env は使わない）。変えたらアプリを再起動する。空文字は「その機能を使わない」"""
 
-設定はすべてこのファイルに書く（環境変数や .env は使わない）。変えたらアプリを再起動する。
-空文字のままの項目は「その機能を使わない」という意味になる。
-"""
+# ---- 起動（python app.py / python app.py serve のとき。flask run / waitress-serve では --port で指定） ----
+PORT = 5000
+THREADS = 8
+DEBUG = False
+SECRET_KEY = ""  # 空なら instance/secret_key.txt を自動生成
 
-# ---- 起動 ----
-PORT = 5000              # 待ち受けポート
-THREADS = 8              # serve.py（waitress）の同時処理数
-DEBUG = False            # run.py（開発用サーバー）でデバッグ表示をするか
-SECRET_KEY = ""          # セッション用の秘密鍵。空なら instance/secret_key.txt を自動生成して使う
-
-# ---- ログイン（推進メンバー用の管理者アカウント。アンケート回答と活動状況はログイン不要） ----
+# ---- 管理者ログイン ----
 ADMIN_ID = "admin"
 ADMIN_PASSWORD = "adminpass"
 
-# ---- 社員ID照会: 社内 LDAP API サービス（HTTP/JSON） ----
-# 例: "http://ldap-api.local/employees/{id}"  {id} は社員IDに置き換わる。{id} がなければ ?LDAP_API_ID_PARAM=社員ID を付けて GET する
+# ---- 社員ID照会: 社内 LDAP API（HTTP/JSON）。例 "http://ldap-api.local/employees/{id}"。{id} がなければ ?LDAP_API_ID_PARAM=社員ID を付けて GET ----
 LDAP_API_URL = ""
-LDAP_API_TOKEN = ""                    # Bearer トークンが必要なときだけ
+LDAP_API_TOKEN = ""
 LDAP_API_ID_PARAM = "employee_id"
-# 応答 JSON の項目名（入れ子は "data.name" のように書く）
 LDAP_API_FIELD_ID = "employee_id"
-LDAP_API_FIELD_NAME = "display_name"   # 氏名。この項目になければ display_name / displayName / name / cn を順に見る
-LDAP_API_FIELD_DEPT = "department"     # 所属（返らなければ空のまま。職場は本人が初回に選ぶ）
+LDAP_API_FIELD_NAME = "display_name"
+LDAP_API_FIELD_DEPT = "department"
 LDAP_API_FIELD_MAIL = "mail"
-LDAP_API_FIELD_EXISTS = "exists"       # この項目が false なら「いない」。HTTP 404 も「いない」。氏名がなくても「いる」と判定する
-LDAP_API_TIMEOUT = 5                   # 秒
+LDAP_API_FIELD_EXISTS = "exists"
+LDAP_API_TIMEOUT = 5
 
-# ---- 社員ID照会: LDAP サーバーへの直接問い合わせ（pip install ldap3 が必要。API があれば不要） ----
+# ---- 社員ID照会: LDAP サーバーへ直接（pip install ldap3 が必要。API があれば不要） ----
 LDAP_SERVER = ""
 LDAP_BIND_DN = ""
 LDAP_BIND_PASSWORD = ""
@@ -37,6 +31,10 @@ LDAP_NAME_ATTR = "displayName"
 LDAP_DEPT_ATTR = "department"
 LDAP_MAIL_ATTR = "mail"
 
-# ---- AI連携（Claude API。空ならルールベースで動く） ----
-ANTHROPIC_API_KEY = ""
-ANTHROPIC_MODEL = "claude-opus-5-5"
+# ---- AI連携: 社内 Azure OpenAI の ChatGPT API（Responses API）。URL かキーが空ならルールベース。temperature / top_p は送らない ----
+OPENAI_API_URL = ""  # 例 "https://openai-api-service.<社内ホスト名>:82/api/responses"
+OPENAI_API_KEY = ""
+OPENAI_MODEL = "gpt-6-luna"  # 社内で案内されている GPT-6 系の名前に合わせる
+OPENAI_REASONING_EFFORT = "low"  # "" なら送らない
+OPENAI_MAX_OUTPUT_TOKENS = 4000
+OPENAI_API_TIMEOUT = 90

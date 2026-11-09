@@ -1,18 +1,4 @@
-"""社員ID照会（社内 LDAP API サービス / LDAP サーバー）。このファイルは config.py と標準ライブラリだけに依存する
-
-照会の順序:
-  1. 社内 LDAP API サービス（HTTP/JSON）   … config.py の LDAP_API_URL が設定されているとき
-  2. LDAP サーバーへの直接問い合わせ（ldap3） … config.py の LDAP_SERVER が設定され、ldap3 が入っているとき
-
-API が「そのIDが存在するか」しか返さない場合（氏名・所属なし）でも使える。氏名は LDAP_API_FIELD_NAME の項目、
-なければ display_name / displayName / name / cn を順に見る。見つかった人の控え（employees テーブル）や
-足りない氏名・職場の補いはアプリ側（app.py の lookup）で行う。
-
-使い方:
-    import ldap_auth
-    info = ldap_auth.lookup_directory("E001")   # {"emp_id", "name", "department", "email"} か None
-    ldap_auth.status_text()                    # 管理画面に出す接続状態
-"""
+"""社員ID照会（社内 LDAP API サービス / LDAP サーバー）。config.py と標準ライブラリだけに依存する"""
 import json
 import logging
 import urllib.error
@@ -25,10 +11,8 @@ log = logging.getLogger(__name__)
 
 
 def _cfg(name, default=None):
-    """config.py の値（なければ default）"""
     value = getattr(config, name, default)
     return default if value is None else value
-
 
 NAME_FIELDS = ("display_name", "displayName", "name", "cn", "full_name", "fullName")
 
@@ -46,7 +30,6 @@ def api_config():
         "timeout": float(_cfg("LDAP_API_TIMEOUT", 5) or 5),
     }
 
-
 def ldap_config():
     return {
         "server": str(_cfg("LDAP_SERVER", "") or "").strip(),
@@ -59,9 +42,7 @@ def ldap_config():
         "mail_attr": str(_cfg("LDAP_MAIL_ATTR", "mail") or "mail"),
     }
 
-
 def _dig(data, path):
-    """'a.b.c' のようなキー指定で辞書をたどる"""
     cur = data
     for key in str(path).split("."):
         if isinstance(cur, dict) and key in cur:
@@ -69,7 +50,6 @@ def _dig(data, path):
         else:
             return None
     return cur
-
 
 def _lookup_api(emp_id):
     cfg = api_config()
@@ -86,7 +66,7 @@ def _lookup_api(emp_id):
         with urllib.request.urlopen(req, timeout=cfg["timeout"]) as resp:
             data = json.loads(resp.read().decode("utf-8") or "null")
     except urllib.error.HTTPError as e:
-        if e.code == 404:  # いない
+        if e.code == 404:
             return None
         log.warning("LDAP API の照会に失敗しました: %s", e)
         return None
@@ -104,22 +84,21 @@ def _lookup_api(emp_id):
                 break
     if isinstance(data, list):
         data = data[0] if data else None
-    if data is True:  # true だけ返す API
+    if data is True:
         data, exists = {}, True
-    if not isinstance(data, dict) or (not data and exists is not True):  # null・{}・[] は「いない」
+    if not isinstance(data, dict) or (not data and exists is not True):
         return None
     name = _dig(data, cfg["field_name"])
     for key in NAME_FIELDS:
         if name:
             break
         name = _dig(data, key)
-    return {  # 氏名・所属が返らなくても「存在する」ことは分かる
+    return {
         "emp_id": str(_dig(data, cfg["field_id"]) or emp_id),
         "name": str(name or ""),
         "department": str(_dig(data, cfg["field_dept"]) or ""),
         "email": str(_dig(data, cfg["field_mail"]) or ""),
     }
-
 
 def _lookup_ldap3(emp_id):
     cfg = ldap_config()
@@ -150,26 +129,23 @@ def _lookup_ldap3(emp_id):
         if not name:
             return None
         return {"emp_id": emp_id, "name": name, "department": attr(cfg["dept_attr"]), "email": attr(cfg["mail_attr"])}
-    except Exception as e:  # ldap3 の例外は種類が多いためまとめて扱う
+    except Exception as e:
         log.warning("LDAP 直接照会に失敗しました: %s", e)
         return None
-
 
 def status_text():
     if api_config()["url"]:
         return f"社内 LDAP API 連携 有効（{api_config()['url']}）。照会結果は社員マスタにも保存します"
     if ldap_config()["server"]:
         try:
-            import ldap3  # noqa: F401
+            import ldap3
 
             return f"LDAP サーバー直接照会 有効（{ldap_config()['server']}）"
         except ImportError:
             return "LDAP_SERVER が設定されていますが ldap3 が未インストールです（pip install ldap3）"
     return "LDAP 未設定（社員マスタのみで照会。管理 → 社員マスタ から CSV 取込できます）"
 
-
 def lookup_directory(emp_id):
-    """社員IDを API / LDAP に問い合わせる。見つからなければ None（データベースは触らない）"""
     emp_id = (emp_id or "").strip()
     if not emp_id:
         return None

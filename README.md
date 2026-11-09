@@ -62,7 +62,7 @@ python tests.py
 
 - 初回起動時に `instance/portal.sqlite3` が作られ、職場・業務領域のマスタと設定の初期値が入ります。既存DBへの列追加は起動時に自動で行います。
 - 「管理」→「デモデータを投入」で、回答者8人・業務26件・社員12人・月次アンケート4か月分の架空データが入ります。動きを確認したら「デモデータを削除」で消せます。
-- 設定はすべてプロジェクト直下の `config.py` に書きます（環境変数や .env は使いません）。ポートは `PORT`（`python app.py` / `python app.py serve` のとき。`flask run` と `waitress-serve` では `--port` で指定）、管理者アカウントは `ADMIN_ID` / `ADMIN_PASSWORD`、社員ID照会は `LDAP_API_*`、AI連携は `ANTHROPIC_API_KEY` です。変えたら再起動します。
+- 設定はすべてプロジェクト直下の `config.py` に書きます（環境変数や .env は使いません）。ポートは `PORT`（`python app.py` / `python app.py serve` のとき。`flask run` と `waitress-serve` では `--port` で指定）、管理者アカウントは `ADMIN_ID` / `ADMIN_PASSWORD`、社員ID照会は `LDAP_API_*`、AI連携は `OPENAI_API_URL` / `OPENAI_API_KEY` / `OPENAI_MODEL` です。変えたら再起動します。
 
 ## 業務マップ（1枚の流れ図）
 
@@ -181,15 +181,17 @@ python tests.py
 
 いずれでも見つからない場合は、氏名と職場を手入力できます。
 
-## AI連携（Claude API）の有効化
+## AI連携（社内 Azure OpenAI の ChatGPT API）の有効化
 
-AI連携は無くても動きます（ルールベースで同じ形式の分析・提案を行います）。Claude API を使うと、案件登録時の業務分類・関連業務の推定・ECRS観点の改善候補・担当者への確認質問、およびダッシュボードの「AIで提案を生成」が有効になります。
+AI連携は無くても動きます（ルールベースで同じ形式の分析・提案を行います）。社内の Azure OpenAI 中継サービス（ChatGPT API）につなぐと、案件登録時の業務分類・関連業務の推定・ECRS観点の改善候補・担当者への確認質問、およびダッシュボードの「AIで提案を生成」が有効になります。
 
-1. Anthropic の API キーを用意する
-2. `config.py` の `ANTHROPIC_API_KEY` にキーを書く
-3. アプリを再起動する（起動コマンドをいったん止めて、もう一度実行する）。「管理」画面の「AI連携」に「Claude API 連携 有効」と出れば成功です
+1. 社内の中継サービスの API キーを用意する（ヘッダーに `Authorization: Bearer <API_KEY>` として送ります。統一IDの入力は不要です）
+2. `config.py` の `OPENAI_API_URL` に Responses API の URL（例 `https://openai-api-service.<社内ホスト名>:82/api/responses`）、`OPENAI_API_KEY` にキー、`OPENAI_MODEL` に使う GPT-6 系のモデル名（社内で案内されている名前）を書く
+3. アプリを再起動する（起動コマンドをいったん止めて、もう一度実行する）。「管理」画面の「AI連携」に「ChatGPT API 連携 有効」と出れば成功です
 
-使用モデルは `config.py` の `ANTHROPIC_MODEL`（既定 `claude-opus-5-5`）。分類用途なので effort は low に設定し、安全分類で拒否された場合はサーバー側フォールバックを有効にしています。AIの推定は参考情報で、案件詳細の「担当者確認」を経て正式な情報になります。
+呼び出しは Responses API で、本文は `model` / `instructions` / `input` / `max_output_tokens` / `reasoning.effort` だけです。`temperature` と `top_p` は送りません（GPT-5 以降の推論モデルは受け付けないため。0 を入れるのでもなく、項目ごと付けません）。推論の量は `OPENAI_REASONING_EFFORT`（既定 `low`。空にすると送らない。推論なしのモデルで 400 が返ったときは自動で外して1回やり直します）、応答の上限は `OPENAI_MAX_OUTPUT_TOKENS`（既定 4000。推論トークンを含む）、タイムアウトは `OPENAI_API_TIMEOUT`（既定 90 秒）です。追加のパッケージは要りません（標準ライブラリの urllib で呼びます）。
+
+失敗したとき（キー無効・URL 違い・レート制限・接続不可・応答の拒否）はログに理由を出し、その案件はルールベースの結果で補います。直近のエラーは「管理」画面の「AI連携」にも出ます。AIの推定は参考情報で、案件詳細の「担当者確認」を経て正式な情報になります。
 
 ## 月間時間の算出ルール（企画書・設計書.md の設計書「12. 集計・活用の流れ」）
 

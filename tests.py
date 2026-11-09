@@ -1,10 +1,5 @@
-"""スモークテスト（画面と API をひととおり叩く）
-
-    python tests.py              全部を1本ずつ別プロセスで実行
-    python tests.py smoke_board  1本だけ実行
-
-各テストは一時ファイルの SQLite を使い、instance/ の本番データには触れない。
-"""
+"""スモークテスト。python tests.py で全部、python tests.py smoke_board のように名前を付けると1本。一時ファイルの SQLite を使う"""
+import io
 import json
 import os
 import subprocess
@@ -14,20 +9,14 @@ import urllib.error
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import ldap_auth  # noqa: E402
-from app import conf, create_app  # noqa: E402
-from app import Employee, FlowMap, MonthlyResponse, MonthlySurvey, Respondent, StageLog, Task, _migrate_monthly_questions, answerable_periods, current_period, db, lookup, period_label, public_period, shift_period  # noqa: E402
+import ldap_auth
+from app import conf, create_app
+from app import Employee, FlowMap, MonthlyResponse, MonthlySurvey, Respondent, StageLog, Task, _migrate_monthly_questions, answerable_periods, current_period, db, lookup, period_label, public_period, shift_period
 
-for _k, _v in (("ANTHROPIC_API_KEY", ""), ("LDAP_API_URL", ""), ("LDAP_SERVER", ""), ("ADMIN_ID", "admin"), ("ADMIN_PASSWORD", "adminpass")):
-    conf.override(_k, _v)  # テストは config.py の値に依存しない
-
+for _k, _v in (("OPENAI_API_URL", ""), ("OPENAI_API_KEY", ""), ("LDAP_API_URL", ""), ("LDAP_SERVER", ""), ("ADMIN_ID", "admin"), ("ADMIN_PASSWORD", "adminpass")):
+    conf.override(_k, _v)
 
 def smoke_bizmap_edit():
-    """業務マップ編集（グラフAPI・マージ）のスモークテスト"""
-
-
-
-
     tmpdir = tempfile.mkdtemp()
     dbfile = os.path.join(tmpdir, "test.sqlite3").replace("\\", "/")
     app = create_app({"SQLALCHEMY_DATABASE_URI": "sqlite:///" + dbfile, "TESTING": True})
@@ -35,16 +24,13 @@ def smoke_bizmap_edit():
     client.post("/login", data={"emp_id": "admin", "password": "adminpass"})
     fails = []
 
-
     def check(cond, msg):
         print(("OK  " if cond else "NG  ") + msg)
         if not cond:
             fails.append(msg)
 
-
     client.post("/admin/demo/load")
 
-    # 1. 自動生成グラフ
     r = client.get("/bizmap/api/graph?kind=info")
     g = r.get_json()
     check(r.status_code == 200 and g["needs_layout"] is True, "GET graph (auto) needs_layout")
@@ -53,7 +39,6 @@ def smoke_bizmap_edit():
     some_edge = g["edges"][0]
     check(task_node.get("url") and task_node["cls"] in ("task", "done"), "task node has url/cls")
 
-    # 2. 手修正して保存: 位置・名前・色、ノード非表示、エッジ非表示、手動ノード・手動エッジ、反転、ラベル
     data = {"nodes": [], "edges": [], "suppressed_nodes": [], "suppressed_edges": [], "view": {"x": 10, "y": 20, "zoom": 0.8}}
     hidden_node = next(n for n in g["nodes"] if n["id"].startswith("s_"))
     for i, n in enumerate(g["nodes"]):
@@ -85,7 +70,6 @@ def smoke_bizmap_edit():
     with app.app_context():
         check(FlowMap.query.count() == 1, "FlowMap row created")
 
-    # 3. マージ結果
     r = client.get("/bizmap/api/graph?kind=info")
     m = r.get_json()
     ids = {n["id"]: n for n in m["nodes"]}
@@ -101,7 +85,6 @@ def smoke_bizmap_edit():
     check(rev and all(e["label"] == "ラベル修正" for e in rev), f"merged: reversed+label kept ({len(rev)})")
     check(m["meta"]["saved_at"] is not None, "merged: saved_at")
 
-    # 4. 新しい業務を登録すると new_node_ids に出る
     client.post("/survey/api/respondent", json={"emp_id": "E001", "name": "", "workplace_id": "", "role": "現場リーダー", "pc_hours": "1〜2時間"})
     client.post("/survey/api/tasks", json={
         "name": "新規に登録した業務", "domain_id": "2", "purpose": "テスト", "output": "新しい帳票",
@@ -116,7 +99,6 @@ def smoke_bizmap_edit():
     check(f"t{new_task.id}" in {n["id"] for n in m2["nodes"]}, "merged: new task node included")
     check("m_abc123" in {n["id"] for n in m2["nodes"]}, "merged: manual node still kept after new task")
 
-    # 5. 閲覧ページに反映（Mermaid に手修正が出る）
     r = client.get("/bizmap/")
     html = r.data.decode("utf-8")
     check(r.status_code == 200 and "手で直した業務名" in html and "手で足した箱" in html, "index renders merged Mermaid")
@@ -134,7 +116,6 @@ def smoke_bizmap_edit():
     r = client.get("/bizmap/domain/2")
     check(r.status_code == 200, "domain page renders")
 
-    # 5b. 同じアウトプットを複数人が作っていると、図のアウトプットの箱が「統合候補」になる
     with app.app_context():
         rs = Respondent.query.order_by(Respondent.id).limit(2).all()
         for i, r_ in enumerate(rs):
@@ -147,13 +128,11 @@ def smoke_bizmap_edit():
     r = client.get("/bizmap/")
     check("dupout" in r.data.decode("utf-8"), "閲覧ページの図にも統合候補の箱が出る")
 
-    # 6. リセット
     r = client.delete("/bizmap/api/graph?kind=info")
     check(r.status_code == 200, "DELETE reset")
     m3 = client.get("/bizmap/api/graph?kind=info").get_json()
     check(m3["needs_layout"] is True and hidden_node["id"] in {n["id"] for n in m3["nodes"]}, "after reset: auto graph again")
 
-    # 7. 不正データ
     r = client.post("/bizmap/api/graph", json={"kind": "info", "data": "oops"})
     check(r.status_code == 400, "POST invalid data -> 400")
     r = client.get("/bizmap/api/graph?kind=nope")
@@ -161,13 +140,7 @@ def smoke_bizmap_edit():
 
     return fails
 
-
 def smoke_board():
-    """活動状況（7段階）のスモークテスト"""
-
-
-
-
     tmpdir = tempfile.mkdtemp()
     dbfile = os.path.join(tmpdir, "test.sqlite3").replace("\\", "/")
     app = create_app({"SQLALCHEMY_DATABASE_URI": "sqlite:///" + dbfile, "TESTING": True})
@@ -175,25 +148,20 @@ def smoke_board():
     client.post("/login", data={"emp_id": "admin", "password": "adminpass"})
     fails = []
 
-
     def check(cond, msg):
         print(("OK  " if cond else "NG  ") + msg)
         if not cond:
             fails.append(msg)
 
-
     def page(url):
         r = client.get(url)
         return r.status_code, r.data.decode("utf-8")
 
-
-    # 空の状態でも掲示板が出る
     code, html = page("/board/")
     check(code == 200 and "進行中の案件はありません" in html, "空の掲示板")
 
     client.post("/admin/demo/load")
 
-    # 掲示板（通常）
     code, html = page("/board/")
     check(code == 200, "掲示板 200")
     for name in ("開始", "要求定義", "要件定義", "テスト", "確認", "完了！"):
@@ -216,7 +184,6 @@ def smoke_board():
     check(code == 200 and f'<div class="stat-value">{wp_total}<span class="stat-unit">件</span></div>' in html and f"完了 {wp_done} " in html, f"職場を選ぶとカードの数字もその職場の値（{wp_total} 件）")
     check("依頼してみませんか" in html and 'href="/survey/"' in html and 'href="/monthly/"' in html, "掲示板: 自動化依頼と月次アンケートへの導線")
 
-    # 職場で絞り込み
     with app.app_context():
         t_test = Task.query.filter_by(name="検査成績書の作成").first()
         wp_id = t_test.workplace_id
@@ -224,13 +191,11 @@ def smoke_board():
     code, html = page(f"/board/?workplace_id={wp_id}")
     check(code == 200 and "検査成績書の作成" in html and (other is None or other.name not in html), "職場で絞り込める")
 
-    # 掲示モードは廃止（パラメータを付けても通常表示）
     code, html = page("/board/?kiosk=1")
     check(code == 200 and "pb-kiosk" not in html and "navbar" in html, "掲示モードは出ない")
     code, html = page("/")
     check("<footer" not in html, "ダッシュボードにもフッターなし")
 
-    # 氏名を隠す設定
     r = client.post("/admin/settings", data={"project_name": "P"})
     code, html = page("/board/")
     check("pb-name" not in html and "伊藤 大輔" not in html, "設定: 依頼者名が消える")
@@ -238,7 +203,6 @@ def smoke_board():
     code, html = page("/board/")
     check("pb-name" in html and "伊藤 大輔" in html, "設定: 氏名を再表示")
 
-    # ダッシュボード・案件一覧・詳細
     code, html = page("/")
     check(code == 200 and "活動状況で案件の進み具合を見る" in html and "pb-funnel" not in html and "職場別の登録件数と月間時間" not in html and "業務領域別の把握状況" not in html, "ダッシュボード: 重複を外してリンクに")
     check("職場別の回答状況" in html and "最近登録された業務" in html and "次のアクション提案" in html, "ダッシュボード: 残した区画")
@@ -263,7 +227,6 @@ def smoke_board():
     code, html = page(f"/cases/{tid}")
     check(code == 200 and "次の段階へ ▶" in html and 'name="stage"' not in html and 'name="status"' not in html and "保留にする" in html and 'name="progress_note"' in html, "案件詳細: ステータス・段階の選択なし、保留ボタンあり")
 
-    # 次の段階へ（request -> spec）
     r = client.post(f"/cases/{tid}/stage", data={"direction": "next"})
     check(r.status_code == 302, "次へ 302")
     with app.app_context():
@@ -271,32 +234,27 @@ def smoke_board():
         check(t.stage == "spec" and t.status == "対応中", f"次へ: spec/対応中 ({t.stage}/{t.status})")
         check(len(t.stage_logs) == 2 and t.stage_logs[-1].stage == "spec", "次へ: 履歴が増える")
 
-    # 戻す（spec -> request）
     client.post(f"/cases/{tid}/stage", data={"direction": "prev"})
     with app.app_context():
         t = db.session.get(Task, tid)
         check(t.stage == "request" and len(t.stage_logs) == 3, "戻す: request・履歴3件")
 
-    # 直接指定 done -> ステータス完了・完了日
     client.post(f"/cases/{tid}/stage", data={"stage": "done", "progress_note": "運用開始しました"})
     with app.app_context():
         t = db.session.get(Task, tid)
         check(t.stage == "done" and t.status == "完了" and t.completed_at is not None and t.progress_note == "運用開始しました", "直接指定: 完了に同期")
 
-    # フォームはステータス・段階を変えない（ひとことだけ）
     form = {"decision": "未定", "assignment": "未定", "assignee": "", "after_minutes": "", "result_note": "", "progress_note": "活動状況のひとこと"}
     client.post(f"/cases/{tid}/update", data=form)
     with app.app_context():
         t = db.session.get(Task, tid)
         check(t.stage == "done" and t.status == "完了" and t.progress_note == "活動状況のひとこと", "フォーム更新では段階・ステータスは変わらない")
 
-    # 完了した案件は保留にできない
     client.post(f"/cases/{tid}/hold")
     with app.app_context():
         t = db.session.get(Task, tid)
         check(t.status == "完了", "完了は保留にできない")
 
-    # 段階を test に戻し、保留にする -> 段階は保ったまま保留
     client.post(f"/cases/{tid}/stage", data={"stage": "test"})
     client.post(f"/cases/{tid}/hold")
     with app.app_context():
@@ -307,44 +265,37 @@ def smoke_board():
     code, html = page(f"/cases/{tid}")
     check("保留を解除" in html, "案件詳細に保留解除ボタン")
 
-    # 保留を解除 -> 対応中
     client.post(f"/cases/{tid}/hold")
     with app.app_context():
         t = db.session.get(Task, tid)
         check(t.stage == "test" and t.status == "対応中", f"保留解除で対応中 ({t.stage}/{t.status})")
 
-    # 保留中に次へ -> 再開して進む
     client.post(f"/cases/{tid}/hold")
     client.post(f"/cases/{tid}/stage", data={"direction": "next"})
     with app.app_context():
         t = db.session.get(Task, tid)
         check(t.stage == "check" and t.status == "対応中", f"保留から次へで再開 ({t.stage}/{t.status})")
 
-    # 開始に戻すと受付
     client.post(f"/cases/{tid}/stage", data={"stage": "start"})
     with app.app_context():
         t = db.session.get(Task, tid)
         check(t.stage == "start" and t.status == "受付", f"開始に戻すと受付 ({t.stage}/{t.status})")
     client.post(f"/cases/{tid}/stage", data={"stage": "check"})
 
-    # 受付のまま（同じ段階を指定しても履歴は増えない）
     with app.app_context():
         n_before = StageLog.query.filter_by(task_id=tid).count()
     client.post(f"/cases/{tid}/stage", data={"stage": "check"})
     with app.app_context():
         check(StageLog.query.filter_by(task_id=tid).count() == n_before, "同じ段階なら履歴は増えない")
 
-    # 新規登録した業務は開始
     with app.app_context():
         new_task = Task.query.filter_by(name="日報の実績をExcelの集計表に転記する").first()
         check(new_task.stage_dates["start"] == new_task.created_at, "開始の日付は登録日")
 
-    # CSV
     r = client.get("/cases/export.csv")
     csv = r.data.decode("utf-8-sig")
     check("進捗段階" in csv and "段階更新日" in csv and "テスト" in csv, "CSVに進捗段階")
 
-    # デモ削除で履歴も消える
     with app.app_context():
         before = StageLog.query.count()
     client.post("/admin/demo/clear")
@@ -355,40 +306,27 @@ def smoke_board():
 
     return fails
 
-
 def smoke_errors():
-    """存在しないURLの 404 とエラー画面（404 / 500）のスモークテスト"""
-
-
-
-
     tmpdir = tempfile.mkdtemp()
     dbfile = os.path.join(tmpdir, "test.sqlite3").replace("\\", "/")
-    # TESTING だと例外がそのまま伝わるので、500 の画面を見るために本番と同じ扱いにする
     app = create_app({"SQLALCHEMY_DATABASE_URI": "sqlite:///" + dbfile, "TESTING": False, "PROPAGATE_EXCEPTIONS": False})
-
 
     @app.route("/_boom")
     def boom():
         raise RuntimeError("テスト用の失敗")
 
-
     client = app.test_client()
     fails = []
-
 
     def check(cond, msg):
         print(("OK  " if cond else "NG  ") + msg)
         if not cond:
             fails.append(msg)
 
-
     def get(url):
         r = client.get(url)
         return r.status_code, r.data.decode("utf-8"), r
 
-
-    # 存在しないURL（ログインしていなくても 404。以前はログイン画面へ飛んでいた）
     code, html, r = get("/no-such-page")
     check(code == 404 and "ページが見つかりません" in html and "app-header" in html, "存在しないURLは 404 の画面（ヘッダーつき）")
     code, html, r = get("/cases/999999")
@@ -399,7 +337,6 @@ def smoke_errors():
     code, html, r = get("/no-such-page")
     check(code == 404 and "ページが見つかりません" in html, "ログイン後も存在しないURLは 404")
 
-    # 500
     code, html, r = get("/_boom")
     check(code == 500 and "エラーが発生しました" in html and "app-header" in html, "失敗したときは 500 の画面（ヘッダーつき）")
     code, html, r = get("/board/")
@@ -407,30 +344,21 @@ def smoke_errors():
 
     return fails
 
-
 def smoke_login_monthly():
-    """ログイン（管理者アカウント）と月次アンケート（設問セット・1人1回・当月だけ）のスモークテスト"""
-
-
-
-
     tmpdir = tempfile.mkdtemp()
     dbfile = os.path.join(tmpdir, "test.sqlite3").replace("\\", "/")
     app = create_app({"SQLALCHEMY_DATABASE_URI": "sqlite:///" + dbfile, "TESTING": True})
     client = app.test_client()
     fails = []
 
-
     def check(cond, msg):
         print(("OK  " if cond else "NG  ") + msg)
         if not cond:
             fails.append(msg)
 
-
     def get(url, **kw):
         r = client.get(url, **kw)
         return r.status_code, r.data.decode("utf-8"), r
-
 
     # ---- 未ログイン: 公開ページは見られ、それ以外はログインへ ----
     code, html, r = get("/")
@@ -517,7 +445,6 @@ def smoke_login_monthly():
     bad = dict(payload, emp_id="E010", answers=dict(payload["answers"], has="へんな値"))
     r = client.post("/monthly/submit", json=bad)
     check(r.status_code == 400, "選択肢にない値は拒否")
-    # フォーム送信（JavaScript なし）でも受け付ける（デモの回答が残っていれば消してから）
     with app.app_context():
         MonthlyResponse.query.filter_by(period=period, emp_id="E010").delete()
         db.session.commit()
@@ -549,7 +476,6 @@ def smoke_login_monthly():
         check(len(keys) == len(set(keys)) and all(keys) and "has" in keys, f"保存後のキーは一意で基本設問も残る: {keys[-2:]}")
     code, html, r = get(f"/monthly/results?period={period}")
     check(code == 200 and "設問ごとの推移" in html and "職場別の推移" in html and 'id="chart-q-has"' in html and 'id="chart-q-stance"' in html and "月度の詳細" in html, "集計は時系列中心（設問ごとの推移・職場別の推移・月度の詳細）")
-    # 旧2問（頼みたいか／自分でやりたいか）の回答と設問セットは、起動時に新1問へ読み替えられる
     with app.app_context():
         old = MonthlySurvey(period="2024-01", is_active=False)
         old.set_questions([q for q in MonthlySurvey.query.filter_by(period=period).first().questions if q["key"] != "stance"] + [
@@ -581,7 +507,6 @@ def smoke_login_monthly():
         MonthlyResponse.query.filter_by(period="2024-01").delete()
         db.session.delete(old)
         db.session.commit()
-    # 基本設問は文面だけ変えられる。選択肢を変えて保存しても既定に戻り、外すこともできない
     tampered = [dict(q, text="今月、繰り返しのPC作業はありましたか", options=["はい", "いいえ"], required=False) if q["key"] == "has" else q for q in qs]
     r = client.post("/monthly/admin/save", json={"period": period, "questions": tampered, "is_active": True})
     with app.app_context():
@@ -596,7 +521,6 @@ def smoke_login_monthly():
     code, html, r = get(f"/monthly/results?period={period}")
     check(code == 200 and "改善の勉強会に参加したいですか" in html and "テストのコメント" in html, "集計に追加設問とコメントが出る")
 
-    # 受付停止
     r = client.post("/monthly/admin/save", json={"period": period, "questions": qs, "is_active": False})
     client.post("/logout")
     code, html, r = get(f"/monthly/?period={period}&emp=E012")
@@ -605,12 +529,11 @@ def smoke_login_monthly():
     check(r.status_code == 400, "受付停止中は送信できない")
 
     # ---- 回答できる月度は当月（と設問セットのある前月）だけ ----
-    # URLで別の月度を指定しても当月に戻り、設問セットも作られない
 
     client.post("/login", data={"emp_id": "admin", "password": "adminpass"})
-    client.post("/monthly/admin/save", json={"period": period, "questions": qs, "is_active": True})  # 受付を再開
+    client.post("/monthly/admin/save", json={"period": period, "questions": qs, "is_active": True})
     client.post("/logout")
-    with app.app_context():  # 追加した設問にも答え、職場も指定した送信内容
+    with app.app_context():
         cur = MonthlySurvey.query.filter_by(period=period).first()
         extra = {q["key"]: (q["options"][0] if q["type"] == "choice" else "") for q in cur.questions if q["key"] not in payload["answers"]}
     full = dict(payload, answers=dict(payload["answers"], **extra), workplace_id="1")
@@ -682,7 +605,6 @@ def smoke_login_monthly():
 
     # ---- 照会が「IDがあるか」しか返さない環境（氏名・職場なし） ----
 
-
     class _FakeResp:
         def __init__(self, body):
             self.body = body
@@ -696,7 +618,6 @@ def smoke_login_monthly():
         def __exit__(self, *args):
             return False
 
-
     def _fake_urlopen(req, timeout=0):
         url = req.full_url
         if "E999" in url:
@@ -708,7 +629,6 @@ def smoke_login_monthly():
         if "E996" in url:
             return _FakeResp(json.dumps({"employee_id": "E996", "display_name": "表示名 太郎"}).encode("utf-8"))
         return _FakeResp(b'{"exists": true}')
-
 
     _real_urlopen = ldap_auth.urllib.request.urlopen
     ldap_auth.urllib.request.urlopen = _fake_urlopen
@@ -766,27 +686,18 @@ def smoke_login_monthly():
 
     return fails
 
-
 def smoke_request():
-    """自動化依頼（1画面・JSON API）のスモークテスト"""
-
-
-
-
     tmpdir = tempfile.mkdtemp()
     dbfile = os.path.join(tmpdir, "test.sqlite3").replace("\\", "/")
     app = create_app({"SQLALCHEMY_DATABASE_URI": "sqlite:///" + dbfile, "TESTING": True})
     client = app.test_client()
     fails = []
 
-
     def check(cond, msg):
         print(("OK  " if cond else "NG  ") + msg)
         if not cond:
             fails.append(msg)
 
-
-    # 入口（ログイン不要・1画面）
     r = client.get("/survey/")
     html = r.data.decode("utf-8")
     check(r.status_code == 200 and 'id="rq"' in html and "自動化依頼" in html and "パート" not in html and "rq-options" in html, "入口は1画面（定義を埋め込み）")
@@ -804,7 +715,6 @@ def smoke_request():
     r = client.post("/survey/api/tasks", json=task)
     check(r.status_code == 400 and r.get_json()["errors"].get("_") == "respondent", "依頼者未保存では業務を登録できない")
 
-    # あなたのこと
     r = client.post("/survey/api/respondent", json={"emp_id": "", "name": "x", "workplace_id": ""})
     j = r.get_json()
     check(r.status_code == 400 and {"emp_id", "workplace_id"} <= set(j["errors"]), "あなたのこと: 社員IDと職場の検証")
@@ -813,7 +723,6 @@ def smoke_request():
     r = client.post("/survey/api/respondent", json={"emp_id": "T001", "name": "試験 太郎", "workplace_id": 1})
     j = r.get_json()
     check(r.status_code == 200 and j["success"] and not j["resumed"] and j["respondent"]["name"] == "試験 太郎" and j["tasks"] == [] and "role" not in j["respondent"], "あなたのこと: 保存（役割・PC利用時間の項目はない）")
-    # 同姓同名・同じ職場でも社員IDが違えば別人
     client.post("/survey/api/reset")
     r = client.post("/survey/api/respondent", json={"emp_id": "T002", "name": "試験 太郎", "workplace_id": 1})
     j = r.get_json()
@@ -825,7 +734,6 @@ def smoke_request():
     j = r.get_json()
     check(r.status_code == 200 and j["resumed"], "T001 に戻る")
 
-    # 業務の登録・更新・削除
     r = client.post("/survey/api/tasks", json=dict(task, name="", frequency="週2回"))
     j = r.get_json()
     check(r.status_code == 400 and "name" in j["errors"] and "frequency" in j["errors"], "業務: 必須と選択肢の検証")
@@ -842,7 +750,6 @@ def smoke_request():
     j = r.get_json()
     check(r.status_code == 200 and len(j["tasks"]) == 1 and j["tasks"][0]["name"] == "2件目の業務", "業務: 削除")
 
-    # 関わり方・全体
     r = client.post("/survey/api/part-c", json={"c1_wish": "", "c2_skills": []})
     check(r.status_code == 400 and "c1_wish" in r.get_json()["errors"], "関わり方: 必須の検証")
     r = client.post("/survey/api/part-c", json={"c1_wish": "ぜひ取り組みたい", "c2_skills": ["Excel関数"], "c3_learn": ["Python"], "c4_hours": "1〜2時間", "c5_targets": "2件目の業務", "c6_share": "できる"})
@@ -854,7 +761,6 @@ def smoke_request():
         rsp = Respondent.query.filter_by(emp_id="T001").first()
         check(rsp.part_c_done and rsp.part_d_done and rsp.d1 == "総務へ毎月送っている" and Task.query.filter_by(respondent_id=rsp.id).count() == 1, "DB に保存されている")
 
-    # 同じ社員IDで再開 → 前回の内容が返る
     client.post("/survey/api/reset")
     r = client.get("/survey/")
     check('"respondent": null' in r.data.decode("utf-8"), "別の人: 状態が消える")
@@ -864,7 +770,6 @@ def smoke_request():
     r = client.get("/survey/")
     check('"name": "試験 太郎"' in r.data.decode("utf-8"), "再表示で状態が埋め込まれる")
 
-    # 月次に答えたことがある人は、社員IDだけで氏名・職場が入る
     with app.app_context():
         db.session.add(MonthlyResponse(period="2026-01", emp_id="M001", name="月次 花子", workplace_id=2, answers_json="{}"))
         db.session.commit()
@@ -873,7 +778,6 @@ def smoke_request():
     j = r.get_json()
     check(r.status_code == 200 and not j["resumed"] and j["respondent"]["name"] == "月次 花子" and j["respondent"]["workplace_id"] == 2, "月次の回答から氏名・職場を補う")
 
-    # ログイン後の案件一覧・詳細の文言
     client.post("/login", data={"emp_id": "admin", "password": "adminpass"})
     r = client.get("/cases/")
     html = r.data.decode("utf-8")
@@ -881,13 +785,7 @@ def smoke_request():
 
     return fails
 
-
 def smoke_writeback():
-    """書き戻し（writeback）のスモークテスト"""
-
-
-
-
     tmpdir = tempfile.mkdtemp()
     dbfile = os.path.join(tmpdir, "test.sqlite3").replace("\\", "/")
     app = create_app({"SQLALCHEMY_DATABASE_URI": "sqlite:///" + dbfile, "TESTING": True})
@@ -895,16 +793,13 @@ def smoke_writeback():
     client.post("/login", data={"emp_id": "admin", "password": "adminpass"})
     fails = []
 
-
     def check(cond, msg):
         print(("OK  " if cond else "NG  ") + msg)
         if not cond:
             fails.append(msg)
 
-
     client.post("/admin/demo/load")
 
-    # 書き戻し: 情報の流れ
     g = client.get("/bizmap/api/graph?kind=info").get_json()
     nodes = {n["id"]: n for n in g["nodes"]}
     with app.app_context():
@@ -912,7 +807,6 @@ def smoke_writeback():
         t2 = Task.query.filter_by(name="週報の作成").first()
         t3 = Task.query.filter_by(name="残業予定表の提出").first()
         t1_id, t2_id, t3_id = t1.id, t2.id, t3.id
-        # 自動生成の「次の業務」矢印（t1 -> t2）が存在することを確認
         check(f"t{t1_id}->t{t2_id}" in {e["id"] for e in g["edges"]}, "auto seq edge t1->t2 exists")
         sys_node = next(nid for nid, n in nodes.items() if n["cls"] == "system")
         ext_node = next(nid for nid, n in nodes.items() if n["cls"] == "ext")
@@ -932,11 +826,11 @@ def smoke_writeback():
             continue
         data["edges"].append(dict(e))
     manual = [
-        {"from": f"t{t1_id}", "to": f"t{t3_id}"},            # 業務→業務: 前後の業務
-        {"from": sys_node, "to": f"t{t3_id}"},                # システム→業務: 入力情報
-        {"from": src_node, "to": f"t{t3_id}"},                # 情報源→業務: 情報の受け取り元
-        {"from": f"t{t3_id}", "to": ext_node},                # 業務→他部署: 利用者
-        {"from": f"t{t3_id}", "to": "m_note1"},               # 業務→メモ: 後の業務
+        {"from": f"t{t1_id}", "to": f"t{t3_id}"},
+        {"from": sys_node, "to": f"t{t3_id}"},
+        {"from": src_node, "to": f"t{t3_id}"},
+        {"from": f"t{t3_id}", "to": ext_node},
+        {"from": f"t{t3_id}", "to": "m_note1"},
     ]
     for m in manual:
         data["edges"].append({"id": f"{m['from']}->{m['to']}", "from": m["from"], "to": m["to"], "label": m.get("label", ""), "kind": "manual", "source": "manual", "reversed": False, "label_edited": bool(m.get("label"))})
@@ -975,7 +869,6 @@ def smoke_writeback():
         check("他部署" in t3.output_users_list and t3.output_users_note, f"利用者: {t3.output_users_list} / {t3.output_users_note}")
         check("翌日の計画確認" in (t3.next_task or ""), f"next_task メモ: {t3.next_task}")
 
-    # 反映後に再生成すると、手動の矢印が自動の矢印として現れる（重複しない）
     g2 = client.get("/bizmap/api/graph?kind=info").get_json()
     eids = [e["id"] for e in g2["edges"]]
     check(len(eids) == len(set(eids)), "再生成後にエッジIDの重複なし")
@@ -993,8 +886,129 @@ def smoke_writeback():
 
     return fails
 
+def smoke_ai():
+    import urllib.request
 
-TESTS = [("smoke_bizmap_edit", smoke_bizmap_edit), ("smoke_board", smoke_board), ("smoke_errors", smoke_errors), ("smoke_login_monthly", smoke_login_monthly), ("smoke_request", smoke_request), ("smoke_writeback", smoke_writeback)]
+    import app as app_module
+
+    tmpdir = tempfile.mkdtemp()
+    dbfile = os.path.join(tmpdir, "test.sqlite3").replace("\\", "/")
+    app = create_app({"SQLALCHEMY_DATABASE_URI": "sqlite:///" + dbfile, "TESTING": True})
+    client = app.test_client()
+    client.post("/login", data={"emp_id": "admin", "password": "adminpass"})
+    fails = []
+
+    def check(cond, msg):
+        print(("OK  " if cond else "NG  ") + msg)
+        if not cond:
+            fails.append(msg)
+
+    URL = "https://ai.example.test/api/responses"
+
+    html = client.get("/admin/").data.decode("utf-8")
+    check(app_module.ai_enabled() is False and "OPENAI_API_URL が未設定" in html, "URL 未設定のときは ai_enabled=False、管理画面は『未設定（ルールベース）』")
+    conf.override("OPENAI_API_URL", URL)
+    conf.override("OPENAI_API_KEY", "test-key")
+    conf.override("OPENAI_MODEL", "gpt-6-test")
+    conf.override("OPENAI_REASONING_EFFORT", "low")
+    conf.override("OPENAI_MAX_OUTPUT_TOKENS", 4000)
+    conf.override("OPENAI_API_TIMEOUT", 90)
+    html = client.get("/admin/").data.decode("utf-8")
+    check(app_module.ai_enabled() is True and "ChatGPT API 連携 有効" in html and "gpt-6-test" in html and "Responses API" in html, "URL とキーがあれば有効。管理画面に『ChatGPT API 連携 有効（モデル名、Responses API）』")
+
+    calls, script = [], []
+
+    class _Resp:
+        def __init__(self, payload):
+            self.status = 200
+            self._body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+        def read(self):
+            return self._body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_urlopen(req, timeout=None):
+        raw = req.data.decode("utf-8")
+        calls.append({"url": req.full_url, "method": req.get_method(), "headers": {k.lower(): v for k, v in req.header_items()}, "body": json.loads(raw), "raw": raw, "timeout": timeout})
+        nxt = script.pop(0)
+        if isinstance(nxt, Exception):
+            raise nxt
+        return _Resp(nxt)
+
+    def message(text):
+        return {"id": "resp_1", "object": "response", "status": "completed", "error": None, "output": [{"type": "reasoning", "id": "rs_1", "summary": []}, {"type": "message", "id": "msg_1", "status": "completed", "role": "assistant", "content": [{"type": "output_text", "text": text, "annotations": []}]}]}
+
+    def http_error(code, body):
+        return urllib.error.HTTPError(URL, code, "error", {}, io.BytesIO(body.encode("utf-8")))
+
+    real_urlopen = urllib.request.urlopen
+    urllib.request.urlopen = fake_urlopen
+    try:
+        client.post("/admin/demo/load")
+        with app.app_context():
+            task = Task.query.order_by(Task.id).first()
+            domains = app_module.Domain.query.filter_by(parent_id=None).order_by(app_module.Domain.sort).all()
+            cands = app_module.related_tasks_for(task, limit=40)
+            ai_json = json.dumps({"domain": domains[0].name, "related": [cands[0].name] if cands else [], "summary": "テスト要約", "ecrs": {"eliminate": None, "combine": "結合のテスト", "rearrange": None, "simplify": None}, "automation": "Python で自動化", "flags": ["自動化候補"], "priority": "高", "questions": ["確認1"]}, ensure_ascii=False)
+
+            script.append(message("```json\n" + ai_json + "\n```"))
+            result = app_module.analyze_task(task, domains, cands)
+            c = calls[-1]
+            check(len(calls) == 1 and c["url"] == URL and c["method"] == "POST", "config の URL に POST する")
+            check(c["headers"].get("authorization") == "Bearer test-key" and c["headers"].get("content-type") == "application/json", "ヘッダーは Content-Type: application/json と Authorization: Bearer <キー>")
+            b = c["body"]
+            check(b["model"] == "gpt-6-test" and b["instructions"] and isinstance(b["input"], str) and task.name in b["input"] and b["max_output_tokens"] == 4000, "本文は model / instructions / input / max_output_tokens（Responses API）")
+            check(b.get("reasoning") == {"effort": "low"}, "reasoning.effort は config の OPENAI_REASONING_EFFORT")
+            check("temperature" not in b and "top_p" not in b and "temperature" not in c["raw"] and "top_p" not in c["raw"] and "messages" not in b and "max_tokens" not in b, "temperature / top_p / max_tokens / messages は送らない")
+            check(c["timeout"] == 90.0, "タイムアウトは config の OPENAI_API_TIMEOUT（既定 90 秒）")
+            check(result["source"] == "openai" and result["domain"] == domains[0].name and result["summary"] == "テスト要約" and result["priority"] == "高" and result["flags"] == ["自動化候補"] and result["ecrs"]["combine"] == "結合のテスト", "応答の JSON（```json 付き）を読んで結果に反映")
+
+            script.append(http_error(400, '{"error":{"message":"Unsupported parameter: reasoning is not supported with this model.","param":"reasoning"}}'))
+            script.append(message(ai_json))
+            result = app_module.analyze_task(task, domains, cands)
+            check(len(calls) == 3 and "reasoning" in calls[1]["body"] and "reasoning" not in calls[2]["body"] and result["source"] == "openai", "reasoning が 400 で拒否されたら、外して再試行して成功")
+
+            script.append(http_error(401, '{"error":{"message":"invalid api key"}}'))
+            result = app_module.analyze_task(task, domains, cands)
+            check(result["source"] == "rules" and len(calls) == 4, "401 のときは再試行せずルールベースで補う")
+            html = client.get("/admin/").data.decode("utf-8")
+            check("直近のエラー" in html and "401" in html, "管理画面の AI連携に直近のエラー（HTTP 401）が出る")
+            script.append({"id": "resp_r", "object": "response", "status": "completed", "error": None, "output": [{"type": "message", "id": "m", "status": "completed", "role": "assistant", "content": [{"type": "refusal", "refusal": "お答えできません"}]}]})
+            result = app_module.analyze_task(task, domains, cands)
+            check(result["source"] == "rules", "拒否（refusal）のときもルールベースで補う")
+            script.append(urllib.error.URLError("接続できない（テスト）"))
+            result = app_module.analyze_task(task, domains, cands)
+            check(result["source"] == "rules", "接続エラーのときもルールベースで補う")
+            script.append(message("これは JSON ではありません"))
+            result = app_module.analyze_task(task, domains, cands)
+            check(result["source"] == "rules", "JSON でない応答のときもルールベースで補う")
+            task_id = task.id
+
+        script.append(message(ai_json))
+        r = client.post(f"/cases/{task_id}/reanalyze", follow_redirects=True)
+        html = r.data.decode("utf-8")
+        check(r.status_code == 200 and "AI分析を更新しました（ChatGPT API）" in html and ">ChatGPT API</span>" in html and "テスト要約" in html, "案件詳細の再分析: ChatGPT API のバッジと結果")
+        html = client.get("/admin/").data.decode("utf-8")
+        check("直近のエラー" not in html, "成功すると直近のエラーは消える")
+        script.append(message(json.dumps([{"kind": "調査", "title": "テスト提案のタイトル", "detail": "根拠 12 件"}], ensure_ascii=False)))
+        r = client.post("/ai/suggest", follow_redirects=True)
+        html = r.data.decode("utf-8")
+        check(r.status_code == 200 and "テスト提案のタイトル" in html, "ダッシュボードの『AIで提案を生成』も Responses API 経由で出る")
+        check("temperature" not in calls[-1]["raw"] and calls[-1]["body"].get("reasoning") == {"effort": "low"}, "提案生成も temperature なし・reasoning あり")
+        check(not script, "用意した応答をすべて使った")
+    finally:
+        urllib.request.urlopen = real_urlopen
+        for k in ("OPENAI_API_URL", "OPENAI_API_KEY"):
+            conf.override(k, "")
+
+    return fails
+
+TESTS = [("smoke_bizmap_edit", smoke_bizmap_edit), ("smoke_board", smoke_board), ("smoke_errors", smoke_errors), ("smoke_login_monthly", smoke_login_monthly), ("smoke_request", smoke_request), ("smoke_writeback", smoke_writeback), ("smoke_ai", smoke_ai)]
 
 
 def _run_one(name):
@@ -1004,7 +1018,6 @@ def _run_one(name):
     for f in fails:
         print(" -", f)
     return 1 if fails else 0
-
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:

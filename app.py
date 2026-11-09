@@ -1,18 +1,4 @@
-"""PC定型業務ゼロ化プロジェクト ポータル（Flask + SQLite）。アプリ本体はこの1ファイル
-
-    flask --app app run --host 0.0.0.0 --port 5000                   開発用サーバー（ポートは --port で指定）
-    waitress-serve --host 0.0.0.0 --port 5000 --call app:create_app   本番用サーバー（waitress）
-    python app.py / python app.py serve                               上と同じ。ポートは config.py の PORT
-    python tests.py        スモークテスト
-
-設定は config.py、社員ID照会は ldap_auth.py、データは instance/portal.sqlite3。
-必要なパッケージ: pip install Flask Flask-SQLAlchemy waitress（AI連携を使うときは anthropic も）
-
-このファイルの構成（検索用の見出し）:
-  [設定] [選択肢・係数] [自動化依頼のフォーム定義] [データモデル] [社員ID照会の控え] [集計・分析]
-  [業務マップ] [AI連携] [初期データ・デモ・移行] [画面: ログイン / ダッシュボード / 自動化依頼 / 改善案件 / 業務マップ /
-  DX人財情報 / 管理 / 月次アンケート / 活動状況] [テンプレート] [静的ファイル] [アプリ生成] [起動]
-"""
+"""PC定型業務ゼロ化プロジェクト ポータル（Flask + SQLite）。アプリ本体はこの1ファイル。設定は config.py、社員ID照会は ldap_auth.py"""
 import csv
 import hashlib
 import hmac
@@ -24,6 +10,8 @@ import os
 import re
 import secrets
 import sys
+import urllib.error
+import urllib.request
 from collections import Counter, OrderedDict, defaultdict
 from datetime import datetime, timedelta
 
@@ -37,31 +25,23 @@ import ldap_auth
 log = logging.getLogger("portal")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# 以前はモジュールに分かれていた名前空間。1ファイルになったので、このモジュール自身を指す
-C = survey_spec = sys.modules[__name__]
+C = survey_spec = sys.modules[__name__]  # 旧モジュール名の別名
 
 
-# ==============================================================================
-# 設定（config.py の読み込み）
-# ==============================================================================
+# ===== 設定（config.py の読み込み） =====
 class _Conf:
-    """config.py の値を読む。conf.get(名前, 既定値)。テストは conf.override(名前, 値) で一時的に差し替える（config.py は書き換えない）"""
-
     def get(self, name, default=None):
         value = getattr(_config, name, default)
         return default if value is None else value
 
     def override(self, name, value):
-        setattr(_config, name, value)  # ldap_auth も同じ config モジュールを見るので、そちらにも効く
-
+        setattr(_config, name, value)  # ldap_auth も同じ config を見る
 
 conf = _Conf()
 
 
-# ==============================================================================
-# 選択肢・係数・しきい値（アンケート設計書に準拠）
-# ==============================================================================
-SEP = "|"  # 複数選択の区切り文字
+# ===== 選択肢・係数・しきい値（アンケート設計書に準拠） =====
+SEP = "|"
 
 
 def split_list(value):
@@ -69,10 +49,8 @@ def split_list(value):
         return []
     return [v for v in str(value).split(SEP) if v]
 
-
 def join_list(values):
     return SEP.join([v for v in values if v])
-
 
 # ---- パートB 業務の棚卸し ----
 OUTPUT_USERS = ["自分", "職場内", "上司", "他部署", "顧客・社外", "分からない"]
@@ -83,7 +61,6 @@ TOOLS = ["Excel", "Access", "メール", "社内システム", "紙", "VBA・マ
 NATURES = ["転記・コピー", "集計・グラフ作成", "資料作成", "確認・チェック", "データ取得", "メール・配布", "台帳更新", "判断を伴う"]
 PAINS = ["時間がかかる", "ミスが起きやすい", "同じ情報を何度も入力する", "手順が人によって違う", "急ぎで割り込まれる", "何のためか分からない", "特になし"]
 WISHES = ["なくしたい", "減らしたい", "自動化したい", "このままでよい", "分からない"]
-# ヒト・情報の流れ（B17・B18）
 SYSTEM_SOURCES = {"生産管理システム", "品質システム", "設備データ"}
 SELF_IMPROVE = ["取り組みたい", "教えてもらえれば取り組みたい", "改善チームに任せたい", "分からない"]
 
@@ -100,14 +77,14 @@ FREQ_COEF = {
     "毎週": 4.0,
     "毎月": 1.0,
     "四半期・年次": 0.3,
-    "不定期": 0.0,  # 個別確認
+    "不定期": 0.0,
 }
 DURATION_MINUTES = {
     "15分未満": 10.0,
     "15〜30分": 22.0,
     "30分〜1時間": 45.0,
     "1〜2時間": 90.0,
-    "2時間以上": 150.0,  # 個別確認（暫定値）
+    "2時間以上": 150.0,
 }
 
 # ---- 案件管理 ----
@@ -129,7 +106,6 @@ ECRS = [
 ]
 
 # ---- 活動状況（製造部全体に公開する、案件の進み具合）----
-# key, 表示名, この段階でやること, 対応する標準手順
 STAGES = [
     ("start", "開始", "依頼を受け付け、活動状況に載せる", ""),
     ("request", "要求定義", "何に困っていて、何を実現したいかを依頼者と整理する", "手順1・2（アウトプットの確認・目的の明確化）"),
@@ -142,17 +118,14 @@ STAGES = [
 STAGE_KEYS = [s[0] for s in STAGES]
 STAGE_INDEX = {k: i for i, k in enumerate(STAGE_KEYS)}
 STAGE_NAMES = {s[0]: s[1] for s in STAGES}
-BUILD_STAGE_SELF = "伴走"  # 自主改善の案件では「作成」を「伴走」と表示する
+BUILD_STAGE_SELF = "伴走"
 
-# 改善案件候補とみなす改善希望
 CANDIDATE_WISHES = {"なくしたい", "減らしたい", "自動化したい"}
 SELF_IMPROVE_POSITIVE = {"取り組みたい", "教えてもらえれば取り組みたい"}
 C1_POSITIVE = {"ぜひ取り組みたい", "教えてもらえれば取り組みたい"}
 
 # ---- 分析不足領域の判定しきい値 ----
-# (最小件数, 最小充足率) を満たせば次の段階へ
 ANALYSIS_LEVELS = [
-    # level, 分析状態, 業務把握, 判定（件数, 充足率）
     (3, "分析済み", "十分", 8, 0.8),
     (2, "追加調査", "一部", 3, 0.5),
     (1, "情報不足", "不十分", 1, 0.0),
@@ -164,19 +137,19 @@ ANALYSIS_LEVELS = [
 AI_FLAGS = ["目的不明", "廃止候補", "統合候補", "重複入力候補", "自動化候補", "判断業務", "要ヒアリング"]
 
 # ---- 月次アンケート（voiceloop 方式: 月度ごとの設問セット。基本設問は毎月同じで KPI につなぐ） ----
-SHIFTS_PER_MONTH = 20  # 1か月の出勤日数の目安（推計月間時間 ＝ 1シフトあたり時間の換算値 × これ）
-MONTHLY_HOURS_VALUE = {"0時間": 0.0, "30分未満": 0.25, "30分〜1時間": 0.75, "1〜2時間": 1.5, "2〜4時間": 3.0, "4時間以上": 5.0}  # 1シフトあたりの換算値（時間）
+SHIFTS_PER_MONTH = 20
+MONTHLY_HOURS_VALUE = {"0時間": 0.0, "30分未満": 0.25, "30分〜1時間": 0.75, "1〜2時間": 1.5, "2〜4時間": 3.0, "4時間以上": 5.0}
 MONTHLY_CORE_QUESTIONS = [
     {"key": "has", "type": "choice", "text": "PCでおこなう定型業務（繰り返しの手動作業）はありますか", "options": ["ある", "少しある", "ない"], "required": True},
     {"key": "hours", "type": "choice", "text": "1シフト（1出勤）あたり、PCの定型業務を行っている時間は", "options": list(MONTHLY_HOURS_VALUE), "required": True},
     {"key": "trend", "type": "choice", "text": "先月と比べて、PC定型業務は", "options": ["減った", "変わらない", "増えた"], "required": True},
     {"key": "new_tasks", "type": "text", "text": "増えたPC定型業務名", "required": False, "placeholder": "例：新しい報告フォーマットへの転記",
-     "depends": {"key": "trend", "show_if": ["増えた"], "required": True}},  # M3 が「増えた」のときだけ出す（出たら必須）
+     "depends": {"key": "trend", "show_if": ["増えた"], "required": True}},
     {"key": "wants", "type": "choice", "text": "なくしたい・自動化したいPC定型業務はありますか", "options": ["ある", "ない"], "required": True},
     {"key": "wants_tasks", "type": "text", "text": "あれば、その業務名（1行に1件）", "required": False, "placeholder": "例：日報の実績をExcelに転記する",
-     "depends": {"key": "wants", "show_if": ["ある"], "required": True}},  # M4 が「ある」のときだけ出す（出たら必須）
+     "depends": {"key": "wants", "show_if": ["ある"], "required": True}},
     {"key": "stance", "type": "choice", "text": "どのように進めたいですか", "options": ["自分で取り組みたい", "改善チームに依頼したい"], "required": False,
-     "depends": {"key": "wants", "show_if": ["ある"], "required": True}},  # M4 が「ある」のときだけ出す（出たら必須）。頼みたいタイプか自分でやりたいタイプかを見る
+     "depends": {"key": "wants", "show_if": ["ある"], "required": True}},
 ]
 MONTHLY_CORE_KEYS = {q["key"] for q in MONTHLY_CORE_QUESTIONS}
 MONTHLY_KPI_LABELS = {
@@ -199,17 +172,9 @@ MONTHLY_KPI = {
 }
 
 
-# ==============================================================================
-# 自動化依頼（1画面）のフォーム定義
-# ==============================================================================
-# ------------------------------------------------------------
-# 自動化依頼（1画面）のフォーム定義。画面はこれを読んで入力欄を描く
-#   type: text / textarea / number / select / choice（1つ選ぶ）/ multi（複数選ぶ）
-#   options: 選択肢のリスト、または "workplaces" / "domains"（マスタから）
-# ------------------------------------------------------------
+# ===== 自動化依頼（1画面）のフォーム定義 =====
 PERSON_FIELDS = [
     {"key": "emp_id", "type": "text", "label": "社員ID", "required": True, "lookup": True, "placeholder": "例：E001"},
-    # 氏名・職場は社員IDから照会して表示する。見つからないときだけ入力欄を出す
     {"key": "name", "type": "text", "label": "氏名", "required": True, "fallback": True},
     {"key": "workplace_id", "type": "select", "label": "職場", "required": True, "options": "workplaces"},
 ]
@@ -275,15 +240,11 @@ D_FIELDS = [
 ]
 
 
-# ==============================================================================
-# データモデル（SQLite）
-# ==============================================================================
+# ===== データモデル（SQLite） =====
 db = SQLAlchemy()
 
 
 class Workplace(db.Model):
-    """職場マスタ"""
-
     __tablename__ = "workplaces"
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(100), unique=True, nullable=False)
@@ -291,10 +252,7 @@ class Workplace(db.Model):
 
     respondents = db.relationship("Respondent", back_populates="workplace")
 
-
 class Domain(db.Model):
-    """業務領域（業務体系の大分類・中分類）"""
-
     __tablename__ = "domains"
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(100), nullable=False)
@@ -309,19 +267,15 @@ class Domain(db.Model):
     def is_top(self):
         return self.parent_id is None
 
-
 class Respondent(db.Model):
-    """回答者（自動化依頼を出した人。あなたのこと・関わり方・全体のこと）"""
-
     __tablename__ = "respondents"
     id = db.Column(db.Integer, primary_key=True)
-    emp_id = db.Column(db.String(50))  # 社員ID（社員マスタ・LDAP照会と紐づく）
+    emp_id = db.Column(db.String(50))
     name = db.Column(db.String(100), nullable=False)
     workplace_id = db.Column(db.Integer, db.ForeignKey("workplaces.id"))
     created_at = db.Column(db.DateTime, default=datetime.now)
     is_demo = db.Column(db.Boolean, default=False)
 
-    # パートC
     c1_wish = db.Column(db.String(50))
     c2_skills = db.Column(db.Text, default="")
     c3_learn = db.Column(db.Text, default="")
@@ -330,7 +284,6 @@ class Respondent(db.Model):
     c6_share = db.Column(db.String(50))
     part_c_done = db.Column(db.Boolean, default=False)
 
-    # パートD
     d1 = db.Column(db.Text, default="")
     d2 = db.Column(db.Text, default="")
     d3 = db.Column(db.Text, default="")
@@ -350,7 +303,6 @@ class Respondent(db.Model):
 
     @property
     def wants_to_improve(self):
-        """自主改善希望者か（C1 または いずれかの業務の B15）"""
         if self.c1_wish in C.C1_POSITIVE:
             return True
         return any(t.self_improve in C.SELF_IMPROVE_POSITIVE for t in self.tasks)
@@ -359,57 +311,50 @@ class Respondent(db.Model):
     def total_minutes(self):
         return sum(t.monthly_minutes or 0 for t in self.tasks)
 
-
 class Task(db.Model):
-    """PC業務（1業務＝1件）。登録された業務はそのまま改善案件の候補になる。"""
-
     __tablename__ = "tasks"
     id = db.Column(db.Integer, primary_key=True)
     respondent_id = db.Column(db.Integer, db.ForeignKey("respondents.id"), nullable=False)
     workplace_id = db.Column(db.Integer, db.ForeignKey("workplaces.id"))
     is_demo = db.Column(db.Boolean, default=False)
 
-    # パートB
-    name = db.Column(db.String(200), nullable=False)  # B1
-    domain_id = db.Column(db.Integer, db.ForeignKey("domains.id"))  # B2
-    purpose = db.Column(db.Text, default="")  # B3
-    output = db.Column(db.Text, default="")  # B4
-    output_users = db.Column(db.Text, default="")  # B5 複数選択
+    name = db.Column(db.String(200), nullable=False)
+    domain_id = db.Column(db.Integer, db.ForeignKey("domains.id"))
+    purpose = db.Column(db.Text, default="")
+    output = db.Column(db.Text, default="")
+    output_users = db.Column(db.Text, default="")
     output_users_note = db.Column(db.Text, default="")
-    inputs = db.Column(db.Text, default="")  # B6 複数選択
+    inputs = db.Column(db.Text, default="")
     inputs_note = db.Column(db.Text, default="")
-    prev_task = db.Column(db.Text, default="")  # B7
+    prev_task = db.Column(db.Text, default="")
     next_task = db.Column(db.Text, default="")
-    frequency = db.Column(db.String(30))  # B8
-    duration = db.Column(db.String(30))  # B9
-    headcount = db.Column(db.Integer, default=1)  # B10
-    tools = db.Column(db.Text, default="")  # B11
-    nature = db.Column(db.Text, default="")  # B12
-    pains = db.Column(db.Text, default="")  # B13
+    frequency = db.Column(db.String(30))
+    duration = db.Column(db.String(30))
+    headcount = db.Column(db.Integer, default=1)
+    tools = db.Column(db.Text, default="")
+    nature = db.Column(db.Text, default="")
+    pains = db.Column(db.Text, default="")
     pains_note = db.Column(db.Text, default="")
-    wish = db.Column(db.String(30))  # B14
-    self_improve = db.Column(db.String(50))  # B15
-    note = db.Column(db.Text, default="")  # B16
+    wish = db.Column(db.String(30))
+    self_improve = db.Column(db.String(50))
+    note = db.Column(db.Text, default="")
 
-    # ヒト・情報の流れ（B17・B18）
-    actors = db.Column(db.Text, default="")  # B17 関わる人・部署（「、」区切り）
-    info_from = db.Column(db.Text, default="")  # B18 情報の受け取り元（部署・人・システム・帳票）
+    actors = db.Column(db.Text, default="")
+    info_from = db.Column(db.Text, default="")
 
     monthly_minutes = db.Column(db.Float, default=0.0)
 
-    # AI分析
     ai_domain = db.Column(db.String(100))
-    ai_related = db.Column(db.Text)  # JSON list
+    ai_related = db.Column(db.Text)
     ai_summary = db.Column(db.Text)
-    ai_ecrs = db.Column(db.Text)  # JSON dict
-    ai_flags = db.Column(db.Text)  # JSON list
+    ai_ecrs = db.Column(db.Text)
+    ai_flags = db.Column(db.Text)
     ai_priority = db.Column(db.String(10))
     ai_source = db.Column(db.String(20))
     ai_at = db.Column(db.DateTime)
 
-    # 案件管理
     status = db.Column(db.String(20), default="受付")
-    steps_done = db.Column(db.String(50), default="")  # "1|2|3"
+    steps_done = db.Column(db.String(50), default="")
     decision = db.Column(db.String(20), default="未定")
     assignment = db.Column(db.String(20), default="未定")
     assignee = db.Column(db.String(100), default="")
@@ -417,16 +362,15 @@ class Task(db.Model):
     ecrs_combine = db.Column(db.Text, default="")
     ecrs_rearrange = db.Column(db.Text, default="")
     ecrs_simplify = db.Column(db.Text, default="")
-    after_minutes = db.Column(db.Float, nullable=True)  # 改善後の月間時間
+    after_minutes = db.Column(db.Float, nullable=True)
     result_note = db.Column(db.Text, default="")
     completed_at = db.Column(db.DateTime, nullable=True)
-    verified = db.Column(db.Boolean, default=False)  # 推進メンバー確認済み
+    verified = db.Column(db.Boolean, default=False)
     verified_by = db.Column(db.String(100), default="")
 
-    # 活動状況（開始 → 要求定義 → 要件定義 → 作成/伴走 → テスト → 確認 → 完了）
     stage = db.Column(db.String(20), default="start")
-    stage_at = db.Column(db.DateTime, nullable=True)  # 現在の段階に入った日時
-    progress_note = db.Column(db.Text, default="")  # 活動状況に出すひとこと（今の状況・次の予定）
+    stage_at = db.Column(db.DateTime, nullable=True)
+    progress_note = db.Column(db.Text, default="")
 
     created_at = db.Column(db.DateTime, default=datetime.now)
     updated_at = db.Column(db.DateTime, default=datetime.now, onupdate=datetime.now)
@@ -480,7 +424,6 @@ class Task(db.Model):
 
     @property
     def required_filled(self):
-        """B2〜B9 の必須項目が埋まっているか（業務情報の充足判定）"""
         return bool(
             self.domain_id
             and (self.purpose or "").strip()
@@ -502,7 +445,6 @@ class Task(db.Model):
 
     @property
     def is_candidate(self):
-        """改善案件候補か（改善希望あり、または困りごとあり）"""
         if self.wish in C.CANDIDATE_WISHES:
             return True
         pains = [p for p in self.pains_list if p != "特になし"]
@@ -510,7 +452,6 @@ class Task(db.Model):
 
     @property
     def is_elimination_candidate(self):
-        """廃止・統合候補か（目的不明・利用者不明・重複入力の指摘）"""
         return (
             self.purpose_unknown
             or "分からない" in self.output_users_list
@@ -528,7 +469,6 @@ class Task(db.Model):
         return C.STAGE_INDEX[self.stage_key]
 
     def stage_label(self, key):
-        """段階の表示名。自主改善の案件では「作成」を「伴走」と表示する"""
         if key == "build" and self.assignment == "自主改善":
             return C.BUILD_STAGE_SELF
         return C.STAGE_NAMES.get(key, key)
@@ -543,7 +483,6 @@ class Task(db.Model):
 
     @property
     def stage_dates(self):
-        """段階ごとに最後に入った日時 {key: datetime}。「開始」は登録日で補う"""
         dates = {"start": self.created_at}
         for log in self.stage_logs:
             dates[log.stage] = log.at
@@ -556,7 +495,6 @@ class Task(db.Model):
         return self.stage_at or self.stage_dates.get(self.stage_key) or self.created_at
 
     def set_stage(self, key, by="", note=""):
-        """段階を変える。ステータスを同期し、履歴（StageLog）を残す。変わったとき True"""
         if key not in C.STAGE_INDEX:
             return False
         changed = key != self.stage_key
@@ -565,7 +503,6 @@ class Task(db.Model):
             self.stage = key
             self.stage_at = now
             self.stage_logs.append(StageLog(stage=key, at=now, by=by or "", note=note or ""))
-        # ステータスの同期（保留はそのまま）
         if key == "done":
             if self.status != "完了":
                 self.completed_at = datetime.now()
@@ -613,10 +550,7 @@ class Task(db.Model):
         self.ai_source = result.get("source") or ""
         self.ai_at = datetime.now()
 
-
 class StageLog(db.Model):
-    """案件の段階が変わった履歴（活動状況の日付・最近の動きに使う）"""
-
     __tablename__ = "stage_logs"
     id = db.Column(db.Integer, primary_key=True)
     task_id = db.Column(db.Integer, db.ForeignKey("tasks.id"), nullable=False, index=True)
@@ -631,10 +565,7 @@ class StageLog(db.Model):
     def stage_name(self):
         return self.task.stage_label(self.stage) if self.task else C.STAGE_NAMES.get(self.stage, self.stage)
 
-
 class Setting(db.Model):
-    """アプリ設定（キー・値）"""
-
     __tablename__ = "settings"
     key = db.Column(db.String(50), primary_key=True)
     value = db.Column(db.Text, default="")
@@ -657,10 +588,7 @@ class Setting(db.Model):
     def as_dict():
         return {s.key: s.value for s in Setting.query.all()}
 
-
 class Employee(db.Model):
-    """社員マスタ（LDAP API の照会結果のキャッシュ、または CSV 取込）"""
-
     __tablename__ = "employees"
     id = db.Column(db.Integer, primary_key=True)
     emp_id = db.Column(db.String(50), unique=True, nullable=False)
@@ -669,19 +597,16 @@ class Employee(db.Model):
     workplace_id = db.Column(db.Integer, db.ForeignKey("workplaces.id"), nullable=True)
     email = db.Column(db.String(200), default="")
     active = db.Column(db.Boolean, default=True)
-    source = db.Column(db.String(20), default="csv")  # csv / ldap / manual
+    source = db.Column(db.String(20), default="csv")
     is_demo = db.Column(db.Boolean, default=False)
     updated_at = db.Column(db.DateTime, default=datetime.now, onupdate=datetime.now)
 
     workplace = db.relationship("Workplace")
 
-
 class MonthlySurvey(db.Model):
-    """月度ごとの設問セット（voiceloop の surveys に相当）"""
-
     __tablename__ = "monthly_surveys"
     id = db.Column(db.Integer, primary_key=True)
-    period = db.Column(db.String(7), unique=True, nullable=False)  # "2026-11"
+    period = db.Column(db.String(7), unique=True, nullable=False)
     questions_json = db.Column(db.Text, default="[]")
     is_active = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime, default=datetime.now)
@@ -704,10 +629,7 @@ class MonthlySurvey(db.Model):
     def period_label(self):
         return period_label(self.period)
 
-
 class MonthlyResponse(db.Model):
-    """月次アンケートの回答（〇月度 × 社員ID で1件。1人1回）"""
-
     __tablename__ = "monthly_responses"
     __table_args__ = (db.UniqueConstraint("period", "emp_id", name="uq_monthly_period_emp"),)
     id = db.Column(db.Integer, primary_key=True)
@@ -717,7 +639,7 @@ class MonthlyResponse(db.Model):
     workplace_id = db.Column(db.Integer, db.ForeignKey("workplaces.id"), nullable=True)
     respondent_id = db.Column(db.Integer, db.ForeignKey("respondents.id"), nullable=True)
     survey_id = db.Column(db.Integer, db.ForeignKey("monthly_surveys.id"), nullable=True)
-    answers_json = db.Column(db.Text, default="{}")  # {設問キー: 回答（選択肢の文言 or 記述）}
+    answers_json = db.Column(db.Text, default="{}")
     comment = db.Column(db.Text, default="")
     created_at = db.Column(db.DateTime, default=datetime.now)
     updated_at = db.Column(db.DateTime, default=datetime.now, onupdate=datetime.now)
@@ -739,13 +661,11 @@ class MonthlyResponse(db.Model):
 
     @property
     def hours_shift(self):
-        """1シフトあたりの換算時間（推計月間時間 ＝ これ × SHIFTS_PER_MONTH）"""
         return C.MONTHLY_HOURS_VALUE.get(self.answer("hours"), 0.0)
 
     @property
     def period_label(self):
         return period_label(self.period)
-
 
 def period_label(period):
     try:
@@ -754,21 +674,16 @@ def period_label(period):
     except (ValueError, AttributeError):
         return period or ""
 
-
 class FlowMap(db.Model):
-    """業務マップ（流れ図）の手修正。絞り込み（職場・領域）ごとに1件（kind は "info" のみ）"""
-
     __tablename__ = "flow_maps"
     __table_args__ = (db.UniqueConstraint("kind", "scope", name="uq_flow_map_kind_scope"),)
     id = db.Column(db.Integer, primary_key=True)
-    kind = db.Column(db.String(20), nullable=False)  # "info"（業務マップ）
-    scope = db.Column(db.String(60), nullable=False)  # "wp:0|dom:0" など
-    data = db.Column(db.Text, default="{}")  # グラフ JSON（位置・名前・追加・削除・向き）
+    kind = db.Column(db.String(20), nullable=False)
+    scope = db.Column(db.String(60), nullable=False)
+    data = db.Column(db.Text, default="{}")
     updated_by = db.Column(db.String(100), default="")
     updated_at = db.Column(db.DateTime, default=datetime.now, onupdate=datetime.now)
 
-
-# 既存DBに後から追加した列（SQLite は create_all で列を追加しないため起動時に補う）
 _ADDED_COLUMNS = {
     "respondents": {
         "emp_id": "VARCHAR(50)",
@@ -787,7 +702,6 @@ _ADDED_COLUMNS = {
     },
 }
 
-# 列を追加した直後に、既存の行を埋める SQL（(テーブル, 列) → SQL のリスト）
 _BACKFILL = {
     ("tasks", "stage"): [
         "UPDATE tasks SET stage = CASE status WHEN '完了' THEN 'done' WHEN '対応中' THEN 'request' ELSE 'start' END WHERE stage IS NULL",
@@ -797,12 +711,10 @@ _BACKFILL = {
 }
 
 
-# なくした機能のテーブル（起動時に片づける）: 教材・勉強会の登録、ログイン許可リスト、メール配信の履歴
 _DROPPED_TABLES = ("resources", "allowed_users", "mail_logs")
 
 
 def ensure_schema():
-    """テーブル作成後に、不足している列を ALTER TABLE で追加し、なくした機能のテーブルを落とす。"""
     from sqlalchemy import inspect, text
 
     inspector = inspect(db.engine)
@@ -827,15 +739,11 @@ def ensure_schema():
     if changed:
         db.session.commit()
 
-
-# ==============================================================================
-# 社員ID照会の控え（ldap_auth の結果を employees に残し、足りない氏名・職場を補う）
-# ==============================================================================
-ldap_status_text = ldap_auth.status_text  # 管理画面に出す接続状態
+# ===== 社員ID照会の控え（ldap_auth の結果を employees に残し、足りない氏名・職場を補う） =====
+ldap_status_text = ldap_auth.status_text
 
 
 def workplace_for(department):
-    """所属名から職場マスタを推定する（名前の包含で一致）"""
     department = (department or "").strip()
     if not department:
         return None
@@ -843,7 +751,6 @@ def workplace_for(department):
         if w.name == department or w.name in department or department in w.name:
             return w
     return None
-
 
 def _upsert(info, source):
     emp = Employee.query.filter_by(emp_id=info["emp_id"]).first()
@@ -860,9 +767,7 @@ def _upsert(info, source):
     db.session.commit()
     return emp
 
-
 def lookup(emp_id):
-    """社員IDから社員情報を返す。見つからなければ None。"""
     emp_id = (emp_id or "").strip()
     if not emp_id:
         return None
@@ -874,7 +779,7 @@ def lookup(emp_id):
     if emp is None:
         return None
     name, workplace_id = emp.name or "", emp.workplace_id
-    if not name or not workplace_id:  # 照会に氏名・職場がないときは、本人が以前に答えた内容で補う
+    if not name or not workplace_id:
         r_name, r_wp = remembered_person(emp_id)
         name, workplace_id = name or r_name, workplace_id or r_wp
     workplace = db.session.get(Workplace, workplace_id) if workplace_id else None
@@ -888,9 +793,7 @@ def lookup(emp_id):
         "source": emp.source,
     }
 
-
 def remembered_person(emp_id):
-    """本人が以前に答えた氏名・職場（自動化依頼の登録 → 直近の月次回答 の順）。なければ ("", None)"""
     emp_id = (emp_id or "").strip()
     name, workplace_id = "", None
     if not emp_id:
@@ -906,9 +809,7 @@ def remembered_person(emp_id):
                 break
     return name, workplace_id
 
-
 def remember_person(emp_id, name=None, workplace_id=None):
-    """本人がアンケートで入力・選択した氏名・職場を社員情報の控えに残す（照会に氏名・職場がない環境向け）。commit は呼び出し側"""
     emp = Employee.query.filter_by(emp_id=(emp_id or "").strip()).first()
     if emp is None:
         return False
@@ -921,20 +822,14 @@ def remember_person(emp_id, name=None, workplace_id=None):
         changed = True
     return changed
 
-
-# ==============================================================================
-# 集計・KPI・分析不足領域の判定・次アクション提案
-# ==============================================================================
+# ===== 集計・KPI・分析不足領域の判定・次アクション提案 =====
 def _to_int(value, default=0):
     try:
         return int(value)
     except (TypeError, ValueError):
         return default
 
-
-# ------------------------------------------------------------
-# KPI
-# ------------------------------------------------------------
+# ----- KPI -----
 def kpis():
     tasks = Task.query.all()
     respondents = Respondent.query.all()
@@ -976,10 +871,7 @@ def kpis():
         "ai_count": len([t for t in tasks if t.ai_source]),
     }
 
-
-# ------------------------------------------------------------
-# 職場別・領域別
-# ------------------------------------------------------------
+# ----- 職場別・領域別 -----
 def workplace_stats():
     rows = []
     for wp in Workplace.query.order_by(Workplace.sort, Workplace.id).all():
@@ -997,16 +889,13 @@ def workplace_stats():
         )
     return rows
 
-
 def judge_level(count, fill_rate):
     for level, state, grasp, min_count, min_fill in C.ANALYSIS_LEVELS:
         if count >= min_count and fill_rate >= min_fill:
             return level, state, grasp
     return 0, "未分析", "不明"
 
-
 def domain_analysis():
-    """業務領域ごとの登録状況と分析不足の判定（企画書 柱② 3. 分析不足領域の見える化）"""
     rows = []
     domains = Domain.query.filter_by(parent_id=None).order_by(Domain.sort, Domain.id).all()
     for d in domains:
@@ -1020,7 +909,6 @@ def domain_analysis():
         verified_rate = (verified / count) if count else 0.0
         level, state, grasp = judge_level(count, fill_rate)
         if count and verified_rate < 0.5 and level == 3:
-            # 必須項目は埋まっているが担当者確認が進んでいない
             level, state = 2, "追加調査"
         rows.append(
             {
@@ -1038,21 +926,16 @@ def domain_analysis():
         )
     return rows
 
-
-# ------------------------------------------------------------
-# 案件候補・重複候補・つながり
-# ------------------------------------------------------------
+# ----- 案件候補・重複候補・つながり -----
 def candidate_tasks(limit=None):
     tasks = [t for t in Task.query.all() if t.is_candidate and t.status != "完了"]
     tasks.sort(key=lambda t: t.monthly_minutes or 0, reverse=True)
     return tasks[:limit] if limit else tasks
 
-
 def elimination_candidates():
     tasks = [t for t in Task.query.all() if t.is_elimination_candidate and t.status != "完了"]
     tasks.sort(key=lambda t: t.monthly_minutes or 0, reverse=True)
     return tasks
-
 
 _NORMALIZE_RE = re.compile(r"[\s　（）()・,、。.／/\-−―「」『』]")
 
@@ -1061,9 +944,7 @@ def normalize_text(value):
     value = (value or "").strip().lower()
     return _NORMALIZE_RE.sub("", value)
 
-
 def duplicate_output_groups(min_size=2):
-    """同じアウトプットを複数の人が作っている業務群（ECRSの結合候補）"""
     groups = defaultdict(list)
     for t in Task.query.all():
         key = normalize_text(t.output)
@@ -1077,16 +958,13 @@ def duplicate_output_groups(min_size=2):
     result.sort(key=lambda g: g["minutes"], reverse=True)
     return result
 
-
 def duplicate_input_tasks():
-    """「同じ情報を何度も入力する」と回答された業務（入力元別）"""
     rows = defaultdict(list)
     for t in Task.query.all():
         if "同じ情報を何度も入力する" in t.pains_list:
             key = "・".join(t.inputs_list) or "入力元不明"
             rows[key].append(t)
     return sorted(rows.items(), key=lambda kv: -len(kv[1]))
-
 
 def input_source_stats():
     counter = Counter()
@@ -1097,9 +975,7 @@ def input_source_stats():
             minutes[src] += t.monthly_minutes or 0
     return [(k, counter[k], minutes[k]) for k in sorted(counter, key=lambda k: -counter[k])]
 
-
 def flow_rows(domain_id=None):
-    """前の業務 → 業務 → 後の業務 の一覧（業務フロー可視化の材料）"""
     q = Task.query
     if domain_id:
         q = q.filter_by(domain_id=domain_id)
@@ -1109,9 +985,7 @@ def flow_rows(domain_id=None):
             rows.append(t)
     return rows
 
-
 def related_tasks_for(task, limit=8):
-    """語の重なり・入出力の共通性から関連業務を推定する（ルールベース）"""
     words = _content_words(task.name + " " + (task.output or "") + " " + (task.purpose or ""))
     scored = []
     for other in Task.query.filter(Task.id != task.id).all():
@@ -1133,7 +1007,6 @@ def related_tasks_for(task, limit=8):
     scored.sort(key=lambda x: -x[0])
     return [o for _, o in scored[:limit]]
 
-
 _WORD_RE = re.compile(r"[一-龥ぁ-んァ-ヶーA-Za-z0-9]{2,}")
 _STOPWORDS = {"する", "した", "して", "ため", "こと", "もの", "から", "まで", "ます", "です", "いる", "ある", "など", "作成", "業務", "確認"}
 
@@ -1144,16 +1017,12 @@ def _content_words(text):
         if w in _STOPWORDS:
             continue
         words.add(w)
-        # 漢字の連なりは2文字ずつにも分解して部分一致を拾う
         if len(w) >= 4 and re.fullmatch(r"[一-龥]+", w):
             for i in range(0, len(w) - 1):
                 words.add(w[i : i + 2])
     return words
 
-
-# ------------------------------------------------------------
-# DX人財情報
-# ------------------------------------------------------------
+# ----- DX人財情報 -----
 def skills_summary():
     have = Counter()
     learn = Counter()
@@ -1164,7 +1033,6 @@ def skills_summary():
             learn[s] += 1
     return have, learn
 
-
 def self_improvers():
     rows = []
     for r in Respondent.query.order_by(Respondent.workplace_id, Respondent.name).all():
@@ -1174,12 +1042,7 @@ def self_improvers():
         rows.append({"respondent": r, "tasks": target_tasks})
     return rows
 
-
 def dx_people(workplace_id=None, wish=None):
-    """DX人財情報: 自動化依頼の「改善への関わり方」と月次アンケート（改善をどう進めたいか）を人ごとにまとめる
-
-    wish: "positive"（自分で改善したい人）または C1 の選択肢の文言
-    """
     people = {}
 
     def key_for(emp_id, name):
@@ -1229,15 +1092,11 @@ def dx_people(workplace_id=None, wish=None):
     rows.sort(key=lambda p: (not p["positive"], wish_rank.get(p["wish"], 9), stance_rank.get(p["stance_latest"], 9), p["workplace_id"] or 0, p["name"]))
     return rows
 
-
-# ------------------------------------------------------------
-# 次のアクション提案（ルールベース）
-# ------------------------------------------------------------
+# ----- 次のアクション提案（ルールベース） -----
 def suggest_actions(limit=10):
     suggestions = []
     tasks = Task.query.all()
 
-    # 1. 分析不足領域 → ヒアリング
     for row in domain_analysis():
         if row["level"] <= 1:
             suggestions.append(
@@ -1249,7 +1108,6 @@ def suggest_actions(limit=10):
                 }
             )
 
-    # 2. 月間時間の大きい案件候補 → 優先案件
     for t in candidate_tasks(limit=3):
         suggestions.append(
             {
@@ -1260,7 +1118,6 @@ def suggest_actions(limit=10):
             }
         )
 
-    # 3. 目的不明・利用者不明 → 廃止候補
     unknown = [t for t in tasks if (t.purpose_unknown or "分からない" in t.output_users_list) and t.status != "完了"]
     if unknown:
         names = "、".join(t.name for t in unknown[:3])
@@ -1273,7 +1130,6 @@ def suggest_actions(limit=10):
             }
         )
 
-    # 4. 重複入力 → 共通化
     dup_inputs = duplicate_input_tasks()
     total_dup = sum(len(v) for _, v in dup_inputs)
     if total_dup:
@@ -1287,7 +1143,6 @@ def suggest_actions(limit=10):
             }
         )
 
-    # 5. 同じアウトプットを複数人が作成 → 統合
     for g in duplicate_output_groups()[:2]:
         suggestions.append(
             {
@@ -1298,7 +1153,6 @@ def suggest_actions(limit=10):
             }
         )
 
-    # 6. 案件が集中する領域 → プロセス再設計
     for row in domain_analysis():
         if row["candidates"] >= 5:
             suggestions.append(
@@ -1310,7 +1164,6 @@ def suggest_actions(limit=10):
                 }
             )
 
-    # 7. 学びたい技術 → 教育テーマ
     _, learn = skills_summary()
     if learn:
         skill, n = learn.most_common(1)[0]
@@ -1323,7 +1176,6 @@ def suggest_actions(limit=10):
             }
         )
 
-    # 8. 未回答の職場
     quiet = [w["workplace"].name for w in workplace_stats() if w["respondents"] == 0]
     if quiet:
         suggestions.append(
@@ -1337,19 +1189,14 @@ def suggest_actions(limit=10):
 
     return suggestions[:limit]
 
-
-# ------------------------------------------------------------
-# 月次アンケートの集計（〇月度ごと・時系列）
-# ------------------------------------------------------------
+# ----- 月次アンケートの集計（〇月度ごと・時系列） -----
 def monthly_denominator():
     active = Employee.query.filter_by(active=True).count()
     if active:
         return active
     return _to_int(Setting.get("target_respondents", "0"))
 
-
 def monthly_summary():
-    """月度ごとの集計（基本設問の割合。時系列で見る）"""
     responses = MonthlyResponse.query.all()
     periods = sorted({r.period for r in responses})
     denominator = monthly_denominator()
@@ -1385,15 +1232,12 @@ def monthly_summary():
         )
     return rows
 
-
 def _responses_by_period():
     responses = MonthlyResponse.query.all()
     periods = sorted({r.period for r in responses})
     return periods, {p: [r for r in responses if r.period == p] for p in periods}
 
-
 def monthly_question_trends():
-    """基本設問（選択式）ごとに、選択肢の割合が月度でどう動いたか"""
     periods, by_period = _responses_by_period()
     trends = []
     for q in C.MONTHLY_CORE_QUESTIONS:
@@ -1408,9 +1252,7 @@ def monthly_question_trends():
         trends.append({"q": q, "label": C.MONTHLY_KPI_LABELS.get(q["key"], ""), "periods": periods, "labels": [period_label(p) for p in periods], "n": n_list, "series": series})
     return trends
 
-
 def monthly_workplace_trends():
-    """職場ごとに、繰り返し業務あり率と推計月間時間が月度でどう動いたか"""
     periods, by_period = _responses_by_period()
     kpi = C.MONTHLY_KPI
     rows = []
@@ -1430,9 +1272,7 @@ def monthly_workplace_trends():
             rows.append({"workplace": wp, "cells": cells})
     return {"periods": periods, "labels": [period_label(p) for p in periods], "rows": rows}
 
-
 def monthly_question_stats(survey, responses):
-    """設問ごとの分布（選択）と記入一覧（記述）"""
     stats = []
     for q in survey.questions:
         key = q["key"]
@@ -1452,9 +1292,7 @@ def monthly_question_stats(survey, responses):
             stats.append({"q": q, "n": len(items), "items": items})
     return stats
 
-
 def dashboard_chart_data():
-    """Chart.js 用のデータ"""
     wp = workplace_stats()
     wish_counter = Counter(t.wish or "未回答" for t in Task.query.all())
     pain_counter = Counter()
@@ -1478,12 +1316,8 @@ def dashboard_chart_data():
         },
     }
 
-
-# ------------------------------------------------------------
-# 活動状況（開始 → 要求定義 → 要件定義 → 作成/伴走 → テスト → 確認 → 完了）
-# ------------------------------------------------------------
+# ----- 活動状況（開始 → 要求定義 → 要件定義 → 作成/伴走 → テスト → 確認 → 完了） -----
 def board_data(tasks, done_limit=8):
-    """活動状況に出す案件を、進行中・保留・完了・受付に分けて並べる"""
     now = datetime.now()
     floor = datetime.min
 
@@ -1508,10 +1342,7 @@ def board_data(tasks, done_limit=8):
         "saved_annual_hours": saved * 12 / 60.0,
     }
 
-
-# ==============================================================================
-# 業務マップ（1枚の流れ図: グラフ生成、Mermaid 変換、手修正のマージ、つながりの表）
-# ==============================================================================
+# ===== 業務マップ（1枚の流れ図: グラフ生成、Mermaid 変換、手修正のマージ、つながりの表） =====
 _ESCAPES = [
     ('"', "”"), ("#", "＃"), ("<", "＜"), (">", "＞"), ("&", "＆"), ("`", "'"), ("|", "｜"),
     ("[", "［"), ("]", "］"), ("{", "｛"), ("}", "｝"), ("(", "（"), (")", "）"), ("\\", "＼"),
@@ -1527,7 +1358,6 @@ SHAPES = {
     "hex": ('{{"', '"}}'),
 }
 
-# ノードの種類（cls）ごとの Mermaid の形
 CLS_SHAPE = {
     "task": "rect", "done": "rect", "manual": "rect", "source": "round", "note": "round", "system": "cyl",
     "output": "para", "dupout": "para", "wp": "stadium", "ext": "stadium", "person": "stadium", "place": "stadium", "warn": "stadium", "goods": "hex",
@@ -1565,7 +1395,6 @@ def esc(text):
         s = s.replace(a, b)
     return s
 
-
 def wrap(text, width=14, max_lines=3):
     s = esc(text)
     if len(s) <= width:
@@ -1576,24 +1405,19 @@ def wrap(text, width=14, max_lines=3):
         lines[-1] = lines[-1][: width - 1] + "…"
     return "<br/>".join(lines)
 
-
 def nid(prefix, text):
     return prefix + "_" + hashlib.md5(normalize_text(text).encode("utf-8")).hexdigest()[:8]
-
 
 def scope_key(workplace_id=None, domain_id=None):
     return f"wp:{workplace_id or 0}|dom:{domain_id or 0}"
 
-
 class Diagram:
-    """ノード・エッジを蓄積し、Mermaid 定義またはグラフ JSON を出力する"""
-
     def __init__(self, direction="LR"):
         self.direction = direction
-        self.nodes = OrderedDict()  # id -> dict(text, cls, shape, width, group, group_title)
-        self.subgraphs = OrderedDict()  # key -> title
-        self.edges = OrderedDict()  # (a, b) -> dict(label, style)
-        self.clicks = OrderedDict()  # id -> (url, tooltip)
+        self.nodes = OrderedDict()
+        self.subgraphs = OrderedDict()
+        self.edges = OrderedDict()
+        self.clicks = OrderedDict()
 
     def node(self, node_id, text, cls="task", shape=None, subgraph=None, width=14):
         if node_id not in self.nodes:
@@ -1691,9 +1515,7 @@ class Diagram:
             )
         return {"nodes": nodes, "edges": edges, "suppressed_nodes": [], "suppressed_edges": [], "view": None}
 
-
 def graph_to_diagram(graph, direction="LR"):
-    """グラフ JSON（手修正をマージ済み）から Mermaid 用の Diagram を組み立てる"""
     d = Diagram(direction)
     for n in graph.get("nodes", []):
         cls = n.get("cls") or "manual"
@@ -1707,9 +1529,7 @@ def graph_to_diagram(graph, direction="LR"):
         d.edge(a, b, e.get("label") or "", style)
     return d
 
-
 def merge_graph(auto, saved):
-    """自動生成したグラフに、保存された手修正（位置・名前・色・追加・削除・向き・ラベル）を重ねる"""
     result = {
         "nodes": [], "edges": [], "suppressed_nodes": [], "suppressed_edges": [], "view": None,
         "new_node_ids": [], "needs_layout": True,
@@ -1774,9 +1594,7 @@ def merge_graph(auto, saved):
     )
     return result
 
-
 def sanitize_graph(data):
-    """クライアントから受け取ったグラフ JSON を保存用に整える（型と上限を確認）"""
     if not isinstance(data, dict):
         raise ValueError("graph must be an object")
     nodes, edges = [], []
@@ -1811,28 +1629,21 @@ def sanitize_graph(data):
         "view": {"x": _num(view.get("x")) or 0, "y": _num(view.get("y")) or 0, "zoom": _num(view.get("zoom")) or 1} if view else None,
     }
 
-
 def _num(v):
     try:
         return float(v) if v is not None else None
     except (TypeError, ValueError):
         return None
 
-
-# ------------------------------------------------------------
-# 手修正の業務データへの書き戻し
-# ------------------------------------------------------------
+# ----- 手修正の業務データへの書き戻し -----
 def _task_id_of(node_id):
-    """t12 / o12 のようなノードIDから業務IDを取り出す（それ以外は None）"""
     if not node_id or len(node_id) < 2 or node_id[0] not in ("t", "o") or not node_id[1:].isdigit():
         return None
     return int(node_id[1:])
 
-
 def _contains(text, value):
     nt, nv = normalize_text(text), normalize_text(value)
     return bool(nv) and nv in nt
-
 
 def append_text(existing, value):
     existing = (existing or "").strip()
@@ -1845,7 +1656,6 @@ def append_text(existing, value):
         return existing
     return existing + "、" + value
 
-
 def remove_text(existing, value):
     existing = (existing or "").strip()
     value = (value or "").strip()
@@ -1857,9 +1667,7 @@ def remove_text(existing, value):
     kept = [p for p in parts if not (_contains(p, value) or _contains(value, p))]
     return "、".join(kept)
 
-
 def writeback_candidates(saved, tasks_by_id):
-    """保存された手修正のうち、業務データに反映できるものを候補として列挙する"""
     cands = []
     if not saved:
         return cands
@@ -1875,7 +1683,6 @@ def writeback_candidates(saved, tasks_by_id):
     def cls_of(node_id):
         return (nodes.get(node_id) or {}).get("cls") or ""
 
-    # 1. 業務名の修正
     for n in saved.get("nodes", []):
         if n.get("text_edited") and str(n.get("id", "")).startswith("t"):
             t = task_of(n["id"])
@@ -1887,7 +1694,6 @@ def writeback_candidates(saved, tasks_by_id):
                     }
                 )
 
-    # 2. 手で引いた矢印
     for e in saved.get("edges", []):
         if e.get("source") != "manual":
             continue
@@ -1932,7 +1738,6 @@ def writeback_candidates(saved, tasks_by_id):
                 cands.append({"id": f"next:{ta.id}:{b}", "task_id": ta.id, "text": f"「{ta.name}」の後の業務に「{dst}」を追加",
                               "ops": [{"task_id": ta.id, "field": "next_task", "action": "append", "value": dst}]})
 
-    # 3. 消した「前後の業務」の矢印
     for eid in saved.get("suppressed_edges", []):
         if "->" not in str(eid):
             continue
@@ -1951,7 +1756,6 @@ def writeback_candidates(saved, tasks_by_id):
                     }
                 )
 
-    # すでに反映済み（反映しても何も変わらない）候補は除く
     def changes_something(c):
         for op in c["ops"]:
             t = tasks_by_id.get(op["task_id"])
@@ -1963,7 +1767,6 @@ def writeback_candidates(saved, tasks_by_id):
         return False
 
     return [c for c in cands if changes_something(c)]
-
 
 WRITEBACK_FIELDS = {"name", "next_task", "prev_task", "inputs", "info_from", "actors", "output_users_note", "output_users"}
 
@@ -1983,9 +1786,7 @@ def _new_value(current, op):
         return C.join_list(items)
     return current
 
-
 def apply_writeback(candidates, selected_ids, tasks_by_id):
-    """選ばれた候補を業務データに反映する。変更した件数を返す（commit は呼び出し側）"""
     applied = 0
     for c in candidates:
         if c["id"] not in selected_ids:
@@ -2002,17 +1803,12 @@ def apply_writeback(candidates, selected_ids, tasks_by_id):
                 applied += 1
     return applied
 
-
-# ------------------------------------------------------------
-# 共通
-# ------------------------------------------------------------
+# ----- 共通 -----
 def _wp_name(t):
     return t.workplace.name if t.workplace else "職場未設定"
 
-
 def _wp_key(t):
     return f"wp{t.workplace_id or 0}"
-
 
 def _task_node(d, t, width=14):
     tid = f"t{t.id}"
@@ -2020,9 +1816,7 @@ def _task_node(d, t, width=14):
     d.click(tid, url_for("cases.detail", task_id=t.id), "案件詳細を開く")
     return tid
 
-
 def _match_tasks(text, tasks, exclude=None, limit=3):
-    """前の業務・後の業務の記述に一致する登録業務を探す"""
     nt = normalize_text(text)
     if len(nt) < 2:
         return []
@@ -2035,7 +1829,6 @@ def _match_tasks(text, tasks, exclude=None, limit=3):
             hits.append((len(nn), t))
     hits.sort(key=lambda x: -x[0])
     return [t for _, t in hits[:limit]]
-
 
 def _user_node(d, u, t):
     wp = _wp_name(t)
@@ -2053,9 +1846,7 @@ def _user_node(d, u, t):
         return d.node("p_unknown", "利用者不明", "warn")
     return None
 
-
 def _add_info_edges(d, t, tid, dup_outputs=None):
-    """情報源 → 業務 → アウトプット → 利用者 のエッジを追加し、アウトプットのノードIDを返す"""
     inputs = t.inputs_list
     specific = (t.info_from or "").strip()
     used_specific = False
@@ -2083,13 +1874,10 @@ def _add_info_edges(d, t, tid, dup_outputs=None):
             d.edge(target, uid)
     return target
 
-
-# ------------------------------------------------------------
-# 情報の流れ
-# ------------------------------------------------------------
+# ----- 情報の流れ -----
 def build_info_flow(tasks):
     d = Diagram("LR")
-    dups = {normalize_text(g["output"]) for g in duplicate_output_groups()}  # 同じアウトプットを複数人が作っている（統合候補）
+    dups = {normalize_text(g["output"]) for g in duplicate_output_groups()}
     for t in tasks:
         tid = _task_node(d, t)
         _add_info_edges(d, t, tid, dups)
@@ -2112,12 +1900,8 @@ def build_info_flow(tasks):
                     break
     return d
 
-
-# ------------------------------------------------------------
-# 図に添える表: 職場・部署の間の受け渡し、システム・情報源ごとの業務
-# ------------------------------------------------------------
+# ----- 図に添える表: 職場・部署の間の受け渡し、システム・情報源ごとの業務 -----
 def handoff_rows(tasks, workplace_names):
-    """職場・部署の間で情報をどう受け渡しているか（件数）。関与は「関わる人・部署」に書かれた相手"""
     agg = defaultdict(lambda: {"info": 0, "involve": 0})
 
     def is_internal(name):
@@ -2154,9 +1938,7 @@ def handoff_rows(tasks, workplace_names):
     rows.sort(key=lambda r: (-r["info"], -r["involve"], r["src"], r["dst"]))
     return rows
 
-
 def source_rows(tasks):
-    """システム・情報源ごとに、それを使っている業務（システムと業務のつながり）"""
     by = OrderedDict()
     for t in tasks:
         specific = (t.info_from or "").strip()
@@ -2178,10 +1960,7 @@ def source_rows(tasks):
     rows.sort(key=lambda r: (r["cls"] != "system", -len(r["tasks"]), r["name"]))
     return rows
 
-
-# ------------------------------------------------------------
-# 1業務の流れ（案件詳細用）
-# ------------------------------------------------------------
+# ----- 1業務の流れ（案件詳細用） -----
 def build_task_flow(t):
     d = Diagram("LR")
     tid = f"t{t.id}"
@@ -2195,13 +1974,10 @@ def build_task_flow(t):
         d.edge(tid, d.node("next_task", t.next_task, "note"), "次の業務", "dotted")
     return d
 
-
-# ==============================================================================
-# AI連携（Claude API。なければルールベース）
-# ==============================================================================
+# ===== AI連携（社内 Azure OpenAI の ChatGPT API を Responses API で呼ぶ。なければルールベース） =====
 log = logging.getLogger(__name__)
 
-MODEL = "claude-opus-5-5"  # config.py の ANTHROPIC_MODEL が空のときの既定
+MODEL = "gpt-6-luna"
 
 SYSTEM_PROMPT = """あなたは製造部の「PC定型業務ゼロ化プロジェクト」を支援する業務分析アシスタントです。
 現場から登録された1件のPC業務を分析し、業務全体像の把握と改善検討に使う情報をJSONで返します。
@@ -2232,83 +2008,129 @@ SYSTEM_PROMPT = """あなたは製造部の「PC定型業務ゼロ化プロジ�
 日本語で、簡潔に書いてください。"""
 
 
-def _api_key():
-    return str(conf.get("ANTHROPIC_API_KEY", "") or "").strip()
+def _api_url():
+    return str(conf.get("OPENAI_API_URL", "") or "").strip()
 
+def _api_key():
+    return str(conf.get("OPENAI_API_KEY", "") or "").strip()
 
 def _model():
-    return str(conf.get("ANTHROPIC_MODEL", "") or "").strip() or MODEL
-
-
-def _sdk_available():
-    try:
-        import anthropic  # noqa: F401
-
-        return True
-    except ImportError:
-        return False
-
+    return str(conf.get("OPENAI_MODEL", "") or "").strip() or MODEL
 
 def ai_enabled():
-    return bool(_api_key()) and _sdk_available()
+    return bool(_api_url()) and bool(_api_key())
+
+_LAST_ERROR = {"text": ""}
 
 
 def ai_status_text():
-    if not _sdk_available():
-        return "anthropic SDK が未インストール（pip install anthropic）"
+    if not _api_url():
+        return "config.py の OPENAI_API_URL が未設定（ルールベースで動作中）"
     if not _api_key():
-        return "config.py の ANTHROPIC_API_KEY が未設定（ルールベースで動作中）"
-    return f"Claude API 連携 有効（モデル: {_model()}）"
+        return "config.py の OPENAI_API_KEY が未設定（ルールベースで動作中）"
+    text = f"ChatGPT API 連携 有効（モデル: {_model()}、Responses API）"
+    if _LAST_ERROR["text"]:
+        text += f"／直近のエラー: {_LAST_ERROR['text']}"
+    return text
 
+# ----- 共通: ChatGPT API（Responses API）呼び出し。標準ライブラリの urllib だけで呼ぶ -----
+def _ai_request_body(system, user_text, max_tokens=None, with_reasoning=True):
+    body = {
+        "model": _model(),
+        "instructions": system,
+        "input": user_text,
+        "max_output_tokens": int(max_tokens or conf.get("OPENAI_MAX_OUTPUT_TOKENS", 4000) or 4000),
+    }
+    effort = str(conf.get("OPENAI_REASONING_EFFORT", "low") or "").strip()
+    if effort and with_reasoning:
+        body["reasoning"] = {"effort": effort}
+    return body
 
-# ------------------------------------------------------------
-# 共通: Claude 呼び出し
-# ------------------------------------------------------------
-def _call_claude(system, user_text, max_tokens=4000):
-    """Claude API を呼び、テキスト本文を返す。拒否（refusal）や失敗時は None。"""
-    import anthropic
-
-    client = anthropic.Anthropic(timeout=90.0, max_retries=1)
-    base_kwargs = dict(
-        model=_model(),
-        max_tokens=max_tokens,
-        system=system,
-        messages=[{"role": "user", "content": user_text}],
+def _ai_post(body):
+    req = urllib.request.Request(
+        _api_url(),
+        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+        method="POST",
+        headers={"Content-Type": "application/json", "Authorization": "Bearer " + _api_key()},
     )
+    timeout = float(conf.get("OPENAI_API_TIMEOUT", 90) or 90)
     try:
-        # 分類用途なので effort は low。安全分類による拒否時はサーバー側フォールバックに任せる。
-        response = client.messages.create(
-            **base_kwargs,
-            extra_body={"output_config": {"effort": "low"}, "fallbacks": "default"},
-            extra_headers={"anthropic-beta": "server-side-fallback-2026-07-01"},
-        )
-    except anthropic.BadRequestError as e:
-        log.warning("Claude API: 拡張パラメータが拒否されたため基本形で再試行します: %s", e)
-        response = client.messages.create(**base_kwargs)
-    except anthropic.AuthenticationError:
-        log.error("Claude API: APIキーが無効です")
-        return None
-    except anthropic.RateLimitError:
-        log.warning("Claude API: レート制限に達しました")
-        return None
-    except anthropic.APIStatusError as e:
-        log.warning("Claude API: ステータスエラー %s", e.status_code)
-        return None
-    except anthropic.APIConnectionError:
-        log.warning("Claude API: 接続できません")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            status, raw = resp.status, resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        try:
+            raw = e.read().decode("utf-8", "replace")
+        except Exception:
+            raw = ""
+        return e.code, raw
+    try:
+        return status, json.loads(raw)
+    except ValueError:
+        return status, raw
+
+def _response_text(payload):
+    texts, refusal = [], None
+    for item in payload.get("output") or []:
+        if item.get("type") != "message":
+            continue
+        for part in item.get("content") or []:
+            if part.get("type") == "output_text":
+                texts.append(part.get("text") or "")
+            elif part.get("type") == "refusal":
+                refusal = part.get("refusal") or "（理由なし）"
+    if texts:
+        return "".join(texts)
+    if payload.get("output_text"):
+        return str(payload["output_text"])
+    if refusal:
+        log.warning("ChatGPT API: 応答が拒否されました: %s", refusal)
+        _LAST_ERROR["text"] = "応答が拒否されました"
+    return None
+
+def _call_ai(system, user_text, max_tokens=None):
+    body = _ai_request_body(system, user_text, max_tokens)
+    try:
+        status, payload = _ai_post(body)
+        if status == 400 and "reasoning" in body and "reasoning" in str(payload):
+            log.warning("ChatGPT API: reasoning が拒否されたため外して再試行します")
+            status, payload = _ai_post(_ai_request_body(system, user_text, max_tokens, with_reasoning=False))
+    except OSError as e:
+        log.warning("ChatGPT API: 接続できません: %s", e)
+        _LAST_ERROR["text"] = f"接続できません（{e}）"
         return None
 
-    if getattr(response, "stop_reason", None) == "refusal":
-        log.warning("Claude API: 安全上の理由で応答が拒否されました")
+    if not isinstance(payload, dict):
+        snippet = re.sub(r"\s+", " ", str(payload or ""))[:160]
+        log.warning("ChatGPT API: HTTP %s %s", status, snippet)
+        if status in (401, 403):
+            _LAST_ERROR["text"] = f"HTTP {status}: APIキーが無効か、権限がありません"
+        elif status == 404:
+            _LAST_ERROR["text"] = "HTTP 404: URL が違います（OPENAI_API_URL が Responses API の URL か確認）"
+        elif status == 429:
+            _LAST_ERROR["text"] = "HTTP 429: 利用量の上限（レート制限）に達しました"
+        elif status == 200:
+            _LAST_ERROR["text"] = "応答が JSON ではありません（OPENAI_API_URL を確認）"
+        else:
+            _LAST_ERROR["text"] = f"HTTP {status}: {snippet}"
         return None
-    return "".join(getattr(b, "text", "") for b in response.content if getattr(b, "type", "") == "text")
-
+    if payload.get("error"):
+        err = payload["error"]
+        msg = err.get("message") if isinstance(err, dict) else str(err)
+        log.warning("ChatGPT API: エラー応答: %s", msg)
+        _LAST_ERROR["text"] = f"エラー応答: {msg}"
+        return None
+    if payload.get("status") == "incomplete":
+        reason = (payload.get("incomplete_details") or {}).get("reason", "")
+        log.warning("ChatGPT API: 応答が途中で終わりました（%s）。OPENAI_MAX_OUTPUT_TOKENS を増やしてください", reason)
+    text = _response_text(payload)
+    if text is not None:
+        _LAST_ERROR["text"] = ""
+    return text
 
 def _extract_json(text):
     if not text:
         return None
     text = text.strip()
-    # ```json ... ``` を剥がす
     fence = re.search(r"```(?:json)?\s*(.*?)```", text, re.S)
     if fence:
         text = fence.group(1).strip()
@@ -2321,10 +2143,7 @@ def _extract_json(text):
     except ValueError:
         return None
 
-
-# ------------------------------------------------------------
-# 業務（案件）の分析
-# ------------------------------------------------------------
+# ----- 業務（案件）の分析 -----
 def task_payload(task):
     return {
         "業務名": task.name,
@@ -2349,25 +2168,22 @@ def task_payload(task):
         "補足": task.note or "",
     }
 
-
 def analyze_task(task, domains, candidate_tasks):
-    """1業務を分析して dict を返す（必ず何らかの結果を返す）"""
     result = None
     if ai_enabled():
         try:
-            result = _claude_analyze(task, domains, candidate_tasks)
-        except Exception as e:  # 想定外の失敗はルールベースで補う
-            log.exception("Claude 分析に失敗しました: %s", e)
+            result = _ai_analyze(task, domains, candidate_tasks)
+        except Exception as e:
+            log.exception("AI分析に失敗しました: %s", e)
             result = None
     if result is None:
         result = rule_analyze(task, domains, candidate_tasks)
         result["source"] = "rules"
     else:
-        result["source"] = "claude"
+        result["source"] = "openai"
     return result
 
-
-def _claude_analyze(task, domains, candidate_tasks):
+def _ai_analyze(task, domains, candidate_tasks):
     domain_names = [d.name for d in domains]
     candidates = [
         {"業務名": t.name, "領域": t.domain.name if t.domain else "", "アウトプット": t.output or "", "入力情報": t.inputs_list}
@@ -2381,7 +2197,7 @@ def _claude_analyze(task, domains, candidate_tasks):
         + "\n\n## 関連候補の業務（related はこの中から選ぶ）\n"
         + json.dumps(candidates, ensure_ascii=False, indent=1)
     )
-    text = _call_claude(SYSTEM_PROMPT, user_text)
+    text = _call_ai(SYSTEM_PROMPT, user_text)
     data = _extract_json(text)
     if not data:
         return None
@@ -2405,10 +2221,7 @@ def _claude_analyze(task, domains, candidate_tasks):
         "priority": data.get("priority") if data.get("priority") in ("高", "中", "低") else "中",
     }
 
-
-# ------------------------------------------------------------
-# ルールベース（APIキーなしでも同じ形式で動く）
-# ------------------------------------------------------------
+# ----- ルールベース（APIキーなしでも同じ形式で動く） -----
 DOMAIN_KEYWORDS = {
     "生産計画・管理": ["生産計画", "計画", "日程", "納期", "手配", "受注", "出荷", "在庫", "所要量", "指示"],
     "製造実行・管理": ["日報", "実績", "製造", "進捗", "稼働", "出来高", "ライン", "工程", "段取り"],
@@ -2423,7 +2236,6 @@ DOMAIN_KEYWORDS = {
 
 def rule_analyze(task, domains, candidate_tasks):
     text = " ".join([task.name or "", task.purpose or "", task.output or "", task.note or ""])
-    # 領域推定
     best, best_score = None, 0
     domain_names = [d.name for d in domains]
     for name, words in DOMAIN_KEYWORDS.items():
@@ -2494,10 +2306,7 @@ def rule_analyze(task, domains, candidate_tasks):
         "priority": priority,
     }
 
-
-# ------------------------------------------------------------
-# 次のアクション提案（AI）
-# ------------------------------------------------------------
+# ----- 次のアクション提案（AI） -----
 ACTION_SYSTEM_PROMPT = """あなたは製造部の「PC定型業務ゼロ化プロジェクト」のデジタル改善チームを支援するアナリストです。
 蓄積された業務登録データの集計を読み、次に取るべきアクションを提案してください。
 
@@ -2514,11 +2323,10 @@ ACTION_SYSTEM_PROMPT = """あなたは製造部の「PC定型業務ゼロ化プ�
 
 
 def suggest_actions_ai(context):
-    """集計データ（dict）を渡し、AIの提案リストを返す。失敗時は None。"""
     if not ai_enabled():
         return None
     try:
-        text = _call_claude(ACTION_SYSTEM_PROMPT, json.dumps(context, ensure_ascii=False, indent=1), max_tokens=3000)
+        text = _call_ai(ACTION_SYSTEM_PROMPT, json.dumps(context, ensure_ascii=False, indent=1))
     except Exception as e:
         log.exception("AI提案の生成に失敗: %s", e)
         return None
@@ -2549,10 +2357,7 @@ def suggest_actions_ai(context):
         )
     return result[:6]
 
-
-# ==============================================================================
-# 初期データ・デモデータ・既存データの移行
-# ==============================================================================
+# ===== 初期データ・デモデータ・既存データの移行 =====
 DEFAULT_WORKPLACES = ["製造1課", "製造2課", "組立課", "検査・品質保証課", "生産管理課", "設備保全課"]
 
 DEFAULT_DOMAINS = [
@@ -2576,16 +2381,13 @@ DEFAULT_SETTINGS = {
     "board_show_names": "1",
 }
 
-# 旧バージョンの既定値（起動時に新しい既定値へ置き換える）
 RENAMED_DEFAULTS = {
     "project_name": ("製造部 繰り返しPC業務ゼロ化ポータル", "製造部 PC定型業務ゼロ化ポータル"),
 }
 
-# なくした機能の設定キー（メール配信・案内文・旧掲示板メッセージ）。起動時に消す
 REMOVED_SETTINGS = ("survey_deadline", "contact", "portal_base_url", "monthly_deadline", "mail_subject", "mail_body", "board_message")
 
 def seed_masters():
-    """マスタが空なら初期値を投入する（起動時に実行）"""
     changed = False
     if Workplace.query.count() == 0:
         for i, name in enumerate(DEFAULT_WORKPLACES):
@@ -2599,7 +2401,6 @@ def seed_masters():
         if db.session.get(Setting, key) is None:
             db.session.add(Setting(key=key, value=value))
             changed = True
-    # 名称を「PC定型業務ゼロ化」に改めた。旧既定値のままの設定だけを置き換える（手で変えた値はそのまま）
     for key, old_values in RENAMED_DEFAULTS.items():
         row = db.session.get(Setting, key)
         if row is not None and row.value in old_values:
@@ -2611,29 +2412,23 @@ def seed_masters():
             db.session.delete(row)
             changed = True
     changed = _migrate_monthly_questions() or changed
-    for m in FlowMap.query.filter(FlowMap.kind != "info").all():  # 以前の「ヒトの流れ」「モノの流れ」の手修正
+    for m in FlowMap.query.filter(FlowMap.kind != "info").all():
         db.session.delete(m)
         changed = True
     if changed:
         db.session.commit()
 
-
 def _stance_from_old(ask, self_answer):
-    """旧2問（頼みたいか／自分で取り組みたいか）の回答を、新1問「どう進めたいか」に読み替える"""
     if self_answer in ("取り組みたい", "教えてもらえれば取り組みたい"):
         return "自分で取り組みたい"
     if ask in ("頼みたい", "相談したい"):
         return "改善チームに依頼したい"
     return ""
 
-
-# 「どのように進めたいか」の以前の選択肢（4択）を今の2択に読み替える
 _STANCE_OLD_TO_NEW = {"教えてもらいながら自分で取り組みたい": "自分で取り組みたい", "改善チームに頼みたい": "改善チームに依頼したい", "今は特にない": ""}
 
 
-# 週あたりで聞いていた時間を、1シフトあたりの選択肢に読み替える（週5シフト換算）
 _HOURS_WEEK_TO_SHIFT = {"1時間未満": "30分未満", "1〜3時間": "30分未満", "3〜5時間": "30分〜1時間", "5〜10時間": "1〜2時間", "10時間以上": "2〜4時間"}
-# 基本設問の以前の文面。これと同じなら新しい文面に置き換える（手で変えた文面はそのまま）
 _PREVIOUS_TEXTS = {
     "has": {"今月、PC定型業務（繰り返しの手作業）はありますか"},
     "hours": {"1週間あたり、PC定型業務にかかっている時間は"},
@@ -2644,13 +2439,6 @@ _PREVIOUS_TEXTS = {
 
 
 def _migrate_monthly_questions():
-    """月次の設問セットと回答を、現在の基本設問に合わせる（起動時。移行済みなら何もしない）
-
-    - 旧2問（頼みたいか／自分でやりたいか）→ 新1問「どう進めたいか」
-    - 時間の設問を週あたりから1シフトあたりへ（選択肢を読み替え）
-    - 「先月と比べて」の「初回なので分からない」は未回答扱い
-    - 基本設問の選択肢・必須・条件（depends）を定義どおりに、以前の既定の文面は新しい文面に
-    """
     core = {q["key"]: q for q in C.MONTHLY_CORE_QUESTIONS}
     stance_q = core["stance"]
     changed = False
@@ -2682,7 +2470,6 @@ def _migrate_monthly_questions():
                         q.pop("depends", None)
                     touched = True
             new_qs.append(q)
-        # 基本設問の並びを定義の順に揃える（追加設問の位置はそのまま）
         core_order = [q["key"] for q in C.MONTHLY_CORE_QUESTIONS]
         slots = [i for i, q in enumerate(new_qs) if q.get("key") in core]
         core_sorted = sorted((new_qs[i] for i in slots), key=lambda q: core_order.index(q["key"]))
@@ -2704,7 +2491,7 @@ def _migrate_monthly_questions():
         if answers.get("hours") in _HOURS_WEEK_TO_SHIFT:
             answers["hours"] = _HOURS_WEEK_TO_SHIFT[answers["hours"]]
             touched = True
-        if not answers.get("hours") and answers.get("has") == "ない":  # 時間の設問は必須になった。「ない」なら 0 時間
+        if not answers.get("hours") and answers.get("has") == "ない":
             answers["hours"] = "0時間"
             touched = True
         if answers.get("trend") == "初回なので分からない":
@@ -2713,7 +2500,7 @@ def _migrate_monthly_questions():
         if answers.get("stance") in _STANCE_OLD_TO_NEW:
             answers["stance"] = _STANCE_OLD_TO_NEW[answers["stance"]]
             touched = True
-        if answers.get("wants") == "ない" and answers.get("stance"):  # 「ない」の人には聞かない
+        if answers.get("wants") == "ない" and answers.get("stance"):
             answers["stance"] = ""
             touched = True
         if touched:
@@ -2721,12 +2508,8 @@ def _migrate_monthly_questions():
             changed = True
     return changed
 
-
-# ------------------------------------------------------------
-# デモデータ
-# ------------------------------------------------------------
+# ----- デモデータ -----
 DEMO_RESPONDENTS = [
-    # name, workplace, c1, skills, learn, c4, c6
     ("田中 一郎", "製造1課", "教えてもらえれば取り組みたい", ["Excel関数"], ["Excel VBA", "RPA"], "1〜2時間", "できる"),
     ("佐藤 花子", "製造1課", "ぜひ取り組みたい", ["Excel関数", "ピボットテーブル", "Excel VBA"], ["Python", "Power BI"], "2〜4時間", "できる"),
     ("鈴木 健", "製造2課", "興味はあるが時間がない", ["Excel関数"], ["Excel VBA"], "1時間未満", "内容による"),
@@ -2737,7 +2520,6 @@ DEMO_RESPONDENTS = [
     ("中村 翔太", "製造2課", "興味はあるが時間がない", ["Excel関数", "ピボットテーブル"], ["Power BI"], "1時間未満", "内容による"),
 ]
 
-# name, respondent, domain, purpose, output, users, inputs, prev, next, freq, dur, head, tools, nature, pains, wish, self, note
 DEMO_TASKS = [
     ("日報の実績をExcelの集計表に転記する", "田中 一郎", "製造実行・管理", "日次の生産実績を職場の朝会で確認するため", "日次実績集計表（Excel）", ["職場内", "上司"], ["紙の帳票"], "各ラインの日報記入", "週報の作成", "毎日", "15〜30分", 2, ["Excel", "紙"], ["転記・コピー", "集計・グラフ作成"], ["時間がかかる", "同じ情報を何度も入力する"], "自動化したい", "教えてもらえれば取り組みたい", "日報を直接システムに入力できれば転記がなくなる"),
     ("週報の作成", "田中 一郎", "製造実行・管理", "週次の生産状況を課長に報告するため", "週報（Excel）", ["上司"], ["他のExcel"], "日次実績集計表の転記", "月報の作成", "毎週", "30分〜1時間", 1, ["Excel"], ["集計・グラフ作成", "資料作成"], ["時間がかかる"], "減らしたい", "改善チームに任せたい", ""),
@@ -2767,8 +2549,6 @@ DEMO_TASKS = [
     ("月次保全報告書の作成", "山本 剛", "設備管理", "設備稼働率と故障件数を部長に報告するため", "月次保全報告書", ["上司"], ["他のExcel"], "故障履歴台帳の入力", "部長への報告", "毎月", "1〜2時間", 1, ["Excel"], ["集計・グラフ作成", "資料作成"], ["時間がかかる"], "自動化したい", "教えてもらえれば取り組みたい", ""),
 ]
 
-# 進捗のあるデモ案件: name -> dict
-# 案件の進み具合（status と stage は set_stage と同じ対応: 受付=start / 対応中=request〜check / 完了=done）
 DEMO_PROGRESS = {
     "日報の実績をExcelの集計表に転記する": dict(status="対応中", stage="spec", steps_done="1|2", decision="自動化", assignment="自主改善", assignee="田中 一郎", verified=True, verified_by="推進メンバー",
                                         progress_note="朝会で使う指標を2つに絞り込み中。次は日次表から週報を自動で作る仕様を決めます",
@@ -2798,7 +2578,6 @@ DEMO_PROGRESS = {
 
 
 def _seed_stage_history(task, now):
-    """現在の段階までの履歴を、登録日から今までの間に等間隔で作る"""
     idx = task.stage_index
     task.stage_at = task.created_at
     if idx == 0:
@@ -2812,7 +2591,6 @@ def _seed_stage_history(task, now):
     if task.stage_key == "done":
         task.completed_at = task.stage_at
 
-# ヒト・情報の流れ（B17・B18）: name -> dict
 DEMO_FLOWS = {
     "日報の実績をExcelの集計表に転記する": dict(actors="各ライン作業者、課長", info_from="各ラインの手書き日報"),
     "週報の作成": dict(actors="課長", info_from="日次実績集計表（Excel）"),
@@ -2842,7 +2620,6 @@ DEMO_D = {
 
 
 def seed_demo():
-    """デモデータを投入する（既存のデモデータは削除してから投入）"""
     clear_demo()
     wp_by_name = {w.name: w for w in Workplace.query.all()}
     dom_by_name = {d.name: d for d in Domain.query.all()}
@@ -2909,7 +2686,6 @@ def seed_demo():
     db.session.commit()
     return len(tasks)
 
-
 DEMO_EXTRA_EMPLOYEES = [
     ("E009", "小林 直樹", "製造1課"),
     ("E010", "加藤 恵", "組立課"),
@@ -2919,7 +2695,6 @@ DEMO_EXTRA_EMPLOYEES = [
 
 
 def recent_periods(n=4):
-    """当月を含む直近 n か月の月度（古い順）"""
     now = datetime.now()
     periods = []
     for k in range(n - 1, -1, -1):
@@ -2930,9 +2705,7 @@ def recent_periods(n=4):
         periods.append(f"{yy:04d}-{mm:02d}")
     return periods
 
-
 def _seed_employees_and_monthly(resp_by_name, wp_by_name):
-    """社員マスタ（12人）と、直近4か月分の月次アンケート回答（改善が進む傾向）"""
     employees = []
     for i, (name, r) in enumerate(resp_by_name.items()):
         employees.append(
@@ -2958,7 +2731,6 @@ def _seed_employees_and_monthly(resp_by_name, wp_by_name):
     last = len(periods) - 1
     hours_options = list(C.MONTHLY_HOURS_VALUE)
     stance_options = ["自分で取り組みたい", "改善チームに依頼したい"]
-    # 月度ごとの設問セット（基本設問）。既にあればそのまま使う
     surveys = {}
     for period in periods:
         survey = MonthlySurvey.query.filter_by(period=period).first()
@@ -2971,8 +2743,8 @@ def _seed_employees_and_monthly(resp_by_name, wp_by_name):
     for i, emp in enumerate(employees):
         for p_idx, period in enumerate(periods):
             if (i * 7 + p_idx * 3) % 9 == 0 and p_idx != last:
-                continue  # 一部は未回答（回答率 < 100% を再現）
-            level = max(0, (i % 3) + 2 - p_idx)  # 月が進むほど繰り返し業務が減る
+                continue
+            level = max(0, (i % 3) + 2 - p_idx)
             prev_level = max(0, (i % 3) + 2 - (p_idx - 1))
             has = "ない" if level == 0 else ("少しある" if level == 1 else "ある")
             hours = hours_options[0] if not level else hours_options[min(len(hours_options) - 1, level + (1 if i % 4 == 0 else 0))]
@@ -2985,7 +2757,7 @@ def _seed_employees_and_monthly(resp_by_name, wp_by_name):
             else:
                 trend = "変わらない"
             wants = "ある" if level >= 1 and (i + p_idx) % 3 != 0 else "ない"
-            stance_idx = max(0, min(1, (i % 3) - (1 if p_idx >= 2 else 0)))  # 月が進むほど「自分で取り組みたい」が増える
+            stance_idx = max(0, min(1, (i % 3) - (1 if p_idx >= 2 else 0)))
             r = resp_by_emp.get(emp.emp_id)
             answers = {
                 "has": has,
@@ -3009,7 +2781,6 @@ def _seed_employees_and_monthly(resp_by_name, wp_by_name):
                 )
             )
 
-
 def clear_demo():
     demo_ids = db.session.query(Task.id).filter_by(is_demo=True)
     StageLog.query.filter(StageLog.task_id.in_(demo_ids)).delete(synchronize_session=False)
@@ -3019,10 +2790,7 @@ def clear_demo():
     Employee.query.filter_by(is_demo=True).delete(synchronize_session=False)
     db.session.commit()
 
-
-# ==============================================================================
-# 画面: ログイン
-# ==============================================================================
+# ===== 画面: ログイン =====
 bp_auth = Blueprint("auth", __name__)
 
 DEFAULT_ADMIN_ID = "admin"
@@ -3035,9 +2803,7 @@ def admin_credentials():
         str(conf.get("ADMIN_PASSWORD", "") or DEFAULT_ADMIN_PASSWORD),
     )
 
-
 def authenticate(user_id, password):
-    """ID とパスワードが管理者アカウントと一致すればユーザー情報を返す。違えば None"""
     admin_id, admin_password = admin_credentials()
     ok_id = hmac.compare_digest((user_id or "").strip(), admin_id)
     ok_pw = hmac.compare_digest(password or "", admin_password)
@@ -3045,20 +2811,17 @@ def authenticate(user_id, password):
         return {"emp_id": admin_id, "name": "管理者"}
     return None
 
-
 def auth_status_text():
     admin_id, admin_password = admin_credentials()
     if admin_id == DEFAULT_ADMIN_ID and admin_password == DEFAULT_ADMIN_PASSWORD:
         return f"ログイン: ID「{admin_id}」（既定のパスワード）。本番では config.py の ADMIN_ID / ADMIN_PASSWORD を変更してください"
     return f"ログイン: ID「{admin_id}」（config.py で設定したパスワード）"
 
-
 def _safe_next(value):
     value = (value or "").strip()
     if value.startswith("/") and not value.startswith("//"):
         return value
     return None
-
 
 @bp_auth.route("/login", methods=["GET", "POST"])
 def login():
@@ -3082,17 +2845,13 @@ def login():
                 return redirect(nxt or url_for("main.index"))
     return render_template("auth/login.html", error=error, emp_id=user_id, next=nxt or "")
 
-
 @bp_auth.post("/logout")
 def logout():
     session.pop("user", None)
     flash("ログアウトしました。", "secondary")
     return redirect(url_for("board.index"))
 
-
-# ==============================================================================
-# 画面: ダッシュボード
-# ==============================================================================
+# ===== 画面: ダッシュボード =====
 bp_main = Blueprint("main", __name__)
 
 
@@ -3104,7 +2863,6 @@ def _resolve_urls(suggestions):
         except Exception:
             s["href"] = None
     return suggestions
-
 
 @bp_main.route("/")
 def index():
@@ -3139,11 +2897,10 @@ def index():
         active_count=len([t for t in all_tasks if t.status == "対応中"]),
     )
 
-
 @bp_main.post("/ai/suggest")
 def ai_suggest():
     if not ai_enabled():
-        flash("AI連携が無効です。ANTHROPIC_API_KEY を設定して再起動してください。", "warning")
+        flash("AI連携が無効です。config.py の OPENAI_API_URL と OPENAI_API_KEY を設定して再起動してください。", "warning")
         return redirect(url_for("main.index"))
     k = kpis()
     have, learn = skills_summary()
@@ -3192,10 +2949,7 @@ def ai_suggest():
         flash(f"AIが {len(result)} 件の提案を生成しました。", "success")
     return redirect(url_for("main.index"))
 
-
-# ==============================================================================
-# 画面: 自動化依頼（1画面・JSON API）
-# ==============================================================================
+# ===== 画面: 自動化依頼（1画面・JSON API） =====
 bp_survey = Blueprint("survey", __name__, url_prefix="/survey")
 
 
@@ -3203,18 +2957,13 @@ def _current():
     rid = session.get("respondent_id")
     return db.session.get(Respondent, rid) if rid else None
 
-
 def _domains():
     return Domain.query.filter_by(parent_id=None).order_by(Domain.sort, Domain.id).all()
-
 
 def _workplaces():
     return Workplace.query.order_by(Workplace.sort, Workplace.id).all()
 
-
 class _JsonForm(dict):
-    """JSON の辞書を request.form と同じ get / getlist で扱う"""
-
     def get(self, key, default=None, type=None):
         value = dict.get(self, key, default)
         if isinstance(value, list):
@@ -3233,7 +2982,6 @@ class _JsonForm(dict):
         if value in (None, ""):
             return []
         return [str(v) for v in value] if isinstance(value, list) else [str(value)]
-
 
 def _respondent_json(r):
     return {
@@ -3255,7 +3003,6 @@ def _respondent_json(r):
         "part_c_done": bool(r.part_c_done),
         "part_d_done": bool(r.part_d_done),
     }
-
 
 def _task_json(t):
     return {
@@ -3287,13 +3034,11 @@ def _task_json(t):
         "ai_flags": t.ai_flags_list,
     }
 
-
 def _state(r):
     if r is None:
         return {"respondent": None, "tasks": []}
     tasks = Task.query.filter_by(respondent_id=r.id).order_by(Task.created_at).all()
     return {"respondent": _respondent_json(r), "tasks": [_task_json(t) for t in tasks]}
-
 
 def _options():
     return {
@@ -3305,23 +3050,17 @@ def _options():
         "d_fields": survey_spec.D_FIELDS,
     }
 
-
 @bp_survey.route("/")
 def index():
     emp = (request.args.get("emp") or "").strip()
     return render_template("survey/index.html", state=_state(_current()), options=_options(), emp=emp)
 
-
 @bp_survey.route("/start")
 def start():
-    """旧リンク用（メールの誘導など）。1画面の入口へ"""
     emp = (request.args.get("emp") or "").strip()
     return redirect(url_for("survey.index", emp=emp or None))
 
-
-# ------------------------------------------------------------
-# API: あなたのこと
-# ------------------------------------------------------------
+# ----- API: あなたのこと -----
 @bp_survey.post("/api/respondent")
 def api_respondent():
     f = _JsonForm(request.get_json(silent=True) or {})
@@ -3333,7 +3072,7 @@ def api_respondent():
         if info:
             name = name or info["name"]
             workplace_id = workplace_id or info.get("workplace_id")
-        if not name or not workplace_id:  # 以前に登録した人・月次に答えた人は、その内容で
+        if not name or not workplace_id:
             r_name, r_wp = remembered_person(emp_id)
             name = name or r_name
             workplace_id = workplace_id or r_wp
@@ -3346,7 +3085,7 @@ def api_respondent():
         errors["workplace_id"] = "選択してください"
     if errors:
         return jsonify({"success": False, "errors": errors}), 400
-    r = Respondent.query.filter_by(emp_id=emp_id).first()  # 同定は社員IDだけで行う
+    r = Respondent.query.filter_by(emp_id=emp_id).first()
     resumed = r is not None
     if r is None:
         r = Respondent(emp_id=emp_id)
@@ -3354,21 +3093,17 @@ def api_respondent():
     r.emp_id = emp_id
     r.name = name
     r.workplace_id = workplace_id
-    remember_person(emp_id, name, workplace_id)  # 照会に氏名・職場がない環境では、ここで控えに残す
+    remember_person(emp_id, name, workplace_id)
     db.session.commit()
     session["respondent_id"] = r.id
     return jsonify({"success": True, "resumed": resumed, **_state(r)})
-
 
 @bp_survey.post("/api/reset")
 def api_reset():
     session.pop("respondent_id", None)
     return jsonify({"success": True})
 
-
-# ------------------------------------------------------------
-# API: 依頼する業務
-# ------------------------------------------------------------
+# ----- API: 依頼する業務 -----
 def _fill_task(task, form, errors):
     task.name = (form.get("name") or "").strip()
     task.domain_id = form.get("domain_id", type=int)
@@ -3390,7 +3125,6 @@ def _fill_task(task, form, errors):
     task.wish = form.get("wish")
     task.self_improve = form.get("self_improve")
     task.note = (form.get("note") or "").strip()
-    # つながり（任意）
     task.actors = (form.get("actors") or "").strip()
     task.info_from = (form.get("info_from") or "").strip()
 
@@ -3424,7 +3158,6 @@ def _fill_task(task, form, errors):
         errors["self_improve"] = "選択してください"
     task.compute_minutes()
 
-
 def _run_ai(task):
     domains = _domains()
     cands = related_tasks_for(task, limit=40)
@@ -3436,13 +3169,11 @@ def _run_ai(task):
     task.apply_ai_result(result)
     return result
 
-
 def _need_respondent():
     r = _current()
     if r is None:
         return None, (jsonify({"success": False, "message": "先に「あなたのこと」を保存してください", "errors": {"_": "respondent"}}), 400)
     return r, None
-
 
 @bp_survey.post("/api/tasks")
 def api_task_create():
@@ -3461,7 +3192,6 @@ def api_task_create():
     result = _run_ai(task)
     db.session.commit()
     return jsonify({"success": True, "task": _task_json(task), "flags": result.get("flags") or [], "tasks": _state(r)["tasks"]})
-
 
 @bp_survey.route("/api/tasks/<int:task_id>", methods=["PUT", "DELETE"])
 def api_task_update(task_id):
@@ -3485,10 +3215,7 @@ def api_task_update(task_id):
     db.session.commit()
     return jsonify({"success": True, "task": _task_json(task), "flags": result.get("flags") or [], "tasks": _state(r)["tasks"]})
 
-
-# ------------------------------------------------------------
-# API: 改善への関わり方・部全体について
-# ------------------------------------------------------------
+# ----- API: 改善への関わり方・部全体について -----
 @bp_survey.post("/api/part-c")
 def api_part_c():
     r, err = _need_respondent()
@@ -3514,7 +3241,6 @@ def api_part_c():
     db.session.commit()
     return jsonify({"success": True, "respondent": _respondent_json(r)})
 
-
 @bp_survey.post("/api/part-d")
 def api_part_d():
     r, err = _need_respondent()
@@ -3529,10 +3255,7 @@ def api_part_d():
     db.session.commit()
     return jsonify({"success": True, **_state(r)})
 
-
-# ==============================================================================
-# 画面: 改善案件
-# ==============================================================================
+# ===== 画面: 改善案件 =====
 bp_cases = Blueprint("cases", __name__, url_prefix="/cases")
 
 
@@ -3587,7 +3310,6 @@ def index():
         total_minutes=sum(t.monthly_minutes or 0 for t in tasks),
     )
 
-
 @bp_cases.route("/<int:task_id>")
 def detail(task_id):
     task = db.session.get(Task, task_id)
@@ -3605,7 +3327,6 @@ def detail(task_id):
         related_by_ai=related_by_ai,
         task_flow=build_task_flow(task).render(),
     )
-
 
 @bp_cases.post("/<int:task_id>/update")
 def update(task_id):
@@ -3639,10 +3360,8 @@ def update(task_id):
     flash("案件を更新しました。", "success")
     return redirect(url_for("cases.detail", task_id=task.id))
 
-
 @bp_cases.post("/<int:task_id>/stage")
 def set_stage(task_id):
-    """活動状況の段階を1つ進める／戻す、または直接指定する"""
     task = db.session.get(Task, task_id)
     if task is None:
         abort(404)
@@ -3653,7 +3372,7 @@ def set_stage(task_id):
         idx = min(max(task.stage_index + step, 0), len(C.STAGE_KEYS) - 1)
         key = C.STAGE_KEYS[idx]
     if task.is_on_hold:
-        task.status = "対応中"  # 段階を動かしたら保留は解除する
+        task.status = "対応中"
     note = (f.get("progress_note") or "").strip()
     if note:
         task.progress_note = note
@@ -3665,10 +3384,8 @@ def set_stage(task_id):
         flash("段階は変わっていません。", "secondary")
     return redirect(f.get("next") or url_for("cases.detail", task_id=task.id))
 
-
 @bp_cases.post("/<int:task_id>/hold")
 def toggle_hold(task_id):
-    """保留にする／保留を解除する（段階はそのまま）"""
     task = db.session.get(Task, task_id)
     if task is None:
         abort(404)
@@ -3682,7 +3399,6 @@ def toggle_hold(task_id):
         flash("保留にしました。活動状況では「保留中」に表示されます。", "success")
     db.session.commit()
     return redirect(url_for("cases.detail", task_id=task.id))
-
 
 @bp_cases.post("/<int:task_id>/verify")
 def verify(task_id):
@@ -3699,7 +3415,6 @@ def verify(task_id):
     flash("担当者確認を更新しました。" if task.verified else "担当者確認を解除しました。", "success")
     return redirect(url_for("cases.detail", task_id=task.id))
 
-
 @bp_cases.post("/<int:task_id>/reanalyze")
 def reanalyze(task_id):
     task = db.session.get(Task, task_id)
@@ -3710,9 +3425,8 @@ def reanalyze(task_id):
     result = analyze_task(task, domains, cands)
     task.apply_ai_result(result)
     db.session.commit()
-    flash("AI分析を更新しました（" + ("Claude API" if result.get("source") == "claude" else "ルールベース") + "）。", "success")
+    flash("AI分析を更新しました（" + ("ChatGPT API" if result.get("source") == "openai" else "ルールベース") + "）。", "success")
     return redirect(url_for("cases.detail", task_id=task.id))
-
 
 @bp_cases.route("/export.csv")
 def export_csv():
@@ -3750,14 +3464,11 @@ def export_csv():
         headers={"Content-Disposition": "attachment; filename=tasks_{}.csv".format(datetime.now().strftime("%Y%m%d"))},
     )
 
-
-# ==============================================================================
-# 画面: 業務マップ
-# ==============================================================================
+# ===== 画面: 業務マップ =====
 bp_bizmap = Blueprint("bizmap", __name__, url_prefix="/bizmap")
 
-MAX_TASKS = 80  # 1枚の図に載せる業務数の上限（超える場合は絞り込みを促す）
-KINDS = ("info",)  # 図は1枚（以前のヒト・モノの図はなくした）
+MAX_TASKS = 80
+KINDS = ("info",)
 KIND_LABELS = {"info": "業務マップ"}
 
 
@@ -3771,10 +3482,8 @@ def _filtered_tasks(domain_id, workplace_id):
         q = q.filter(Task.workplace_id == workplace_id)
     return q.order_by(Task.workplace_id, Task.created_at).all()
 
-
 def _build(kind, tasks):
     return build_info_flow(tasks)
-
 
 def _scope_label(workplace_id, domain_id):
     parts = []
@@ -3785,7 +3494,6 @@ def _scope_label(workplace_id, domain_id):
         d = db.session.get(Domain, domain_id)
         parts.append(d.name if d else f"領域 {domain_id}")
     return "／".join(parts) if parts else "製造部全体"
-
 
 def _merged_graph(kind, workplace_id, domain_id):
     tasks = _filtered_tasks(domain_id, workplace_id)
@@ -3815,7 +3523,6 @@ def _merged_graph(kind, workplace_id, domain_id):
         "auto_edge_count": len(auto["edges"]),
     }
     return merged
-
 
 @bp_bizmap.route("/")
 def index():
@@ -3851,7 +3558,6 @@ def index():
         total=sum(r["count"] for r in rows),
     )
 
-
 @bp_bizmap.route("/edit")
 def edit():
     kind = request.args.get("kind") or "info"
@@ -3871,10 +3577,7 @@ def edit():
         domains=Domain.query.filter_by(parent_id=None).order_by(Domain.sort, Domain.id).all(),
     )
 
-
-# ------------------------------------------------------------
-# グラフ API（エディタ用）
-# ------------------------------------------------------------
+# ----- グラフ API（エディタ用） -----
 @bp_bizmap.route("/api/graph", methods=["GET"])
 def api_graph_get():
     kind = request.args.get("kind") or "info"
@@ -3883,7 +3586,6 @@ def api_graph_get():
     workplace_id = request.args.get("workplace_id", type=int)
     domain_id = request.args.get("domain_id", type=int)
     return jsonify(_merged_graph(kind, workplace_id, domain_id))
-
 
 @bp_bizmap.route("/api/graph", methods=["POST"])
 def api_graph_save():
@@ -3908,7 +3610,6 @@ def api_graph_save():
     db.session.commit()
     return jsonify({"ok": True, "saved_at": row.updated_at.strftime("%Y/%m/%d %H:%M")})
 
-
 @bp_bizmap.route("/api/graph", methods=["DELETE"])
 def api_graph_reset():
     kind = request.args.get("kind") or "info"
@@ -3922,10 +3623,7 @@ def api_graph_reset():
         db.session.commit()
     return jsonify({"ok": True})
 
-
-# ------------------------------------------------------------
-# 手修正の業務データへの書き戻し
-# ------------------------------------------------------------
+# ----- 手修正の業務データへの書き戻し -----
 def _saved_graph(kind, workplace_id, domain_id):
     row = FlowMap.query.filter_by(kind=kind, scope=scope_key(workplace_id, domain_id)).first()
     if not row:
@@ -3934,7 +3632,6 @@ def _saved_graph(kind, workplace_id, domain_id):
         return json.loads(row.data or "{}")
     except ValueError:
         return None
-
 
 def _tasks_in_graph(saved):
     ids = set()
@@ -3950,7 +3647,6 @@ def _tasks_in_graph(saved):
         return {}
     return {t.id: t for t in Task.query.filter(Task.id.in_(list(ids))).all()}
 
-
 @bp_bizmap.route("/api/writeback", methods=["GET"])
 def api_writeback_candidates():
     kind = request.args.get("kind") or "info"
@@ -3961,7 +3657,6 @@ def api_writeback_candidates():
     saved = _saved_graph(kind, workplace_id, domain_id)
     cands = writeback_candidates(saved, _tasks_in_graph(saved))
     return jsonify({"candidates": [{"id": c["id"], "task_id": c["task_id"], "text": c["text"]} for c in cands]})
-
 
 @bp_bizmap.route("/api/writeback", methods=["POST"])
 def api_writeback_apply():
@@ -3978,7 +3673,6 @@ def api_writeback_apply():
     applied = apply_writeback(cands, selected, tasks_by_id)
     db.session.commit()
     return jsonify({"ok": True, "applied": applied, "selected": len(selected)})
-
 
 @bp_bizmap.route("/domain/<int:domain_id>")
 def domain(domain_id):
@@ -4001,10 +3695,7 @@ def domain(domain_id):
         info_flow=graph_to_diagram(merged).render() if merged["nodes"] else "",
     )
 
-
-# ==============================================================================
-# 画面: DX人財情報
-# ==============================================================================
+# ===== 画面: DX人財情報 =====
 bp_people = Blueprint("people", __name__, url_prefix="/people")
 
 
@@ -4035,10 +3726,7 @@ def index():
         args={"workplace_id": workplace_id, "wish": wish},
     )
 
-
-# ==============================================================================
-# 画面: 管理
-# ==============================================================================
+# ===== 画面: 管理 =====
 bp_admin = Blueprint("admin", __name__, url_prefix="/admin")
 
 
@@ -4057,7 +3745,6 @@ def index():
         auth_status=auth_status_text(),
     )
 
-
 @bp_admin.post("/settings")
 def save_settings():
     for key in ("project_name", "catchphrase", "sub_message", "target_respondents", "deadline"):
@@ -4067,10 +3754,7 @@ def save_settings():
     flash("設定を保存しました。", "success")
     return redirect(url_for("admin.index"))
 
-
-# ------------------------------------------------------------
-# 職場・業務領域
-# ------------------------------------------------------------
+# ----- 職場・業務領域 -----
 @bp_admin.post("/workplace/add")
 def add_workplace():
     name = (request.form.get("name") or "").strip()
@@ -4085,7 +3769,6 @@ def add_workplace():
         flash("職場を追加しました。", "success")
     return redirect(url_for("admin.index"))
 
-
 @bp_admin.post("/workplace/<int:workplace_id>/delete")
 def delete_workplace(workplace_id):
     w = db.session.get(Workplace, workplace_id)
@@ -4098,7 +3781,6 @@ def delete_workplace(workplace_id):
         db.session.commit()
         flash("職場を削除しました。", "info")
     return redirect(url_for("admin.index"))
-
 
 @bp_admin.post("/domain/add")
 def add_domain():
@@ -4114,7 +3796,6 @@ def add_domain():
         flash("業務領域を追加しました。", "success")
     return redirect(url_for("admin.index"))
 
-
 @bp_admin.post("/domain/<int:domain_id>/update")
 def update_domain(domain_id):
     d = db.session.get(Domain, domain_id)
@@ -4129,7 +3810,6 @@ def update_domain(domain_id):
     flash("業務領域を更新しました。", "success")
     return redirect(url_for("admin.index"))
 
-
 @bp_admin.post("/domain/<int:domain_id>/delete")
 def delete_domain(domain_id):
     d = db.session.get(Domain, domain_id)
@@ -4143,10 +3823,7 @@ def delete_domain(domain_id):
         flash("業務領域を削除しました。", "info")
     return redirect(url_for("admin.index"))
 
-
-# ------------------------------------------------------------
-# 社員マスタ
-# ------------------------------------------------------------
+# ----- 社員マスタ -----
 @bp_admin.route("/employees")
 def employees():
     rows = Employee.query.order_by(Employee.workplace_id, Employee.emp_id).all()
@@ -4157,7 +3834,6 @@ def employees():
         ldap_status=ldap_status_text(),
         workplaces=Workplace.query.order_by(Workplace.sort, Workplace.id).all(),
     )
-
 
 def _upsert_employee(emp_id, name, department, email, workplace_id=None, source="manual"):
     emp = Employee.query.filter_by(emp_id=emp_id).first()
@@ -4177,7 +3853,6 @@ def _upsert_employee(emp_id, name, department, email, workplace_id=None, source=
             emp.workplace_id = wp.id
     return created
 
-
 @bp_admin.post("/employees/add")
 def add_employee():
     emp_id = (request.form.get("emp_id") or "").strip()
@@ -4193,7 +3868,6 @@ def add_employee():
     flash("社員を追加しました。" if created else "社員情報を更新しました。", "success")
     return redirect(url_for("admin.employees"))
 
-
 @bp_admin.post("/employees/<int:employee_id>/toggle")
 def toggle_employee(employee_id):
     e = db.session.get(Employee, employee_id)
@@ -4202,7 +3876,6 @@ def toggle_employee(employee_id):
     e.active = not e.active
     db.session.commit()
     return redirect(url_for("admin.employees"))
-
 
 @bp_admin.post("/employees/<int:employee_id>/delete")
 def delete_employee(employee_id):
@@ -4213,7 +3886,6 @@ def delete_employee(employee_id):
     db.session.commit()
     flash("社員を削除しました。", "info")
     return redirect(url_for("admin.employees"))
-
 
 _HEADER_ALIASES = {
     "emp_id": ["社員id", "社員番号", "社員コード", "emp_id", "employee_id", "employeeid", "id"],
@@ -4231,7 +3903,6 @@ def _detect_columns(fieldnames):
                 mapping[key] = f
                 break
     return mapping
-
 
 @bp_admin.post("/employees/import")
 def import_employees():
@@ -4271,7 +3942,6 @@ def import_employees():
     flash(f"社員マスタを取り込みました（追加 {created} 人、更新 {updated} 人）。", "success")
     return redirect(url_for("admin.employees"))
 
-
 @bp_admin.route("/employees/export.csv")
 def export_employees():
     buf = io.StringIO()
@@ -4281,23 +3951,18 @@ def export_employees():
         w.writerow([e.emp_id, e.name, e.department, e.workplace.name if e.workplace else "", e.email, "1" if e.active else "0", e.source])
     return Response(buf.getvalue().encode("utf-8-sig"), mimetype="text/csv", headers={"Content-Disposition": "attachment; filename=employees.csv"})
 
-
-# ------------------------------------------------------------
-# デモデータ・エクスポート
-# ------------------------------------------------------------
+# ----- デモデータ・エクスポート -----
 @bp_admin.post("/demo/load")
 def load_demo():
     n = seed_demo()
     flash(f"デモデータを投入しました（業務 {n} 件、社員マスタと月次アンケート4か月分を含む）。", "success")
     return redirect(url_for("main.index"))
 
-
 @bp_admin.post("/demo/clear")
 def remove_demo():
     clear_demo()
     flash("デモデータを削除しました。", "info")
     return redirect(url_for("admin.index"))
-
 
 @bp_admin.route("/export/respondents.csv")
 def export_respondents():
@@ -4319,10 +3984,7 @@ def export_respondents():
         headers={"Content-Disposition": "attachment; filename=respondents_{}.csv".format(datetime.now().strftime("%Y%m%d"))},
     )
 
-
-# ==============================================================================
-# 画面: 月次アンケート
-# ==============================================================================
+# ===== 画面: 月次アンケート =====
 bp_monthly = Blueprint("monthly", __name__, url_prefix="/monthly")
 
 _PERIOD_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
@@ -4332,14 +3994,11 @@ QUESTION_TYPES = ("choice", "text")
 def current_period():
     return datetime.now().strftime("%Y-%m")
 
-
 def parse_period(value):
     value = (value or "").strip()
     return value if _PERIOD_RE.match(value) else current_period()
 
-
 def answerable_periods():
-    """回答を受け付ける月度: 当月と、設問セットがすでにある前月（月初に前月分を答える人のため）"""
     cur = current_period()
     prev = shift_period(cur, -1)
     periods = [cur]
@@ -4347,12 +4006,9 @@ def answerable_periods():
         periods.append(prev)
     return periods
 
-
 def public_period(value):
-    """回答画面の月度。URLで別の月度を指定しても、受け付けていない月度なら当月にする"""
     period = parse_period(value)
     return period if period in answerable_periods() else current_period()
-
 
 def shift_period(period, months):
     y, m = (int(x) for x in period.split("-"))
@@ -4365,17 +4021,13 @@ def shift_period(period, months):
         y += 1
     return f"{y:04d}-{m:02d}"
 
-
 def _workplaces():
     return Workplace.query.order_by(Workplace.sort, Workplace.id).all()
-
 
 def default_questions():
     return [dict(q, options=list(q.get("options", []))) for q in C.MONTHLY_CORE_QUESTIONS]
 
-
 def get_or_create_survey(period):
-    """その月度の設問セット。なければ直近の月度（なければ基本設問）をコピーして作る"""
     survey = MonthlySurvey.query.filter_by(period=period).first()
     if survey is None:
         prev = MonthlySurvey.query.filter(MonthlySurvey.period < period).order_by(MonthlySurvey.period.desc()).first()
@@ -4385,13 +4037,10 @@ def get_or_create_survey(period):
         db.session.commit()
     return survey
 
-
 def _wants_json():
     return request.is_json or "application/json" in (request.headers.get("Accept") or "")
 
-
 def _person(emp_id):
-    """社員IDから氏名・職場を引く。照会（LDAP → 控え）で見つからなくても、以前に答えた人なら分かる"""
     emp_id = (emp_id or "").strip()
     if not emp_id:
         return None
@@ -4404,10 +4053,7 @@ def _person(emp_id):
     workplace = db.session.get(Workplace, workplace_id) if workplace_id else None
     return {"emp_id": emp_id, "name": name, "department": "", "email": "", "workplace_id": workplace_id, "workplace": workplace.name if workplace else "", "source": "answers"}
 
-
-# ------------------------------------------------------------
-# 回答（ログイン不要）
-# ------------------------------------------------------------
+# ----- 回答（ログイン不要） -----
 @bp_monthly.route("/")
 def form():
     period = public_period(request.args.get("period"))
@@ -4426,7 +4072,6 @@ def form():
         existing=existing,
         workplaces=_workplaces(),
     )
-
 
 @bp_monthly.post("/submit")
 def submit():
@@ -4466,7 +4111,7 @@ def submit():
         elif not value and q.get("required"):
             errors[key] = "入力してください"
         answers[key] = value[:1000]
-    for q in survey.questions:  # 条件つきの設問: 親の答えが条件に合うときだけ出す（合わなければ空に戻す）
+    for q in survey.questions:
         dep = q.get("depends") or {}
         if not dep.get("key"):
             continue
@@ -4494,9 +4139,9 @@ def submit():
         period=period, emp_id=emp_id, name=name, workplace_id=workplace_id, survey_id=survey.id,
         answers_json=json.dumps(answers, ensure_ascii=False), comment=comment,
     )
-    respondent = Respondent.query.filter_by(emp_id=emp_id).first()  # 同定は社員IDだけで行う
+    respondent = Respondent.query.filter_by(emp_id=emp_id).first()
     row.respondent_id = respondent.id if respondent else None
-    remember_person(emp_id, name, workplace_id)  # 照会に氏名・職場がない環境では、ここで控えに残す
+    remember_person(emp_id, name, workplace_id)
     db.session.add(row)
     db.session.commit()
     session["monthly_last"] = row.id
@@ -4512,13 +4157,11 @@ def submit():
         )
     return redirect(url_for("monthly.done", period=period))
 
-
 @bp_monthly.route("/done")
 def done():
     period = public_period(request.args.get("period"))
     row = db.session.get(MonthlyResponse, session.get("monthly_last")) if session.get("monthly_last") else None
     return render_template("monthly/done.html", period=period, period_label=period_label(period), row=row)
-
 
 @bp_monthly.route("/api/employee/<emp_id>")
 def api_employee(emp_id):
@@ -4530,10 +4173,7 @@ def api_employee(emp_id):
         return jsonify({"found": False, "emp_id": emp_id, "answered": answered})
     return jsonify({"found": True, "answered": answered, **info})
 
-
-# ------------------------------------------------------------
-# 集計（要ログイン）
-# ------------------------------------------------------------
+# ----- 集計（要ログイン） -----
 @bp_monthly.route("/results")
 def results():
     rows = monthly_summary()
@@ -4542,7 +4182,6 @@ def results():
     selected = parse_period(request.args.get("period") or default_period)
     survey = MonthlySurvey.query.filter_by(period=selected).first()
     responses = MonthlyResponse.query.filter_by(period=selected).order_by(MonthlyResponse.workplace_id, MonthlyResponse.name).all()
-    # 基本設問の選択式は「設問ごとの推移」で見るので、月度の詳細には追加設問と記述設問だけ出す
     stats = [s for s in (monthly_question_stats(survey, responses) if survey else []) if s["q"]["key"] not in C.MONTHLY_CORE_KEYS or s["q"]["type"] == "text"]
     summary = next((r for r in rows if r["period"] == selected), None)
     trends = monthly_question_trends()
@@ -4575,7 +4214,6 @@ def results():
         choice_keys=[q["key"] for q in (survey.questions if survey else []) if q["type"] == "choice"],
     )
 
-
 @bp_monthly.route("/export.csv")
 def export_csv():
     surveys = {s.period: s for s in MonthlySurvey.query.all()}
@@ -4601,10 +4239,7 @@ def export_csv():
         headers={"Content-Disposition": "attachment; filename=monthly_{}.csv".format(datetime.now().strftime("%Y%m%d"))},
     )
 
-
-# ------------------------------------------------------------
-# 設問の編集（要ログイン）
-# ------------------------------------------------------------
+# ----- 設問の編集（要ログイン） -----
 @bp_monthly.route("/admin")
 def survey_admin():
     period = parse_period(request.args.get("period") or current_period())
@@ -4625,10 +4260,8 @@ def survey_admin():
         current_period=current_period(),
     )
 
-
 @bp_monthly.route("/admin/questions")
 def survey_admin_questions():
-    """コピー用: 指定月度の設問（period=default なら基本設問）"""
     which = (request.args.get("period") or "default").strip()
     if which == "default":
         return jsonify({"questions": default_questions(), "label": "基本設問"})
@@ -4637,12 +4270,7 @@ def survey_admin_questions():
         return jsonify({"questions": None, "message": f"{period_label(parse_period(which))}の設問はありません"})
     return jsonify({"questions": survey.questions, "label": survey.period_label})
 
-
 def _clean_questions(items):
-    """管理画面から送られた設問を検証して整える。問題があれば (None, メッセージ)
-
-    基本設問は文面だけ変えられる。形式・選択肢・必須は定義どおりに戻し、外すこともできない（推移を途切れさせないため）。
-    """
     core = {q["key"]: q for q in C.MONTHLY_CORE_QUESTIONS}
     cleaned, seen = [], set()
     for i, q in enumerate(items or [], start=1):
@@ -4688,7 +4316,6 @@ def _clean_questions(items):
         return None, "基本設問は外せません: " + "、".join(missing)
     return cleaned, None
 
-
 @bp_monthly.post("/admin/save")
 def survey_admin_save():
     data = request.get_json(silent=True) or {}
@@ -4701,7 +4328,6 @@ def survey_admin_save():
     survey.is_active = bool(data.get("is_active", True))
     db.session.commit()
     return jsonify({"success": True, "message": f"{period_label(period)}の設問を保存しました（{len(questions)}問）。", "count": len(questions)})
-
 
 @bp_monthly.post("/admin/<int:survey_id>/delete")
 def survey_admin_delete(survey_id):
@@ -4716,10 +4342,7 @@ def survey_admin_delete(survey_id):
         flash(f"{survey.period_label}の設問セットを削除しました。", "success")
     return redirect(url_for("monthly.survey_admin", period=current_period()))
 
-
-# ==============================================================================
-# 画面: 活動状況
-# ==============================================================================
+# ===== 画面: 活動状況 =====
 bp_board = Blueprint("board", __name__, url_prefix="/board")
 
 
@@ -4741,9 +4364,7 @@ def index():
         show_names=Setting.get("board_show_names", "1") != "0",
     )
 
-
 def highlights(tasks):
-    """依頼したくなる材料（ダッシュボードと同じ計算。職場を選んでいればその職場の業務だけ）: 累計改善案件、年間削減工数、直近の完了2件"""
     total_minutes = sum(t.monthly_minutes or 0 for t in tasks)
     saved_minutes = sum(t.saved_minutes for t in tasks)
     completed = [t for t in tasks if t.status == "完了"]
@@ -4759,11 +4380,7 @@ def highlights(tasks):
         "recent": recent,
     }
 
-
-# ==============================================================================
-# テンプレート
-# ==============================================================================
-# 画面のテンプレート（Jinja2）。キーは以前のファイルパス。{% extends %} / {% include %} もこのキーで引く
+# ===== テンプレート =====
 TEMPLATES = {
     'admin/employees.html': r'''{% extends "base.html" %}
 {% block title %}社員マスタ{% endblock %}
@@ -4897,7 +4514,7 @@ document.getElementById("test-btn").addEventListener("click", async function () 
     <div class="card mb-3"><div class="card-body">
       <h5 class="card-title">AI連携</h5>
       <p class="mb-1">{{ ai_status }}</p>
-      <p class="small text-muted mb-0">有効にするには、プロジェクト直下の <code>config.py</code> の <code>ANTHROPIC_API_KEY</code> にキーを書いて再起動してください。未設定の場合はルールベースで同じ形式の分析を行います。</p>
+      <p class="small text-muted mb-0">有効にするには、プロジェクト直下の <code>config.py</code> の <code>OPENAI_API_URL</code>（社内 Azure OpenAI 中継サービスの Responses API の URL）と <code>OPENAI_API_KEY</code>、<code>OPENAI_MODEL</code>（GPT-6 系のモデル名）を書いて再起動してください。temperature / top_p は送りません。未設定の場合はルールベースで同じ形式の分析を行います。</p>
     </div></div>
 
     <div class="card mb-3"><div class="card-body">
@@ -5481,7 +5098,7 @@ document.getElementById("test-btn").addEventListener("click", async function () 
 <script src="{{ url_for('static', filename='flows.js') }}"></script>
 {% endblock %}
 ''',
-    'board/_board.html': r'''{# 活動状況の本体 #}
+    'board/_board.html': r'''
 {% from "board/_macros.html" import row with context %}
 
 {% set n_done, n_active, n_hold, n_wait = b.done|length, b.active|length, b.hold|length, b.waiting_total %}
@@ -5579,7 +5196,7 @@ document.getElementById("test-btn").addEventListener("click", async function () 
   {% else %}<div class="pb-empty">順番待ちの案件はありません</div>{% endif %}
 </section>
 ''',
-    'board/_macros.html': r'''{# 活動状況の部品（{% from "board/_macros.html" import stepper, row with context %} で使う） #}
+    'board/_macros.html': r'''
 {% macro stepper(t, small=False) %}
 {% set dates = t.stage_dates %}
 <ol class="pb-steps{% if small %} pb-steps-sm{% endif %}{% if t.is_on_hold %} pb-hold{% endif %}{% if t.stage_key == 'done' %} pb-complete{% endif %}" aria-label="進捗 {{ t.stage_name }}">
@@ -5685,7 +5302,7 @@ document.getElementById("test-btn").addEventListener("click", async function () 
     <div class="card mb-3"><div class="card-body">
       <div class="d-flex justify-content-between align-items-center">
         <h5 class="card-title mb-0">AI分析
-          {% if task.ai_source == 'claude' %}<span class="badge text-bg-primary">Claude API</span>{% elif task.ai_source %}<span class="badge text-bg-secondary">ルールベース</span>{% endif %}
+          {% if task.ai_source == 'openai' %}<span class="badge text-bg-primary">ChatGPT API</span>{% elif task.ai_source == 'claude' %}<span class="badge text-bg-primary">Claude API</span>{% elif task.ai_source %}<span class="badge text-bg-secondary">ルールベース</span>{% endif %}
           {% if task.ai_priority %}<span class="badge text-bg-{{ {'高':'danger','中':'warning','低':'light text-muted'}.get(task.ai_priority, 'light') }}">優先度 {{ task.ai_priority }}</span>{% endif %}
         </h5>
         <form method="post" action="{{ url_for('cases.reanalyze', task_id=task.id) }}">
@@ -6135,7 +5752,7 @@ document.getElementById("test-btn").addEventListener("click", async function () 
       <div class="d-flex justify-content-between align-items-center">
         <h6 class="mb-0">AIによる提案</h6>
         <form method="post" action="{{ url_for('main.ai_suggest') }}">
-          <button class="btn btn-sm btn-outline-primary" {% if not ai_enabled %}disabled title="ANTHROPIC_API_KEY を設定すると使えます"{% endif %}>AIで提案を生成</button>
+          <button class="btn btn-sm btn-outline-primary" {% if not ai_enabled %}disabled title="config.py の OPENAI_API_URL と OPENAI_API_KEY を設定すると使えます"{% endif %}>AIで提案を生成</button>
         </form>
       </div>
       {% if ai_suggestions %}
@@ -6149,7 +5766,7 @@ document.getElementById("test-btn").addEventListener("click", async function () 
         <li class="list-group-item px-0 small text-muted">生成日時: {{ ai_suggestions[0].generated_at }}</li>
       </ul>
       {% elif not ai_enabled %}
-      <p class="small text-muted mt-2 mb-0">AI連携は未設定です。config.py の ANTHROPIC_API_KEY を設定して起動すると、案件登録時のAI分析とここでの提案生成が有効になります。</p>
+      <p class="small text-muted mt-2 mb-0">AI連携は未設定です。config.py の OPENAI_API_URL と OPENAI_API_KEY を設定して起動すると、案件登録時のAI分析とここでの提案生成が有効になります。</p>
       {% endif %}
     </div></div>
   </div>
@@ -6570,7 +6187,6 @@ document.getElementById("test-btn").addEventListener("click", async function () 
       msg.textContent = "見つかりません。氏名と職場を入れてください";
     }
   }
-  // 条件つきの設問: 親の答えで「必須」になったり、入力欄ごと消えたりする
   function applyDeps() {
     form.querySelectorAll(".mq-q[data-dep-key]").forEach(function (q) {
       var parent = form.querySelector('.mq-q[data-key="' + q.dataset.depKey + '"] input:checked');
@@ -7087,14 +6703,10 @@ document.getElementById("test-btn").addEventListener("click", async function () 
 }
 
 
-# ==============================================================================
-# 静的ファイル
-# ==============================================================================
-# 静的ファイル（CSS / JS）。/static/<名前> で配信する
+# ===== 静的ファイル =====
 STATIC = {
     'app.js': r'''// 共通スクリプト
 document.addEventListener("DOMContentLoaded", function () {
-  // data-confirm 付きフォームは送信前に確認する
   document.querySelectorAll("form[data-confirm]").forEach(function (form) {
     form.addEventListener("submit", function (e) {
       if (!window.confirm(form.getAttribute("data-confirm"))) {
@@ -7103,7 +6715,6 @@ document.addEventListener("DOMContentLoaded", function () {
     });
   });
 
-  // 月間時間の目安をフォーム上で即時計算する（パートB）
   var freq = document.getElementById("frequency");
   var dur = document.getElementById("duration");
   var head = document.getElementById("headcount");
@@ -7131,7 +6742,6 @@ document.addEventListener("DOMContentLoaded", function () {
   }
 });
 
-// 指標の数字をカウントアップで表示する（視差効果を減らす設定ではそのまま表示）
 (function () {
   if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
   var targets = document.querySelectorAll(".stat-value, .mini-value, .kpi-value, .pb-fcount");
@@ -7159,16 +6769,14 @@ document.addEventListener("DOMContentLoaded", function () {
       if (t < 1) requestAnimationFrame(step); else node.nodeValue = text;
     };
     requestAnimationFrame(step);
-    // 画面が隠れていて requestAnimationFrame が止まっていても、最後は本来の値にする
     setTimeout(function () { if (node.nodeValue !== text) node.nodeValue = text; }, delay + duration + 300);
   });
 })();
 
-// 活動状況の見出しのプルダウン（「全体」「製造1課」…）を選んだ文字の幅に合わせる
 (function () {
   var sel = document.querySelector(".pb-scope-select");
   if (!sel) return;
-  if (window.CSS && CSS.supports && CSS.supports("field-sizing", "content")) return;  // ブラウザが文字幅に合わせてくれる
+  if (window.CSS && CSS.supports && CSS.supports("field-sizing", "content")) return;
   var probe = document.createElement("span");
   probe.style.cssText = "position:absolute;left:-9999px;top:0;visibility:hidden;white-space:nowrap;";
   document.body.appendChild(probe);
@@ -7190,10 +6798,6 @@ document.addEventListener("DOMContentLoaded", function () {
 })();
 ''',
     'flowedit.js': r'''// 業務マップ 編集エディタ
-// mindmap（Flex Diagram）の操作感を流れ図向けに応用: ドラッグ移動、ダブルクリック編集、🔗でリンク作成、
-// 矢印クリックで向き反転、Shift範囲選択、Undo/Redo、名前付き保存。
-// 自動生成したノード（source: auto）と手で足したノード（source: manual）を区別して保存し、
-// 再生成時はサーバー側で手修正をマージする。
 (function () {
   var app = document.getElementById("fe-app");
   if (!app) return;
@@ -7233,7 +6837,6 @@ document.addEventListener("DOMContentLoaded", function () {
   var popNodeId = null, popEdgeId = null;
   var lastClick = { x: 120, y: 120 };
 
-  // ---------- 基本 ----------
   function nodeById(id) { for (var i = 0; i < G.nodes.length; i++) if (G.nodes[i].id === id) return G.nodes[i]; return null; }
   function edgeById(id) { for (var i = 0; i < G.edges.length; i++) if (G.edges[i].id === id) return G.edges[i]; return null; }
   function nodeEl(id) { return els.nodes.querySelector('[data-id="' + CSS.escape(id) + '"]'); }
@@ -7278,7 +6881,6 @@ document.addEventListener("DOMContentLoaded", function () {
     else setStatus("自動生成（未保存）");
   }
 
-  // ---------- 描画 ----------
   function renderAll() {
     els.nodes.innerHTML = "";
     G.nodes.forEach(function (n) { els.nodes.appendChild(createNodeEl(n)); });
@@ -7418,7 +7020,6 @@ document.addEventListener("DOMContentLoaded", function () {
     });
   }
 
-  // ---------- 選択 ----------
   function selectOnly(id) {
     selected = id ? [id] : [];
     els.nodes.querySelectorAll(".fe-node").forEach(function (el) { el.classList.toggle("fe-selected", selected.indexOf(el.dataset.id) !== -1); });
@@ -7441,7 +7042,6 @@ document.addEventListener("DOMContentLoaded", function () {
     els.nodes.querySelectorAll(".fe-node").forEach(function (el) { el.classList.toggle("fe-selected", selected.indexOf(el.dataset.id) !== -1); });
   }
 
-  // ---------- 編集操作 ----------
   function startEdit(id) {
     var n = nodeById(id), el = nodeEl(id);
     if (!n || !el) return;
@@ -7600,7 +7200,6 @@ document.addEventListener("DOMContentLoaded", function () {
     setTimeout(function () { if (!linkSource) setMode(""); }, 1500);
   }
 
-  // ---------- ポップオーバー ----------
   function placePopover(pop, ev) {
     var r = els.container.getBoundingClientRect();
     var x = Math.min(ev.clientX - r.left + 8, r.width - 240), y = Math.min(ev.clientY - r.top + 8, r.height - 200);
@@ -7661,7 +7260,6 @@ document.addEventListener("DOMContentLoaded", function () {
   els.edgeLabel.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); setEdgeLabel(popEdgeId, els.edgeLabel.value.trim()); closePopovers(); } });
   [els.nodePop, els.edgePop].forEach(function (p) { p.addEventListener("mousedown", function (e) { e.stopPropagation(); }); });
 
-  // ---------- レイアウト ----------
   function nodeSizes() {
     var sizes = {};
     G.nodes.forEach(function (n) { var b = bounds(n.id); sizes[n.id] = b ? { w: b.w, h: b.h } : { w: 120, h: 40 }; });
@@ -7734,7 +7332,6 @@ document.addEventListener("DOMContentLoaded", function () {
     applyView();
   }
 
-  // ---------- マウス・キーボード ----------
   els.container.addEventListener("mousedown", function (e) {
     if (e.button !== 0) return;
     var empty = e.target === els.container || e.target === els.canvas || e.target === els.nodes || e.target.id === "fe-svg";
@@ -7808,7 +7405,6 @@ document.addEventListener("DOMContentLoaded", function () {
     if (dirty) { e.preventDefault(); e.returnValue = ""; }
   });
 
-  // ---------- サーバー ----------
   function apiUrl() {
     var q = new URLSearchParams({ kind: cfg.kind });
     if (cfg.workplace) q.set("workplace_id", cfg.workplace);
@@ -7883,7 +7479,6 @@ document.addEventListener("DOMContentLoaded", function () {
     await load();
   }
 
-  // ---------- 業務データへの書き戻し ----------
   var wbPop = document.getElementById("fe-wb-popover");
   var wbList = document.getElementById("fe-wb-list");
   function writebackUrl() { return cfg.api.replace(/\/graph$/, "/writeback") + apiUrl().slice(cfg.api.length); }
@@ -7945,7 +7540,6 @@ document.addEventListener("DOMContentLoaded", function () {
   document.getElementById("fe-wb-close").addEventListener("click", function () { wbPop.classList.remove("fe-show"); });
   wbPop.addEventListener("mousedown", function (e) { e.stopPropagation(); });
 
-  // ---------- ツールバー ----------
   document.getElementById("fe-save").addEventListener("click", save);
   els.undo.addEventListener("click", undo);
   els.redo.addEventListener("click", redo);
@@ -8012,7 +7606,6 @@ document.addEventListener("DOMContentLoaded", function () {
       var vb = svg && svg.viewBox && svg.viewBox.baseVal;
       var canvas = el.parentElement;
       if (vb && vb.width && canvas) {
-        // 初期表示は横幅に収まるように縮小（最小 35%）
         var fit = (canvas.clientWidth - 32) / vb.width;
         scales[keyOf(el)] = Math.max(0.25, Math.min(1, fit));
       }
@@ -9113,11 +8706,8 @@ html { scroll-behavior: smooth; }
 }
 
 
-# ==============================================================================
-# アプリ生成
-# ==============================================================================
+# ===== アプリ生成 =====
 def _persistent_secret(instance_path):
-    """セッション用の秘密鍵を instance フォルダに保存して再起動後も使い回す。"""
     path = os.path.join(instance_path, "secret_key.txt")
     if os.path.exists(path):
         with open(path, encoding="utf-8") as f:
@@ -9128,7 +8718,6 @@ def _persistent_secret(instance_path):
     with open(path, "w", encoding="utf-8") as f:
         f.write(value)
     return value
-
 
 def create_app(test_config=None):
     app = Flask(__name__, static_folder=None, instance_path=os.path.join(BASE_DIR, "instance"), instance_relative_config=True)
@@ -9160,13 +8749,12 @@ def create_app(test_config=None):
         response.headers["Cache-Control"] = "no-cache"
         return response
 
-    # ログイン不要で使えるもの: 活動状況、自動化依頼（棚卸し）、月次アンケートの回答、ログイン画面
     public_blueprints = {"board", "survey", "auth"}
     public_endpoints = {"static", "main.index", "monthly.form", "monthly.submit", "monthly.done", "monthly.api_employee"}
 
     @app.before_request
     def require_login():
-        if request.endpoint is None:  # 存在しないURLはログインに回さず、そのまま 404 にする
+        if request.endpoint is None:
             return None
         if request.endpoint in public_endpoints or request.blueprint in public_blueprints:
             return None
@@ -9184,7 +8772,7 @@ def create_app(test_config=None):
         db.session.rollback()
         try:
             return render_template("errors/500.html"), 500
-        except Exception:  # noqa: BLE001  DB まで壊れていて画面が描けないとき
+        except Exception:
             return "<h1>エラーが発生しました</h1><p>しばらくしてからもう一度お試しください。</p>", 500
 
     @app.context_processor
@@ -9210,7 +8798,6 @@ def create_app(test_config=None):
 
     @app.template_filter("hours")
     def hours(minutes):
-        """分 → 時間（小数1桁）"""
         try:
             return "{:,.1f}".format((minutes or 0) / 60.0)
         except (TypeError, ValueError):
@@ -9227,10 +8814,7 @@ def create_app(test_config=None):
 
     return app
 
-
-# ==============================================================================
-# 起動
-# ==============================================================================
+# ===== 起動 =====
 if __name__ == "__main__":
     port = int(conf.get("PORT", 5000) or 5000)
     if len(sys.argv) > 1 and sys.argv[1] == "serve":
