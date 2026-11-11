@@ -750,7 +750,7 @@ def smoke_request():
     def in_html(text):
         return text in html or json.dumps(text)[1:-1] in html
 
-    check(code == 200 and "聞き取りを始める" in html and "一気に書く" in html and "写真を貼る" in html and "最初から見る" in html and in_html("まずは相談したい") and in_html("スキルを身につけながら、一緒にやってみたい") and "mermaid" in html and in_html("日報の集計"), "依頼ページ: 聞き取り・一気に書く・写真・再生・3つの希望・一緒にやってみたい・業務名の引き継ぎ")
+    check(code == 200 and "聞き取りを始める" in html and "一気に書く" in html and "写真を貼る" in html and "最初から見る" in html and 'id="rq-dup-note"' in html and 'id="rq-dup"' in html and in_html("まずは相談したい") and in_html("スキルを身につけながら、一緒にやってみたい") and "mermaid" in html and in_html("日報の集計"), "依頼ページ: 聞き取り・一気に書く・写真・再生・3つの希望・一緒にやってみたい・業務名の引き継ぎ")
     check("依頼する業務" in html and "改善への関わり方" not in html and "部全体について" not in html, "第3節・第4節は無くなっている")
 
     r = client.post("/survey/api/intake", json={"title": "x", "messages": [], "state": {}})
@@ -806,15 +806,23 @@ def smoke_request():
         check(r.status_code == 200 and j["success"] and "最初に何を" in j["reply"] and j["done"] is False and j["remaining"] == 5 and j["diagram"] == "" and j["state"]["title"] == "日報の集計", "聞き取り1ターン目: 最初の質問が返り、図はまだ空")
         b = calls[-1]["body"]
         check(b["model"] == "gpt-6-test" and "聞き取り担当" in b["instructions"] and "現在の state" in b["instructions"] and isinstance(b["input"], list) and b["input"][0]["role"] == "user" and "日報の集計" in b["input"][0]["content"] and "temperature" not in calls[-1]["raw"], "1ターン目の本文: 聞き取りのプロンプト・state・業務名。temperature なし")
+        check([x["name"] for x in b["tools"]] == ["person_history", "list_known_systems", "search_similar_tasks", "check_duplicate"] and b["tool_choice"] == "auto" and b["store"] is False and "使える道具" in b["instructions"], "聞き取りには4つの道具を平らな形で渡す")
         check("交代勤務（昼勤・夜勤あり）" in b["instructions"] and "昼勤・夜勤の両方" in b["instructions"], "交代勤務の人には、いつやるかを聞く指示が入る")
         msgs = [{"role": "ai", "text": j["reply"]}, {"role": "user", "text": "生産管理システムから前日の実績をCSVで出す"}]
+        script.append({"id": "resp_t", "object": "response", "status": "completed", "error": None, "output": [
+            {"type": "function_call", "id": "fc_a", "call_id": "call_ph", "name": "person_history", "arguments": "{}", "status": "completed"},
+            {"type": "function_call", "id": "fc_b", "call_id": "call_dup", "name": "check_duplicate", "arguments": json.dumps({"name": "日報の集計"}, ensure_ascii=False), "status": "completed"},
+        ]})
         script.append(message({"reply": "なるほど。次に何をしますか？", "chips": [], "done": False, "remaining": 4, "state": state(steps=[step1], sources=["生産管理システム"])}))
+        n_before = len(calls)
         r = client.post("/survey/api/intake", json={"title": "日報の集計", "messages": msgs, "state": j["state"], "shown": 0})
         j = r.get_json()
         b = calls[-1]["body"]
+        outs = {i["call_id"]: json.loads(i["output"]) for i in b["input"] if i.get("type") == "function_call_output"}
+        check(len(calls) == n_before + 2 and r.status_code == 200 and outs["call_ph"]["氏名"] == "試験 太郎" and outs["call_ph"]["勤務形態"] == "交代勤務" and outs["call_ph"]["月次アンケート"]["行っている業務"] == "日報の集計、出勤簿の転記" and outs["call_dup"]["二重登録"] is False, "聞き取り中に AI が本人の履歴と二重登録の有無を道具で調べ、結果を受け取って続ける")
         check(r.status_code == 200 and len(j["state"]["steps"]) == 1 and "st1" in j["diagram"] and "生産管理システム" in j["diagram"] and "flowchart LR" in j["diagram"], "2ターン目: 手順1が入り、図に手順とシステムが出る")
         check(len(j["frames"]) == 1 and j["frames"][0] == j["diagram"], "増えた手順のぶんだけコマ送りの図（frames）が返る")
-        check([m["role"] for m in b["input"]] == ["assistant", "user"] and b["input"][1]["content"] == "生産管理システムから前日の実績をCSVで出す", "会話の記録をそのまま送る")
+        check([m.get("role") for m in b["input"] if m.get("role")] == ["assistant", "user"] and b["input"][1]["content"] == "生産管理システムから前日の実績をCSVで出す", "会話の記録をそのまま送る（道具の項目は role なしで続く）")
         msgs += [{"role": "ai", "text": j["reply"]}, {"role": "user", "text": "Excelの集計表に貼り付ける\n不良件数を手で数えて追記する"}]
         script.append(message({"reply": "集計表は誰に渡しますか？", "chips": ["課長", "生産管理課", "自分だけ", "分からない"], "done": False, "remaining": 3, "state": state(steps=[step1, step2, step3], sources=["生産管理システム"], outputs=["日次実績集計表"])}))
         r = client.post("/survey/api/intake", json={"title": "日報の集計", "messages": msgs, "state": j["state"], "shown": 1})
@@ -857,7 +865,8 @@ def smoke_request():
         j = r.get_json()
         b = calls[-1]["body"]
         check(r.status_code == 200 and j["success"] and j["first_impression"] == finalize["first_impression"] and len(j["tasks"]) == 1 and j["suggested"] == ["出勤簿の転記"], "登録: AI の一言が返り、候補から登録した業務が消える")
-        check("業務分析アシスタント" in b["instructions"] and "聞き取りの結果" in b["input"] and "減らしたい" in b["input"] and "製造実行・管理" in b["input"] and "## 勤務\n夜勤" in b["input"] and "temperature" not in calls[-1]["raw"], "登録時の分析: state・希望・勤務・業務領域リストを送る。temperature なし")
+        fin_in = b["input"][0]["content"]
+        check("業務分析アシスタント" in b["instructions"] and "聞き取りの結果" in fin_in and "減らしたい" in fin_in and "製造実行・管理" in fin_in and "## 勤務\n夜勤" in fin_in and "temperature" not in calls[-1]["raw"] and [x["name"] for x in b["tools"]] == ["search_similar_tasks", "duplicate_outputs"], "登録時の分析: state・希望・勤務・業務領域リストと2つの道具を送る。temperature なし")
         with app.app_context():
             t = Task.query.filter_by(name="日報の集計").first()
             check(t is not None and len(t.steps) == 4 and t.steps[3]["to"] == "課長" and t.frequency == "毎日" and t.duration == "15〜30分" and t.wish == "減らしたい" and t.self_improve == "スキルを身につけながら、一緒にやってみたい" and t.shift == "夜勤" and t.monthly_minutes > 0, "案件に手順・頻度・時間・希望・一緒にやってみたい・勤務（夜勤）が保存される")
@@ -868,6 +877,20 @@ def smoke_request():
             check(r_.c2_skills == "Excel関数" and r_.c3_learn == "Python" and r_.wants_to_improve, "一緒にやってみたい人の技術が残り、自主改善希望者になる")
             tid = t.id
 
+        r = client.post("/survey/api/tasks", json={"state": final_state, "messages": msgs, "frequency": "毎日", "duration": "15〜30分", "wish": "減らしたい", "shift": "夜勤"})
+        j = r.get_json()
+        check(r.status_code == 409 and j["duplicate"]["name"] == "日報の集計" and "登録済み" in j["message"], "同じ人が同じ業務名をもう一度登録しようとすると 409 で警告（AI は呼ばない）")
+        script.append({"id": "resp_t", "object": "response", "status": "completed", "error": None, "output": [
+            {"type": "function_call", "id": "fc_s", "call_id": "call_sim", "name": "search_similar_tasks", "arguments": json.dumps({"query": "日報の集計"}, ensure_ascii=False), "status": "completed"},
+            {"type": "function_call", "id": "fc_d", "call_id": "call_do", "name": "duplicate_outputs", "arguments": "{}", "status": "completed"},
+        ]})
+        script.append(message(dict(finalize, name="2件目")))
+        r = client.post("/survey/api/tasks", json={"state": final_state, "messages": msgs, "frequency": "毎日", "duration": "15〜30分", "wish": "減らしたい", "shift": "夜勤", "force": True})
+        j = r.get_json()
+        outs = {i["call_id"]: json.loads(i["output"]) for i in calls[-1]["body"]["input"] if i.get("type") == "function_call_output"}
+        check(r.status_code == 200 and j["success"] and len(j["tasks"]) == 2 and outs["call_sim"]["found"] >= 1 and any(row["業務名"] == "日報の集計" for row in outs["call_sim"]["業務"]) and "同じできるものを複数人が作っている組" in outs["call_do"], "force なら別の業務として登録し、分析の道具（類似業務・重複成果物）が実行される")
+        r = client.delete(f"/survey/api/tasks/{j['task']['id']}")
+        check(r.status_code == 200 and len(r.get_json()["tasks"]) == 1, "重複分を取り消す")
         script.append(message(dict(finalize, name="相談の業務", hearing_questions=["いまの帳票は誰が見ていますか？", "数字を使う会議はありますか？"], wish="まずは相談したい")))
         r = client.post("/survey/api/tasks", json={"name": "相談したい業務", "state": state(title="相談したい業務", steps=[step1, step2]), "messages": [], "frequency": "毎週", "duration": "15分未満", "wish": "まずは相談したい", "shift": "昼勤"})
         check(r.status_code == 200 and r.get_json()["success"], "「まずは相談したい」でも登録できる")
@@ -1142,14 +1165,52 @@ def smoke_ai():
         html = r.data.decode("utf-8")
         check(r.status_code == 200 and "テスト提案のタイトル" in html, "ダッシュボードの『AIで提案を生成』も Responses API 経由で出る")
         check("temperature" not in calls[-1]["raw"] and calls[-1]["body"].get("reasoning") == {"effort": "low"}, "提案生成も temperature なし・reasoning あり")
+        def tool_call_message(name, args, call_id="call_1"):
+            return {"id": "resp_t", "object": "response", "status": "completed", "error": None, "output": [{"type": "function_call", "id": "fc_1", "call_id": call_id, "name": name, "arguments": json.dumps(args, ensure_ascii=False), "status": "completed"}]}
+
+        got = []
+        tools = [{"type": "function", "function": {"name": "echo", "description": "test", "parameters": {"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]}}}]
+        handlers = {"echo": lambda args: got.append(args) or {"rows": [{"a": 1}]}}
+        with app.app_context():
+            script.append(tool_call_message("echo", {"q": "x"}))
+            script.append(message("done"))
+            text = app_module._call_ai("sys", "hello", tools=tools, handlers=handlers)
+            b1, b2 = calls[-2]["body"], calls[-1]["body"]
+            check(text == "done" and got == [{"q": "x"}], "道具の依頼（function_call）を実行して最終回答を得る")
+            check(b1["tools"] == [{"type": "function", "name": "echo", "description": "test", "parameters": tools[0]["function"]["parameters"]}] and b1["tool_choice"] == "auto" and b1["store"] is False and b1["input"] == [{"role": "user", "content": "hello"}] and "temperature" not in calls[-2]["raw"], "tools は平らな形、tool_choice は auto、store は false、temperature なし（aiagent_rag_bundle と同じ送り方）")
+            check(b2["input"][-2] == {"type": "function_call", "call_id": "call_1", "name": "echo", "arguments": json.dumps({"q": "x"}, ensure_ascii=False)} and b2["input"][-1]["type"] == "function_call_output" and b2["input"][-1]["call_id"] == "call_1" and json.loads(b2["input"][-1]["output"]) == {"rows": [{"a": 1}]}, "2往復目の input に function_call と function_call_output（JSON 文字列）を積む")
+            got.clear()
+            script.append(tool_call_message("echo", {"q": "x"}, "c1"))
+            script.append(tool_call_message("echo", {"q": "x"}, "c2"))
+            script.append(tool_call_message("echo", {"q": "x"}, "c3"))
+            script.append(message("final"))
+            text = app_module._call_ai("sys", "hello", tools=tools, handlers=handlers)
+            outs = [i for i in calls[-1]["body"]["input"] if i.get("type") == "function_call_output"]
+            check(text == "final" and got == [{"q": "x"}] and len(outs) == 3 and "同じ呼び出し" in outs[1]["output"] and "tools" not in calls[-1]["body"] and calls[-1]["body"]["input"][-1]["role"] == "user", "同じ呼び出しは2回目から実行せずに差し戻し、続くなら道具なしで最終回答をまとめる")
+            script.append(tool_call_message("nope", {}, "c9"))
+            script.append(message("ok"))
+            text = app_module._call_ai("sys", "hello", tools=tools, handlers=handlers)
+            check(text == "ok" and "未知の道具" in calls[-1]["body"]["input"][-1]["output"], "未知の道具は error として返し、AI に続けさせる")
+            script.append(tool_call_message("echo", {}, "c8"))
+            script.append(message("ok2"))
+            text = app_module._call_ai("sys", "hello", tools=tools, handlers={"echo": lambda args: (_ for _ in ()).throw(ValueError("q を指定してください"))})
+            check(text == "ok2" and "q を指定してください" in calls[-1]["body"]["input"][-1]["output"], "道具の失敗は理由つきの error として返す")
+
+        script.append(message("OK"))
+        script.append(tool_call_message("ping", {}, "p1"))
         script.append(message("OK"))
         r = client.post("/admin/ai/test", data=AI_FORM, follow_redirects=True)
         html = r.data.decode("utf-8")
-        check(r.status_code == 200 and "接続できました" in html and calls[-1]["body"]["model"] == "gpt-6-test" and "temperature" not in calls[-1]["raw"], "接続テスト: 保存した設定で1回呼んで応答を表示")
+        check(r.status_code == 200 and "接続できました" in html and "道具の呼び出し（tool calling）も通りました" in html and calls[-2]["body"]["tool_choice"] == {"type": "function", "name": "ping"} and "temperature" not in calls[-1]["raw"], "接続テスト: 応答と、道具の呼び出しが通ることを確認する")
         script.append(http_error(404, "not found"))
         r = client.post("/admin/ai/test", data=AI_FORM, follow_redirects=True)
         html = r.data.decode("utf-8")
         check("接続できませんでした" in html and "404" in html, "接続テスト: 失敗したら理由を表示")
+        script.append(message("OK"))
+        script.append(message("道具は呼びません"))
+        r = client.post("/admin/ai/test", data=AI_FORM, follow_redirects=True)
+        html = r.data.decode("utf-8")
+        check("道具の呼び出しは通りませんでした" in html, "接続テスト: 道具が呼ばれなければその旨を表示")
         r = client.post("/admin/ai", data={"openai_api_url": "", "openai_api_key": "", "openai_model": ""}, follow_redirects=True)
         html = r.data.decode("utf-8")
         with app.app_context():

@@ -2117,17 +2117,34 @@ def ai_status_text():
     return text
 
 # ----- 共通: ChatGPT API（Responses API）呼び出し。標準ライブラリの urllib だけで呼ぶ -----
-def _ai_request_body(system, user_text, max_tokens=None, with_reasoning=True):
+AI_TOOL_ROUNDS = 10
+AI_TOOL_ROWS = 40
+
+
+def _tools_flat(tool_defs):
+    return [
+        {"type": "function", "name": t["function"]["name"], "description": t["function"].get("description") or "",
+         "parameters": t["function"].get("parameters") or {"type": "object", "properties": {}}}
+        for t in (tool_defs or []) if t.get("type") == "function"
+    ]
+
+
+def _ai_request_body(system, items, max_tokens=None, with_reasoning=True, tools=None, tool_choice="auto"):
     body = {
         "model": _model(),
+        "store": False,
         "instructions": system,
-        "input": user_text,
+        "input": items,
         "max_output_tokens": int(max_tokens or conf.get("OPENAI_MAX_OUTPUT_TOKENS", 4000) or 4000),
     }
+    if tools:
+        body["tools"] = _tools_flat(tools)
+        body["tool_choice"] = tool_choice
     effort = str(conf.get("OPENAI_REASONING_EFFORT", "low") or "").strip()
     if effort and with_reasoning:
         body["reasoning"] = {"effort": effort}
     return body
+
 
 def _ai_post(body):
     req = urllib.request.Request(
@@ -2151,36 +2168,36 @@ def _ai_post(body):
     except ValueError:
         return status, raw
 
-def _response_text(payload):
-    texts, refusal = [], None
-    for item in payload.get("output") or []:
-        if item.get("type") != "message":
-            continue
-        for part in item.get("content") or []:
-            if part.get("type") == "output_text":
-                texts.append(part.get("text") or "")
-            elif part.get("type") == "refusal":
-                refusal = part.get("refusal") or "（理由なし）"
-    if texts:
-        return "".join(texts)
-    if payload.get("output_text"):
-        return str(payload["output_text"])
-    if refusal:
-        log.warning("ChatGPT API: 応答が拒否されました: %s", refusal)
-        _LAST_ERROR["text"] = "応答が拒否されました"
-    return None
 
-def _call_ai(system, user_text, max_tokens=None):
-    body = _ai_request_body(system, user_text, max_tokens)
+def _parse_response(payload):
+    texts, calls, refusal = [], [], None
+    for item in payload.get("output") or []:
+        typ = item.get("type")
+        if typ == "message":
+            for part in item.get("content") or []:
+                if part.get("type") == "output_text":
+                    texts.append(part.get("text") or "")
+                elif part.get("type") == "refusal":
+                    refusal = part.get("refusal") or "（理由なし）"
+        elif typ == "function_call":
+            calls.append({"id": item.get("call_id") or item.get("id") or "", "name": item.get("name") or "", "arguments": item.get("arguments") or "{}"})
+    content = "".join(texts)
+    if not content and not calls and payload.get("output_text"):
+        content = str(payload["output_text"])
+    return content, calls, refusal
+
+
+def _ai_turn(system, items, max_tokens=None, tools=None, tool_choice="auto"):
+    body = _ai_request_body(system, items, max_tokens, tools=tools, tool_choice=tool_choice)
     try:
         status, payload = _ai_post(body)
         if status == 400 and "reasoning" in body and "reasoning" in str(payload):
             log.warning("ChatGPT API: reasoning が拒否されたため外して再試行します")
-            status, payload = _ai_post(_ai_request_body(system, user_text, max_tokens, with_reasoning=False))
+            status, payload = _ai_post(_ai_request_body(system, items, max_tokens, with_reasoning=False, tools=tools, tool_choice=tool_choice))
     except OSError as e:
         log.warning("ChatGPT API: 接続できません: %s", e)
         _LAST_ERROR["text"] = f"接続できません（{e}）"
-        return None
+        return None, []
 
     if not isinstance(payload, dict):
         snippet = re.sub(r"\s+", " ", str(payload or ""))[:160]
@@ -2195,20 +2212,120 @@ def _call_ai(system, user_text, max_tokens=None):
             _LAST_ERROR["text"] = "応答が JSON ではありません（管理画面の URL を確認）"
         else:
             _LAST_ERROR["text"] = f"HTTP {status}: {snippet}"
-        return None
+        return None, []
     if payload.get("error"):
         err = payload["error"]
         msg = err.get("message") if isinstance(err, dict) else str(err)
         log.warning("ChatGPT API: エラー応答: %s", msg)
         _LAST_ERROR["text"] = f"エラー応答: {msg}"
-        return None
+        return None, []
     if payload.get("status") == "incomplete":
         reason = (payload.get("incomplete_details") or {}).get("reason", "")
         log.warning("ChatGPT API: 応答が途中で終わりました（%s）。OPENAI_MAX_OUTPUT_TOKENS を増やしてください", reason)
-    text = _response_text(payload)
-    if text is not None:
-        _LAST_ERROR["text"] = ""
+    content, calls, refusal = _parse_response(payload)
+    if not content and not calls and refusal:
+        log.warning("ChatGPT API: 応答が拒否されました: %s", refusal)
+        _LAST_ERROR["text"] = "応答が拒否されました"
+        return None, []
+    _LAST_ERROR["text"] = ""
+    return content, calls
+
+
+def _tool_result(ok, content):
+    return {"ok": ok, "llm_content": json.dumps(content, ensure_ascii=False, default=str)}
+
+
+def _dispatch(handlers, name, arguments):
+    fn = (handlers or {}).get(name)
+    if fn is None:
+        return _tool_result(False, {"error": f"未知の道具: {name}"})
+    try:
+        args = json.loads(arguments or "{}")
+    except ValueError:
+        return _tool_result(False, {"error": "道具の引数の JSON を読めませんでした"})
+    if not isinstance(args, dict):
+        args = {}
+    try:
+        return _tool_result(True, fn(args))
+    except Exception as e:
+        log.warning("道具 %s の実行に失敗: %s", name, e)
+        return _tool_result(False, {"error": f"道具の実行に失敗しました: {e}"})
+
+
+class _ToolGuard:
+    LIMIT = 2
+
+    def __init__(self):
+        self.failed = {}
+        self.done = set()
+        self.repeats = 0
+
+    @staticmethod
+    def key(call):
+        try:
+            args = json.dumps(json.loads(call.get("arguments") or "{}"), ensure_ascii=False, sort_keys=True)
+        except ValueError:
+            args = call.get("arguments") or ""
+        return (call.get("name"), args)
+
+    def before(self, call):
+        k = self.key(call)
+        if k in self.failed:
+            self.repeats += 1
+            return _tool_result(False, {"error": "同じ呼び出しです。前回の失敗: " + self.failed[k] + "。引数を変えるか、別の道具を使うか、ここまでの結果で答えてください"})
+        if k in self.done:
+            self.repeats += 1
+            return _tool_result(False, {"error": "同じ呼び出しです。結果はもう出ています。ここまでの結果で答えてください"})
+        return None
+
+    def after(self, call, result):
+        k = self.key(call)
+        if result.get("ok"):
+            self.done.add(k)
+        else:
+            try:
+                reason = json.loads(result.get("llm_content") or "{}").get("error") or "失敗"
+            except (ValueError, AttributeError):
+                reason = "失敗"
+            self.failed[k] = str(reason)[:200]
+
+    @property
+    def stuck(self):
+        return self.repeats >= self.LIMIT
+
+
+def _call_ai(system, user_text, max_tokens=None, tools=None, handlers=None, tool_choice="auto"):
+    if not tools:
+        text, _ = _ai_turn(system, user_text, max_tokens)
+        return text
+    items = list(user_text) if isinstance(user_text, list) else [{"role": "user", "content": str(user_text)}]
+    guard = _ToolGuard()
+    retried_empty = False
+    for round_no in range(C.AI_TOOL_ROUNDS):
+        text, calls = _ai_turn(system, items, max_tokens, tools=tools, tool_choice=tool_choice if round_no == 0 else "auto")
+        if text is None and not calls:
+            return None
+        if text:
+            items.append({"role": "assistant", "content": text})
+        for c in calls:
+            items.append({"type": "function_call", "call_id": c["id"], "name": c["name"], "arguments": c["arguments"]})
+        if not calls:
+            if (text or "").strip():
+                return text
+            if not retried_empty:
+                retried_empty = True
+                continue
+            break
+        for c in calls:
+            result = guard.before(c) or _dispatch(handlers, c["name"], c["arguments"])
+            guard.after(c, result)
+            items.append({"type": "function_call_output", "call_id": c["id"], "output": result["llm_content"]})
+        if guard.stuck:
+            break
+    items.append({"role": "user", "content": "道具の往復はここまでです。ここまでの結果を使って、指示どおりの形で最終回答を返してください。"})
+    text, _ = _ai_turn(system, items, max_tokens)
     return text
+
 
 INTAKE_PROMPT = """あなたは製造部「PC定型業務ゼロ化プロジェクト」の聞き取り担当です。依頼者と短い会話をしながら、その人が行っているPCの定型・定期業務の「現状の流れ（手順）」を組み立てます。
 
@@ -2224,6 +2341,13 @@ INTAKE_PROMPT = """あなたは製造部「PC定型業務ゼロ化プロジェ�
 - 手順は「何を（対象）」「どこから・何で（システム・ファイル・紙・人）」「どうする」が分かる粒度で集める。「情報を集める」「資料を作る」「確認する」のように対象や手段が分からない答えには、次の手順に進む前に1つだけ掘り下げて聞く（例:「どんな情報を、どこから集めますか？」）。答えが返ったら、その手順の action を具体的に書き直す（例:「生産管理システムから前日の実績を集める」）。この掘り下げは手順の途中でもよい。
 - 初めて「次に何をしますか？」と聞くときは「全部なら『ここまで』を押してください」と添える。
 - 相手が「意味が分からない」「おかしい」と言ったら、謝らずに言い換えて、同じことを聞き直す。
+
+使える道具（function tools）:
+- person_history: 聞き取りの最初に1回だけ呼び、本人の登録済み業務・月次アンケートの答え・勤務形態を見てから質問を始める。
+- list_known_systems: 手順にシステム・ファイル・帳票の名前が出たら1回呼び、既存の呼び方があればそれにそろえる（名寄せ）。
+- check_duplicate: 業務名が決まったら1回呼ぶ。本人が同じ名前を登録済みなら、そのことを伝えて「前の依頼を取り消して続けるか、別の業務として続けるか」を聞く。
+- search_similar_tasks: 手順が2つそろったら1回呼び、他の人が同じ成果物を作っていれば「同じ職場の〇〇さんも登録しています。同じ流れですか？」と確かめる。
+- 道具の結果は事実として使い、結果に無いことは言わない。同じ道具を同じ引数で2回呼ばない。道具を呼んだ往復でも、最後は必ず上の JSON だけで返す。
 - 手順を聞く「次に何をしますか？」は回数に数えない。それ以外の質問が全部で {max_q} 回まで。remaining は「手順以外であと何回聞くつもりか」。手順が2つ以上、できるものと渡す相手、頻度、時間がそろったら done を true にし、reply は「この流れで合っていますか？」と確認の一言にする（chips は空）。
 - 相手が「違う」「直したい」と言ったら、state を直して done は false のまま確認し直す。
 - 写真が読めないときは、そう伝えて文字で教えてほしいと頼む。
@@ -2256,6 +2380,7 @@ FINALIZE_PROMPT = """あなたは製造部「PC定型業務ゼロ化プロジェ
 - AI の推定は改善チームが確認して確定する。断定せず、確認すべき点も示す。
 - 勤務が「夜勤」「昼勤・夜勤の両方」の業務は、間接部門が不在の時間帯でも回る対策（自動配信、翌朝の確認に寄せる、引き継ぎ資料の自動作成など）を優先して考える。
 - 依頼者の希望（wish）が「なくしたい」なら目的と利用者の確認を最優先にし排除の案から、「減らしたい」なら結合・入替・簡素化の案を出して残る作業に自動化の手段を付け、「まずは相談したい」なら改善チームがヒアリングで聞くべき質問を用意する。
+- 使える道具: search_similar_tasks（登録済みの業務から似たものを探す。related はここで実際に見つかった業務名だけにする）、duplicate_outputs（同じできるものを複数人が作っている組）。結合の案はこの結果に基づいて書き、結果に無い業務名を作らない。道具は各1回まで。
 
 次のキーを持つ JSON オブジェクトだけを返す（前後に説明文を付けない）:
 {
@@ -2332,7 +2457,7 @@ def _clean_state(data):
     return base
 
 
-def ai_intake(messages, state, image=None, work_pattern=""):
+def ai_intake(messages, state, image=None, work_pattern="", handlers=None):
     recent = messages[-24:]
     items = []
     for i, m in enumerate(recent):
@@ -2353,7 +2478,7 @@ def ai_intake(messages, state, image=None, work_pattern=""):
     else:
         pattern_note = ""
     system = _intake_prompt() + pattern_note + "\n\n## 現在の state\n" + json.dumps(state, ensure_ascii=False)
-    data = _extract_json(_call_ai(system, items))
+    data = _extract_json(_call_ai(system, items, tools=INTAKE_TOOLS, handlers=handlers))
     if not isinstance(data, dict):
         return None
     try:
@@ -2369,7 +2494,7 @@ def ai_intake(messages, state, image=None, work_pattern=""):
     }
 
 
-def ai_finalize(state, messages, wish, domains, candidates, shift=""):
+def ai_finalize(state, messages, wish, domains, candidates, shift="", handlers=None):
     domain_names = [d.name for d in domains]
     cand = [{"業務名": t.name, "領域": t.domain.name if t.domain else "", "アウトプット": t.output or ""} for t in candidates[:40]]
     log_text = "\n".join(("AI: " if m.get("role") == "ai" else "依頼者: ") + str(m.get("text") or "") for m in messages[-40:])
@@ -2381,8 +2506,130 @@ def ai_finalize(state, messages, wish, domains, candidates, shift=""):
         + "\n\n## 業務領域リスト（domain はこの中から選ぶ）\n" + json.dumps(domain_names, ensure_ascii=False)
         + "\n\n## 関連候補の業務（related はこの中から選ぶ）\n" + json.dumps(cand, ensure_ascii=False, indent=1)
     )
-    data = _extract_json(_call_ai(_finalize_prompt(), user_text))
+    data = _extract_json(_call_ai(_finalize_prompt(), user_text, tools=FINALIZE_TOOLS, handlers=handlers))
     return data if isinstance(data, dict) else None
+
+
+# ----- 道具（aiagent_rag_bundle と同じ chat 形式の定義。送るときに平らな形に直す） -----
+INTAKE_TOOLS = [
+    {"type": "function", "function": {
+        "name": "person_history",
+        "description": "いま依頼している本人の情報。登録済みの業務（名前・月間時間・希望）、月次アンケートで挙げた業務名、勤務形態。聞き取りの最初に1回だけ呼ぶ。",
+        "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {
+        "name": "list_known_systems",
+        "description": "これまでの登録に出てきたシステム・ファイル・帳票の名前と件数。手順に出てきた名前を既存の呼び方にそろえる（名寄せ）ために使う。",
+        "parameters": {"type": "object", "properties": {"keyword": {"type": "string", "description": "絞り込みの語（任意）"}}}}},
+    {"type": "function", "function": {
+        "name": "search_similar_tasks",
+        "description": "登録済みの業務から、名前・成果物・手順が似ているものを探す。同じ業務の二重登録や、他の人が同じ成果物を作っている重複を見つける。",
+        "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "業務名や成果物、キーワード"}}, "required": ["query"]}}},
+    {"type": "function", "function": {
+        "name": "check_duplicate",
+        "description": "本人が同じ名前の業務をすでに登録していないか確かめる。",
+        "parameters": {"type": "object", "properties": {"name": {"type": "string", "description": "業務名"}}, "required": ["name"]}}},
+]
+FINALIZE_TOOLS = [
+    INTAKE_TOOLS[2],
+    {"type": "function", "function": {
+        "name": "duplicate_outputs",
+        "description": "同じできるもの（成果物）を複数の人が作っている組を返す。output を指定するとその成果物だけに絞る。",
+        "parameters": {"type": "object", "properties": {"output": {"type": "string", "description": "成果物の名前（任意）"}}}}},
+]
+
+
+def _task_brief(t, steps=True):
+    row = {
+        "id": t.id, "業務名": t.name, "職場": t.workplace.name if t.workplace else "", "担当": t.respondent.name if t.respondent else "",
+        "できるもの": t.output or "", "情報のもと": t.inputs_note or "・".join(t.inputs_list), "頻度": t.frequency or "",
+        "月間時間": round((t.monthly_minutes or 0) / 60, 1), "希望": t.wish or "",
+    }
+    if steps:
+        row["手順"] = [x.get("action", "") for x in t.steps][:4]
+    return row
+
+
+def _similar_tasks(query, exclude_id=None, limit=10):
+    words = _content_words(query)
+    nq = normalize_text(query)
+    scored = []
+    for t in Task.query.all():
+        if exclude_id and t.id == exclude_id:
+            continue
+        tw = _content_words(t.name + " " + (t.output or "") + " " + " ".join(x.get("action", "") for x in t.steps))
+        score = 2 * len(words & tw)
+        nn = normalize_text(t.name)
+        if nq and nn and (nq in nn or (len(nn) >= 3 and nn in nq)):
+            score += 5
+        if nq and normalize_text(t.output) and nq == normalize_text(t.output):
+            score += 5
+        if score >= 2:
+            scored.append((score, t))
+    scored.sort(key=lambda x: -x[0])
+    return [t for _, t in scored[:limit]]
+
+
+def _search_similar_tasks(args, exclude_id=None):
+    q = str(args.get("query") or "").strip()
+    if not q:
+        raise ValueError("query を指定してください")
+    rows = [_task_brief(t) for t in _similar_tasks(q, exclude_id=exclude_id)][:C.AI_TOOL_ROWS]
+    return {"query": q, "found": len(rows), "業務": rows,
+            "note": "同じ人（担当が同じ）の同じ業務名は二重登録。別の人が同じできるものを作っていれば統合候補として伝える。"}
+
+
+def intake_handlers(r):
+    def person_history(args):
+        latest = MonthlyResponse.query.filter_by(emp_id=r.emp_id).order_by(MonthlyResponse.period.desc()).first() if r.emp_id else None
+        monthly = None
+        if latest is not None:
+            monthly = {"月度": latest.period, "行っている業務": latest.answer("task_names"), "なくしたい業務": latest.answer("wants_tasks"),
+                       "先月比": latest.answer("trend"), "減った理由": latest.answer("decreased_reason"), "増えた業務": latest.answer("new_tasks")}
+        return {"氏名": r.name, "職場": r.workplace.name if r.workplace else "", "勤務形態": r.work_pattern or "",
+                "登録済みの業務": [_task_brief(t, steps=False) for t in r.tasks][:C.AI_TOOL_ROWS], "月次アンケート": monthly}
+
+    def list_known_systems(args):
+        kw = normalize_text(args.get("keyword") or "")
+        counter = Counter()
+        for t in Task.query.all():
+            for x in t.steps:
+                if (x.get("system") or "").strip():
+                    counter[x["system"].strip()] += 1
+            for v in re.split(r"[、,，/／]+", t.inputs_note or ""):
+                if v.strip():
+                    counter[v.strip()] += 1
+            if (t.info_from or "").strip():
+                counter[t.info_from.strip()] += 1
+        rows = [{"名前": k, "件数": n} for k, n in counter.most_common() if not kw or kw in normalize_text(k)]
+        return {"候補": rows[:C.AI_TOOL_ROWS], "分類の選択肢": C.INPUT_SOURCES}
+
+    def check_duplicate(args):
+        name = normalize_text(args.get("name") or "")
+        if not name:
+            raise ValueError("name を指定してください")
+        own = [t for t in r.tasks if normalize_text(t.name) == name]
+        others = [t for t in Task.query.filter(Task.respondent_id != r.id).all() if normalize_text(t.name) == name]
+        return {"二重登録": bool(own), "本人の登録済み": [_task_brief(t, steps=False) for t in own],
+                "他の人の同名の業務": [_task_brief(t, steps=False) for t in others][:C.AI_TOOL_ROWS]}
+
+    return {
+        "person_history": person_history, "list_known_systems": list_known_systems,
+        "search_similar_tasks": lambda args: _search_similar_tasks(args), "check_duplicate": check_duplicate,
+    }
+
+
+def finalize_handlers(task):
+    def duplicate_outputs(args):
+        key = normalize_text(args.get("output") or "")
+        rows = []
+        for g in duplicate_output_groups():
+            if key and normalize_text(g["output"]) != key:
+                continue
+            rows.append({"できるもの": g["output"], "件数": len(g["tasks"]), "月間時間の合計": round(g["minutes"] / 60, 1),
+                         "業務": [_task_brief(t, steps=False) for t in g["tasks"]][:10]})
+        return {"同じできるものを複数人が作っている組": rows[:10]}
+
+    return {"search_similar_tasks": lambda args: _search_similar_tasks(args, exclude_id=task.id), "duplicate_outputs": duplicate_outputs}
 
 
 def _extract_json(text):
@@ -3419,7 +3666,11 @@ def _options():
 def index():
     emp = (request.args.get("emp") or "").strip()
     task = (request.args.get("task") or "").strip()[:200]
-    return render_template("survey/index.html", state=_state(_current()), options=_options(), emp=emp, prefill=task)
+    r = _current()
+    if emp and r is not None and (r.emp_id or "") != emp:
+        session.pop("respondent_id", None)
+        r = None
+    return render_template("survey/index.html", state=_state(r), options=_options(), emp=emp, prefill=task)
 
 @bp_survey.route("/start")
 def start():
@@ -3521,7 +3772,7 @@ def api_intake():
         return jsonify({"success": False, "message": "写真は PNG・JPEG・WebP・GIF で、4MB までにしてください"}), 400
     if not ai_enabled():
         return jsonify({"success": False, "message": "AI連携が設定されていません。管理画面の「AI連携」で URL・API キー・モデル名を設定してください"}), 400
-    result = ai_intake(messages, state, image, r.work_pattern or "")
+    result = ai_intake(messages, state, image, r.work_pattern or "", handlers=intake_handlers(r))
     if result is None:
         return jsonify({"success": False, "message": "AI から応答がありませんでした。もう一度送ってください（" + (_LAST_ERROR["text"] or "原因不明") + "）"}), 502
     steps = result["state"]["steps"]
@@ -3563,7 +3814,7 @@ def _fill_from_state(task, state, only_missing=False):
 def _finalize_task(task, state, messages):
     domains = _domains()
     cands = related_tasks_for(task, limit=40)
-    data = ai_finalize(state, messages, task.wish, domains, cands, task.shift or "") if ai_enabled() else None
+    data = ai_finalize(state, messages, task.wish, domains, cands, task.shift or "", handlers=finalize_handlers(task)) if ai_enabled() else None
     if data is None:
         _fill_from_state(task, state)
         result = rule_analyze(task, domains, cands)
@@ -3651,6 +3902,12 @@ def api_task_create():
         shift = "普通勤務"
     if errors:
         return jsonify({"success": False, "errors": errors, "message": next(iter(errors.values()))}), 400
+    dup = next((t for t in r.tasks if normalize_text(t.name) == normalize_text(name)), None)
+    if dup is not None and not data.get("force"):
+        return jsonify({
+            "success": False, "message": f"同じ名前の業務「{dup.name}」を登録済みです",
+            "duplicate": {"id": dup.id, "name": dup.name, "hours": round((dup.monthly_minutes or 0) / 60, 1), "created_at": dup.created_at.strftime("%Y/%m/%d") if dup.created_at else ""},
+        }), 409
     try:
         headcount = max(1, int(data.get("headcount") or 1))
     except (TypeError, ValueError):
@@ -4217,8 +4474,15 @@ def test_ai_settings():
     text = _call_ai("接続確認です。", "「OK」とだけ返してください。")
     if text is None:
         flash("接続できませんでした: " + (_LAST_ERROR["text"] or "原因不明"), "danger")
+        return redirect(url_for("admin.index"))
+    called = []
+    ping = [{"type": "function", "function": {"name": "ping", "description": "接続確認用。呼ぶと pong を返す", "parameters": {"type": "object", "properties": {}}}}]
+    text2 = _call_ai("接続確認です。道具 ping を1回呼び、その結果を見てから「OK」とだけ返してください。", "ping を呼んでください。",
+                     tools=ping, handlers={"ping": lambda args: called.append(1) or {"pong": True}}, tool_choice={"type": "function", "name": "ping"})
+    if called and text2:
+        flash("接続できました。応答: " + " ".join(text.split())[:60] + "／道具の呼び出し（tool calling）も通りました", "success")
     else:
-        flash("接続できました。応答: " + " ".join(text.split())[:60], "success")
+        flash("接続できました。応答: " + " ".join(text.split())[:60] + "／道具の呼び出しは通りませんでした（" + (_LAST_ERROR["text"] or "tools が中継されていない可能性") + "）。聞き取りは道具なしで動きます", "warning")
     return redirect(url_for("admin.index"))
 
 # ----- 職場・業務領域 -----
@@ -7194,6 +7458,7 @@ document.getElementById("test-btn").addEventListener("click", async function () 
           <button type="button" class="btn btn-primary" id="rq-start"><i class="bi bi-chat-dots"></i> 聞き取りを始める</button>
         </div>
         <div class="small text-muted mt-2">業務名が決まっていなくても始められます。AI が聞きながら決めます。</div>
+        <div id="rq-dup-note" class="rq-dup d-none"></div>
       </div>
 
       <div id="rq-intake" class="rq-intake d-none">
@@ -7248,6 +7513,7 @@ document.getElementById("test-btn").addEventListener("click", async function () 
         <div class="rq-actions">
           <button type="button" class="btn btn-primary btn-lg" id="rq-save-task"><i class="bi bi-plus-lg"></i> この業務を登録</button>
         </div>
+        <div id="rq-dup" class="rq-dup d-none"></div>
       </div>
 
       <div id="rq-result" class="rq-result d-none">
@@ -9000,6 +9266,8 @@ html { scroll-behavior: smooth; }
 .rq-confirm { background: var(--ui-green-soft); border-radius: var(--ui-radius-sm); padding: 0.75rem; animation: rq-slide 0.4s ease-out; }
 .rq-confirm-q { font-weight: 700; margin-bottom: 0.5rem; }
 .rq-final { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--ui-line); }
+.rq-dup { background: var(--ui-yellow-soft); color: var(--ui-yellow-text); border-radius: var(--ui-radius-sm); padding: 0.6rem 0.8rem; margin: 0.6rem 0; font-size: 0.92rem; }
+.rq-dup .btn { margin: 0.4rem 0.4rem 0 0; }
 .rq-final-title { font-weight: 700; margin-bottom: 0.5rem; }
 .rq-self { margin: 0.5rem 0; }
 .rq-result { text-align: center; padding: 1rem 0 0.5rem; }
@@ -9394,12 +9662,33 @@ html { scroll-behavior: smooth; }
       reader.readAsDataURL(file);
     });
   }
-  async function startIntake() {
+  function normName(v) { return (v || "").normalize("NFKC").replace(/\s+/g, "").toLowerCase(); }
+  function ownTask(name) { var n = normName(name); return n ? (S.tasks || []).filter(function (t) { return normName(t.name) === n; })[0] : null; }
+  function showDupNote(task) {
+    var box = $("rq-dup-note");
+    box.innerHTML = "";
+    box.appendChild(el("div", null, "同じ名前の業務「" + task.name + "」を登録済みです（月 " + task.hours + " h）。このまま始めると別の案件になります。"));
+    var go = el("button", "btn btn-sm btn-outline-dark", "別の業務として続ける");
+    go.type = "button";
+    go.addEventListener("click", function () { box.classList.add("d-none"); startIntake(true); });
+    var stop = el("button", "btn btn-sm btn-outline-secondary", "やめる（下の一覧で取り消せます）");
+    stop.type = "button";
+    stop.addEventListener("click", function () { box.classList.add("d-none"); });
+    box.appendChild(go);
+    box.appendChild(stop);
+    box.classList.remove("d-none");
+  }
+  async function startIntake(skipDup) {
     if (!S.respondent) {
       var ok = await savePerson(true);
       if (!ok) { toast("先に「あなたのこと」を入力してください"); return; }
     }
     var title = $("rq-title").value.trim();
+    if (!skipDup) {
+      var dupTask = ownTask(title);
+      if (dupTask) { showDupNote(dupTask); return; }
+    }
+    $("rq-dup-note").classList.add("d-none");
     conv = { title: title, messages: [], state: { title: title, steps: [], sources: [], outputs: [], recipients: [], frequency: null, duration: null, shift: null, pains: [], unknowns: [] }, done: false, lastNodes: [], shownSteps: 0, frames: [], finalDef: "" };
     $("rq-replay").classList.add("d-none");
     msgBox.innerHTML = "";
@@ -9429,8 +9718,8 @@ html { scroll-behavior: smooth; }
     renderSuggest();
     pickBox.scrollIntoView({ behavior: "smooth", block: "start" });
   }
-  $("rq-start").addEventListener("click", startIntake);
-  $("rq-title").addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); startIntake(); } });
+  $("rq-start").addEventListener("click", function () { startIntake(false); });
+  $("rq-title").addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); startIntake(false); } });
   $("rq-send").addEventListener("click", function () { send(); });
   input.addEventListener("keydown", function (e) { if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); send(); } });
   $("rq-restart").addEventListener("click", function () { if (!conv || confirm("聞き取りを最初からやり直しますか？")) backToPick(); });
@@ -9497,11 +9786,41 @@ html { scroll-behavior: smooth; }
     if (!body.duration) { fieldError("duration", "選んでください"); missing = true; }
     if (!body.wish) { fieldError("wish", "選んでください"); missing = true; }
     if (missing) return;
+    await registerTask(body, btn);
+  });
+  async function registerTask(body, btn) {
     btn.disabled = true;
     btn.textContent = "登録中…";
     var j = await api("POST", CFG.api.tasks, body);
     btn.disabled = false;
     btn.innerHTML = '<i class="bi bi-plus-lg"></i> この業務を登録';
+    $("rq-dup").classList.add("d-none");
+    if (!j._ok && j.duplicate) {
+      var box = $("rq-dup");
+      box.innerHTML = "";
+      box.appendChild(el("div", null, "同じ名前の業務「" + j.duplicate.name + "」を " + j.duplicate.created_at + " に登録済みです（月 " + j.duplicate.hours + " h）。どうしますか？"));
+      var replace = el("button", "btn btn-sm btn-primary", "前の依頼を取り消して、この内容で登録");
+      replace.type = "button";
+      replace.addEventListener("click", async function () {
+        var d = await api("DELETE", CFG.api.tasks + "/" + j.duplicate.id);
+        if (!d._ok) { toast("取り消せませんでした"); return; }
+        S.tasks = d.tasks || S.tasks;
+        renderRegistered();
+        registerTask(Object.assign({}, body, { force: true }), btn);
+      });
+      var both = el("button", "btn btn-sm btn-outline-dark", "別の業務として登録");
+      both.type = "button";
+      both.addEventListener("click", function () { registerTask(Object.assign({}, body, { force: true }), btn); });
+      var cancel = el("button", "btn btn-sm btn-outline-secondary", "やめる");
+      cancel.type = "button";
+      cancel.addEventListener("click", function () { box.classList.add("d-none"); });
+      box.appendChild(replace);
+      box.appendChild(both);
+      box.appendChild(cancel);
+      box.classList.remove("d-none");
+      box.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
     if (!j._ok) { Object.keys(j.errors || {}).forEach(function (k) { fieldError(k, j.errors[k]); }); toast(j.message || "登録できませんでした"); return; }
     S.tasks = j.tasks || S.tasks;
     S.suggested = j.suggested || [];
@@ -9513,7 +9832,7 @@ html { scroll-behavior: smooth; }
     resultBox.classList.remove("d-none");
     resultBox.scrollIntoView({ behavior: "smooth", block: "center" });
     conv = null;
-  });
+  }
   $("rq-another").addEventListener("click", backToPick);
   $("rq-replay").addEventListener("click", async function () {
     if (!conv || busy || !conv.frames.length) return;
