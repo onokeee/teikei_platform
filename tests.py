@@ -13,7 +13,7 @@ import ldap_auth
 from app import conf, create_app
 from app import Employee, FlowMap, MonthlyResponse, MonthlySurvey, Respondent, StageLog, Task, _migrate_monthly_questions, answerable_periods, current_period, db, lookup, period_label, public_period, shift_period
 
-for _k, _v in (("OPENAI_API_URL", ""), ("OPENAI_API_KEY", ""), ("LDAP_API_URL", ""), ("LDAP_SERVER", ""), ("ADMIN_ID", "admin"), ("ADMIN_PASSWORD", "adminpass")):
+for _k, _v in (("LDAP_API_URL", ""), ("LDAP_SERVER", ""), ("ADMIN_ID", "admin"), ("ADMIN_PASSWORD", "adminpass")):
     conf.override(_k, _v)
 
 def smoke_bizmap_edit():
@@ -85,11 +85,10 @@ def smoke_bizmap_edit():
     check(rev and all(e["label"] == "ラベル修正" for e in rev), f"merged: reversed+label kept ({len(rev)})")
     check(m["meta"]["saved_at"] is not None, "merged: saved_at")
 
-    client.post("/survey/api/respondent", json={"emp_id": "E001", "name": "", "workplace_id": "", "role": "現場リーダー", "pc_hours": "1〜2時間"})
+    client.post("/survey/api/respondent", json={"emp_id": "E001", "name": "", "workplace_id": ""})
     client.post("/survey/api/tasks", json={
-        "name": "新規に登録した業務", "domain_id": "2", "purpose": "テスト", "output": "新しい帳票",
-        "output_users": ["上司"], "inputs": ["メール"], "frequency": "毎週", "duration": "15分未満", "headcount": "1",
-        "tools": ["Excel"], "nature": ["資料作成"], "pains": ["特になし"], "wish": "減らしたい", "self_improve": "分からない",
+        "name": "新規に登録した業務", "frequency": "毎週", "duration": "15分未満", "wish": "減らしたい", "self_improve": False, "messages": [],
+        "state": {"title": "新規に登録した業務", "steps": [{"no": 1, "action": "メールで届いた数字を帳票に転記する", "system": "メール", "input": "", "output": "新しい帳票", "to": "上司"}], "sources": ["メール"], "outputs": ["新しい帳票"], "recipients": ["上司"]},
     })
     with app.app_context():
         new_task = Task.query.filter_by(name="新規に登録した業務").first()
@@ -411,9 +410,9 @@ def smoke_login_monthly():
         check(MonthlySurvey.query.count() >= 4, f"デモ: 月度ごとの設問セット {MonthlySurvey.query.count()} 件")
         n = MonthlyResponse.query.count()
         sample = MonthlyResponse.query.first()
-        check(n > 20 and sample.answers.get("has") in ("ある", "少しある", "ない"), f"デモ: 回答 {n} 件（answers_json）")
+        check(n > 20 and sample.answers.get("has") in ("ある", "ない"), f"デモ: 回答 {n} 件（answers_json）")
     code, html, r = get("/monthly/results")
-    check(code == 200 and "繰り返し業務あり" in html and "設問ごとの推移" in html and "trend-table" in html and "コメント" in html, "集計: 推移・設問ごとの推移・月度の詳細")
+    check(code == 200 and "繰り返し業務あり" in html and "設問ごとの推移" in html and "trend-table" in html and "コメント" in html and "勤務形態別の推移" in html and "交代勤務" in html, "集計: 推移・設問ごとの推移・勤務形態別の推移・月度の詳細")
     code, html, r = get("/")
     check("月次アンケート（時系列）" in html and "自分でやりたい" in html, "ダッシュボードの月次カード")
     code, html, r = get("/monthly/export.csv")
@@ -426,7 +425,7 @@ def smoke_login_monthly():
     period = current_period()
     code, html, r = get(f"/monthly/?period={period}&emp=E009")
     check(code == 200 and "小林 直樹" in html, "メールリンク: 社員IDで氏名が入る")
-    payload = {"period": period, "emp_id": "E009", "name": "小林 直樹", "workplace_id": "", "answers": {"has": "ある", "hours": "30分〜1時間", "trend": "減った", "wants": "ある", "wants_tasks": "日報の転記", "stance": "自分で取り組みたい", "new_tasks": ""}, "comment": "テストのコメント"}
+    payload = {"period": period, "emp_id": "E009", "name": "小林 直樹", "workplace_id": "", "work_pattern": "普通勤務", "answers": {"has": "ある", "hours": "30分〜1時間", "task_names": "日報の集計", "trend": "減った", "decreased_reason": "日報の転記を自動化した", "wants": "ある", "wants_tasks": "日報の転記", "stance": "自分で取り組みたい", "new_tasks": ""}, "comment": "テストのコメント"}
     with app.app_context():
         MonthlyResponse.query.filter_by(period=period, emp_id="E009").delete()
         db.session.commit()
@@ -484,25 +483,29 @@ def smoke_login_monthly():
         ])
         db.session.add(old)
         db.session.add(MonthlyResponse(period="2024-01", emp_id="E001", name="田中 一郎", workplace_id=1, answers_json=json.dumps({"has": "ある", "hours": "5〜10時間", "trend": "初回なので分からない", "ask": "相談したい", "self": "今は難しい"}, ensure_ascii=False)))
-        db.session.add(MonthlyResponse(period="2024-01", emp_id="E002", name="佐藤 花子", workplace_id=1, answers_json=json.dumps({"has": "ない", "ask": "特にない", "self": "教えてもらえれば取り組みたい"}, ensure_ascii=False)))
-        db.session.add(MonthlyResponse(period="2024-01", emp_id="E003", name="鈴木 健", workplace_id=1, answers_json=json.dumps({"wants": "ある", "stance": "教えてもらいながら自分で取り組みたい"}, ensure_ascii=False)))
+        db.session.add(MonthlyResponse(period="2024-01", emp_id="E002", name="佐藤 花子", workplace_id=1, answers_json=json.dumps({"has": "ない", "hours": "0時間", "ask": "特にない", "self": "教えてもらえれば取り組みたい"}, ensure_ascii=False)))
+        db.session.add(MonthlyResponse(period="2024-01", emp_id="E003", name="鈴木 健", workplace_id=1, answers_json=json.dumps({"has": "少しある", "wants": "ある", "stance": "教えてもらいながら自分で取り組みたい"}, ensure_ascii=False)))
         db.session.add(MonthlyResponse(period="2024-01", emp_id="E004", name="高橋 美咲", workplace_id=1, answers_json=json.dumps({"wants": "ない", "stance": "今は特にない"}, ensure_ascii=False)))
         db.session.commit()
         check(_migrate_monthly_questions() is True, "移行が走る")
         db.session.commit()
         old = MonthlySurvey.query.filter_by(period="2024-01").first()
         keys = [q["key"] for q in old.questions]
+        check("task_names" in keys and "decreased_reason" in keys and keys.index("has") < keys.index("hours") < keys.index("task_names") < keys.index("trend") < keys.index("decreased_reason") < keys.index("new_tasks"), f"古い設問セットにも 1-3（業務名）と 2-2（減った理由）が入り、基本設問の並びになる: {keys}")
+        tq = next(q for q in old.questions if q["key"] == "trend")
+        check(tq.get("depends", {}).get("key") == "has" and tq.get("depends", {}).get("main") is True and not tq.get("required"), "古い設問セットの 2（先月と比べて）も「ある」のときだけ出る設問になる")
         r1 = MonthlyResponse.query.filter_by(period="2024-01", emp_id="E001").first()
         r2 = MonthlyResponse.query.filter_by(period="2024-01", emp_id="E002").first()
         a2 = r2.answer("stance")
-        check(r2.answer("hours") == "0時間", "「ない」で時間が空の回答は 0時間 になる")
+        check(r2.answer("hours") == "", "「ない」の回答は時間を空にする（以前の 0時間 も消す）")
         check("stance" in keys and "ask" not in keys and "self" not in keys and r1.answer("stance") == "改善チームに依頼したい" and a2 == "自分で取り組みたい", "旧2問は新1問に置き換わり、回答も読み替えられる")
         a3 = MonthlyResponse.query.filter_by(period="2024-01", emp_id="E003").first().answer("stance")
+        h3 = MonthlyResponse.query.filter_by(period="2024-01", emp_id="E003").first().answer("has")
         a4 = MonthlyResponse.query.filter_by(period="2024-01", emp_id="E004").first().answer("stance")
-        check(a3 == "自分で取り組みたい" and a4 == "", "以前の4択は2択に読み替え、「ない」の人の答えは消える")
+        check(a3 == "自分で取り組みたい" and a4 == "" and h3 == "ある", "以前の4択は2択に読み替え、「ない」の人の答えは消える。「少しある」は「ある」に")
         check(r1.answer("hours") == "1〜2時間" and r1.answer("trend") == "" and r1.hours_shift == 1.5, "週あたりの時間は1シフトあたりに、「初回なので分からない」は未回答に読み替える")
         hq = next(q for q in old.questions if q["key"] == "hours")
-        check(hq["options"][0] == "0時間" and hq["required"] and hq["text"].startswith("1シフト"), "設問セットの時間の設問も新しい文面・選択肢になる")
+        check(hq["options"][0] == "0時間" and not hq["required"] and hq.get("depends", {}).get("key") == "has" and hq["text"].startswith("1シフト") and "定型・定期" in hq["text"], "設問セットの時間の設問も新しい文面・選択肢になり、「ある」のときだけ出る")
         check(_migrate_monthly_questions() is False, "2回目は何もしない")
         MonthlyResponse.query.filter_by(period="2024-01").delete()
         db.session.delete(old)
@@ -511,7 +514,7 @@ def smoke_login_monthly():
     r = client.post("/monthly/admin/save", json={"period": period, "questions": tampered, "is_active": True})
     with app.app_context():
         has_q = next(q for q in MonthlySurvey.query.filter_by(period=period).first().questions if q["key"] == "has")
-        check(r.status_code == 200 and has_q["options"] == ["ある", "少しある", "ない"] and has_q["required"] and has_q["text"] == "今月、繰り返しのPC作業はありましたか", "基本設問は文面だけ変わり、選択肢と必須は固定のまま")
+        check(r.status_code == 200 and has_q["options"] == ["ある", "ない"] and has_q["required"] and has_q["text"] == "今月、繰り返しのPC作業はありましたか", "基本設問は文面だけ変わり、選択肢と必須は固定のまま")
     r = client.post("/monthly/admin/save", json={"period": period, "questions": [q for q in qs if q["key"] != "stance"], "is_active": True})
     check(r.status_code == 400 and "基本設問は外せません" in r.get_json()["message"], "基本設問を外した保存は拒否")
     code, html, r = get(f"/monthly/?period={period}&emp=E011")
@@ -572,6 +575,16 @@ def smoke_login_monthly():
     check(r.status_code == 400 and "workplace_id" in r.get_json()["errors"], "職場が分からないときは送信できない")
     r = client.post("/monthly/submit", json=dict(full, period=period, emp_id="X999", name="新人 太郎"))
     check(r.status_code == 200 and r.get_json()["success"], "職場を選べば受付")
+    r = client.post("/monthly/submit", json=dict(full, period=period, emp_id="X998", name="新人 次郎", workplace_id="1", work_pattern=""))
+    check(r.status_code == 400 and "work_pattern" in r.get_json()["errors"], "初めての人は勤務形態（普通勤務／交代勤務）を選ばないと送信できない")
+    r = client.post("/monthly/submit", json=dict(full, period=period, emp_id="X998", name="新人 次郎", workplace_id="1", work_pattern="交代勤務"))
+    j = client.get(f"/monthly/api/employee/X998?period={period}").get_json()
+    check(r.status_code == 200 and j.get("work_pattern") == "交代勤務", "一度選んだ勤務形態は控えられ、次回から自動で入る")
+    with app.app_context():
+        row = MonthlyResponse.query.filter_by(period=period, emp_id="X998").first()
+        check(row is not None and row.work_pattern == "交代勤務", "回答に勤務形態が保存される")
+    code, html, r = get("/monthly/?emp=X998")
+    check('id="work_pattern" class="form-select" required' in html and 'value="交代勤務" selected' in html, "回答フォームに勤務形態の選択があり、控えが選択済みになる")
     code, html, r = get("/monthly/?emp=X999")
     check('id="workplace_id" class="form-select" required' in html and "職場を選んでください" in html, "職場の選択は必須の入力欄")
 
@@ -591,7 +604,22 @@ def smoke_login_monthly():
         check(r.status_code == 200 and row is not None and row.answer("new_tasks") == "", "「減った」なら新規業務は受け取らない（空で保存）")
     code, html, r = get("/monthly/?emp=X103")
     check('data-dep-key="wants"' in html and 'data-dep-key="trend"' in html and 'data-badge="req"' in html, "フォームに条件つき設問の情報が出る")
-    check('<span class="mq-no">3-1</span>' in html and '<span class="mq-no">4-1</span>' in html and '<span class="mq-no">4-2</span>' in html and 'data-dep-show=' in html, "枝番: 3-1（増えた業務名）、4-1（業務名）、4-2（進め方）")
+    check('<span class="mq-no">1-2</span>' in html and '<span class="mq-no">1-3</span>' in html and html.count('<span class="mq-no">2-2</span>') == 2 and '<span class="mq-no">3-2</span>' in html and '<span class="mq-no">3-3</span>' in html and '<span class="mq-no">3-1</span>' not in html and '<span class="mq-no">4-1</span>' not in html and 'data-dep-show=' in html, "枝番: 1-2（時間）・1-3（業務名）、2-2（減った理由／増えた業務名）、3-2（業務名）・3-3（進め方）")
+    check('data-key="trend" data-type="choice" data-required="0" data-dep-key="has"' in html and 'data-key="wants" data-type="choice" data-required="0" data-dep-key="has"' in html and 'class="mq-q d-none" data-key="trend"' in html, "2（先月と比べて）と 3（なくしたい業務）は「ある」のときだけ出る（枝問の見た目ではなく通し番号）")
+    r = client.post("/monthly/submit", json=dict(full, emp_id="X106", name="条件 六", workplace_id="1", answers=dict(base_ans, wants="ない", trend="減った", decreased_reason="")))
+    check(r.status_code == 400 and "decreased_reason" in r.get_json()["errors"], "「減った」なのに理由が空なら送信できない")
+    r = client.post("/monthly/submit", json=dict(full, emp_id="X106", name="条件 六", workplace_id="1", answers=dict(base_ans, wants="ない", trend="増えた", new_tasks="新しい帳票の転記", decreased_reason="消えるはず")))
+    with app.app_context():
+        row = MonthlyResponse.query.filter_by(period=period, emp_id="X106").first()
+        check(r.status_code == 200 and row is not None and row.answer("decreased_reason") == "" and row.answer("new_tasks") == "新しい帳票の転記", "「増えた」なら理由は受け取らず、増えた業務名を保存")
+    r = client.post("/monthly/submit", json=dict(full, emp_id="X107", name="条件 七", workplace_id="1", answers=dict(base_ans, wants="ない", task_names="")))
+    check(r.status_code == 400 and "task_names" in r.get_json()["errors"], "「ある」なのに業務名（1-3）が空なら送信できない")
+    r = client.post("/monthly/submit", json=dict(full, emp_id="X107", name="条件 七", workplace_id="1", answers=dict(base_ans, wants="ない", hours="")))
+    check(r.status_code == 400 and "hours" in r.get_json()["errors"], "「ある」なのに時間（1-2）が空なら送信できない")
+    r = client.post("/monthly/submit", json=dict(full, emp_id="X107", name="条件 七", workplace_id="1", answers=dict(full["answers"], has="ない", hours="1〜2時間", task_names="消えるはず", trend="減った", decreased_reason="消えるはず", wants="ある", wants_tasks="消えるはず", stance="自分で取り組みたい")))
+    with app.app_context():
+        row = MonthlyResponse.query.filter_by(period=period, emp_id="X107").first()
+        check(r.status_code == 200 and row is not None and row.answer("has") == "ない" and all(row.answer(k) == "" for k in ("hours", "task_names", "trend", "decreased_reason", "wants", "wants_tasks", "stance")), "「ない」ならコメント以外は受け取らない（すべて空で保存）")
     r = client.post("/monthly/submit", json=dict(full, emp_id="X105", name="条件 五", workplace_id="1", answers=dict(base_ans, wants="ない", trend="変わらない", new_tasks="消えるはず")))
     with app.app_context():
         row = MonthlyResponse.query.filter_by(period=period, emp_id="X105").first()
@@ -687,6 +715,10 @@ def smoke_login_monthly():
     return fails
 
 def smoke_request():
+    import urllib.request
+
+    import app as app_module
+
     tmpdir = tempfile.mkdtemp()
     dbfile = os.path.join(tmpdir, "test.sqlite3").replace("\\", "/")
     app = create_app({"SQLALCHEMY_DATABASE_URI": "sqlite:///" + dbfile, "TESTING": True})
@@ -698,92 +730,193 @@ def smoke_request():
         if not cond:
             fails.append(msg)
 
-    r = client.get("/survey/")
-    html = r.data.decode("utf-8")
-    check(r.status_code == 200 and 'id="rq"' in html and "自動化依頼" in html and "パート" not in html and "rq-options" in html, "入口は1画面（定義を埋め込み）")
-    check("業務登録</a>" not in html and "自動化依頼</a>" in html, "ナビは自動化依頼")
-    r = client.get("/survey/start?emp=E001")
-    check(r.status_code == 302 and r.headers["Location"].endswith("/survey/?emp=E001"), "旧リンクは入口へ（社員IDつき）")
+    def get(url):
+        r = client.get(url)
+        return r.status_code, r.data.decode("utf-8"), r
 
-    task = {
-        "name": "日報の数字を週報に転記する", "domain_id": "1", "purpose": "週報を作るため", "output": "週報（Excel）",
-        "output_users": ["上司"], "output_users_note": "", "inputs": ["他のExcel"], "inputs_note": "",
-        "frequency": "毎週", "duration": "15〜30分", "headcount": 1, "tools": ["Excel"], "nature": ["転記・コピー"],
-        "pains": ["時間がかかる"], "pains_note": "", "wish": "自動化したい", "self_improve": "取り組みたい", "note": "",
-        "prev_task": "", "next_task": "", "actors": "", "goods": [], "goods_note": "", "goods_from": "", "goods_to": "", "info_from": "",
-    }
-    r = client.post("/survey/api/tasks", json=task)
-    check(r.status_code == 400 and r.get_json()["errors"].get("_") == "respondent", "依頼者未保存では業務を登録できない")
-
-    r = client.post("/survey/api/respondent", json={"emp_id": "", "name": "x", "workplace_id": ""})
-    j = r.get_json()
-    check(r.status_code == 400 and {"emp_id", "workplace_id"} <= set(j["errors"]), "あなたのこと: 社員IDと職場の検証")
-    r = client.post("/survey/api/respondent", json={"emp_id": "ZZZ9", "name": "", "workplace_id": ""})
-    check(r.status_code == 400 and {"name", "workplace_id"} <= set(r.get_json()["errors"]), "見つからないIDは氏名・職場が必要")
-    r = client.post("/survey/api/respondent", json={"emp_id": "T001", "name": "試験 太郎", "workplace_id": 1})
-    j = r.get_json()
-    check(r.status_code == 200 and j["success"] and not j["resumed"] and j["respondent"]["name"] == "試験 太郎" and j["tasks"] == [] and "role" not in j["respondent"], "あなたのこと: 保存（役割・PC利用時間の項目はない）")
-    client.post("/survey/api/reset")
-    r = client.post("/survey/api/respondent", json={"emp_id": "T002", "name": "試験 太郎", "workplace_id": 1})
-    j = r.get_json()
-    check(r.status_code == 200 and not j["resumed"] and j["respondent"]["emp_id"] == "T002", "同じ氏名・職場でも社員IDが違えば新しい依頼者")
-    with app.app_context():
-        check(Respondent.query.filter_by(name="試験 太郎").count() == 2, "依頼者は2人になる")
-    client.post("/survey/api/reset")
-    r = client.post("/survey/api/respondent", json={"emp_id": "T001", "name": "", "workplace_id": ""})
-    j = r.get_json()
-    check(r.status_code == 200 and j["resumed"], "T001 に戻る")
-
-    r = client.post("/survey/api/tasks", json=dict(task, name="", frequency="週2回"))
-    j = r.get_json()
-    check(r.status_code == 400 and "name" in j["errors"] and "frequency" in j["errors"], "業務: 必須と選択肢の検証")
-    r = client.post("/survey/api/tasks", json=task)
-    j = r.get_json()
-    check(r.status_code == 200 and j["success"] and j["task"]["hours"] > 0 and len(j["tasks"]) == 1, f"業務: 登録（月 {j['task']['hours']} h）")
-    tid = j["task"]["id"]
-    r = client.put(f"/survey/api/tasks/{tid}", json=dict(task, name="日報の数字を週報へ自動転記", frequency="毎日"))
-    j = r.get_json()
-    check(r.status_code == 200 and j["task"]["name"].endswith("自動転記") and j["task"]["frequency"] == "毎日", "業務: 更新")
-    r = client.post("/survey/api/tasks", json=dict(task, name="2件目の業務"))
-    check(len(r.get_json()["tasks"]) == 2, "業務: 2件目")
-    r = client.delete(f"/survey/api/tasks/{tid}")
-    j = r.get_json()
-    check(r.status_code == 200 and len(j["tasks"]) == 1 and j["tasks"][0]["name"] == "2件目の業務", "業務: 削除")
-
-    r = client.post("/survey/api/part-c", json={"c1_wish": "", "c2_skills": []})
-    check(r.status_code == 400 and "c1_wish" in r.get_json()["errors"], "関わり方: 必須の検証")
-    r = client.post("/survey/api/part-c", json={"c1_wish": "ぜひ取り組みたい", "c2_skills": ["Excel関数"], "c3_learn": ["Python"], "c4_hours": "1〜2時間", "c5_targets": "2件目の業務", "c6_share": "できる"})
-    check(r.status_code == 200 and r.get_json()["respondent"]["part_c_done"], "関わり方: 保存")
-    r = client.post("/survey/api/part-d", json={"d1": "総務へ毎月送っている", "d2": "", "d3": "", "d4": ""})
-    j = r.get_json()
-    check(r.status_code == 200 and j["respondent"]["part_d_done"] and len(j["tasks"]) == 1, "全体: 送信して完了")
-    with app.app_context():
-        rsp = Respondent.query.filter_by(emp_id="T001").first()
-        check(rsp.part_c_done and rsp.part_d_done and rsp.d1 == "総務へ毎月送っている" and Task.query.filter_by(respondent_id=rsp.id).count() == 1, "DB に保存されている")
-
-    client.post("/survey/api/reset")
-    r = client.get("/survey/")
-    check('"respondent": null' in r.data.decode("utf-8"), "別の人: 状態が消える")
-    r = client.post("/survey/api/respondent", json={"emp_id": "T001", "name": "", "workplace_id": ""})
-    j = r.get_json()
-    check(r.status_code == 200 and j["resumed"] and j["respondent"]["name"] == "試験 太郎" and len(j["tasks"]) == 1, "同じ社員IDで続きから（氏名はDBから）")
-    r = client.get("/survey/")
-    check('"name": "試験 太郎"' in r.data.decode("utf-8"), "再表示で状態が埋め込まれる")
-
-    with app.app_context():
-        db.session.add(MonthlyResponse(period="2026-01", emp_id="M001", name="月次 花子", workplace_id=2, answers_json="{}"))
-        db.session.commit()
-    client.post("/survey/api/reset")
-    r = client.post("/survey/api/respondent", json={"emp_id": "M001", "name": "", "workplace_id": ""})
-    j = r.get_json()
-    check(r.status_code == 200 and not j["resumed"] and j["respondent"]["name"] == "月次 花子" and j["respondent"]["workplace_id"] == 2, "月次の回答から氏名・職場を補う")
-
+    conf.override("OPENAI_REASONING_EFFORT", "low")
+    conf.override("OPENAI_MAX_OUTPUT_TOKENS", 4000)
+    conf.override("OPENAI_API_TIMEOUT", 90)
     client.post("/login", data={"emp_id": "admin", "password": "adminpass"})
-    r = client.get("/cases/")
-    html = r.data.decode("utf-8")
-    check("職場／依頼者" in html and "自動化依頼を出す" in html, "案件一覧の文言")
+    client.post("/admin/demo/load")
+    client.post("/admin/ai", data={"openai_api_url": "https://ai.example.test/api/responses", "openai_api_key": "test-key", "openai_model": "gpt-6-test"})
+    with app.app_context():
+        db.session.add(MonthlyResponse(period=current_period(), emp_id="T001", name="試験 太郎", workplace_id=1, answers_json=json.dumps({"has": "ある", "hours": "30分〜1時間", "task_names": "日報の集計、出勤簿の転記", "trend": "変わらない", "wants": "ある", "wants_tasks": "日報の集計", "stance": "改善チームに依頼したい"}, ensure_ascii=False)))
+        db.session.commit()
+    client.post("/logout")
+
+    code, html, r = get("/survey/?emp=T001&task=日報の集計")
+
+    def in_html(text):
+        return text in html or json.dumps(text)[1:-1] in html
+
+    check(code == 200 and "聞き取りを始める" in html and "一気に書く" in html and "写真を貼る" in html and "最初から見る" in html and in_html("まずは相談したい") and in_html("スキルを身につけながら、一緒にやってみたい") and "mermaid" in html and in_html("日報の集計"), "依頼ページ: 聞き取り・一気に書く・写真・再生・3つの希望・一緒にやってみたい・業務名の引き継ぎ")
+    check("依頼する業務" in html and "改善への関わり方" not in html and "部全体について" not in html, "第3節・第4節は無くなっている")
+
+    r = client.post("/survey/api/intake", json={"title": "x", "messages": [], "state": {}})
+    check(r.status_code == 400 and "あなたのこと" in r.get_json()["message"], "あなたのこと未保存では聞き取りを始められない")
+    r = client.post("/survey/api/respondent", json={"emp_id": "T001", "name": "試験 太郎", "workplace_id": 1})
+    check(r.status_code == 400 and "work_pattern" in r.get_json()["errors"], "初めての人は勤務形態を選ばないと保存できない")
+    r = client.post("/survey/api/respondent", json={"emp_id": "T001", "name": "試験 太郎", "workplace_id": 1, "work_pattern": "交代勤務"})
+    j = r.get_json()
+    check(r.status_code == 200 and j["suggested"] == ["日報の集計", "出勤簿の転記"] and j["respondent"]["work_pattern"] == "交代勤務", f"アンケートで挙げた業務が候補に出て、勤務形態が保存される: {j.get('suggested')}")
+
+    calls, script = [], []
+
+    class _Resp:
+        def __init__(self, payload):
+            self.status = 200
+            self._body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+        def read(self):
+            return self._body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_urlopen(req, timeout=None):
+        raw = req.data.decode("utf-8")
+        calls.append({"body": json.loads(raw), "raw": raw})
+        nxt = script.pop(0)
+        if isinstance(nxt, Exception):
+            raise nxt
+        return _Resp(nxt)
+
+    def message(obj):
+        return {"id": "resp", "object": "response", "status": "completed", "error": None, "output": [{"type": "message", "id": "m", "status": "completed", "role": "assistant", "content": [{"type": "output_text", "text": json.dumps(obj, ensure_ascii=False), "annotations": []}]}]}
+
+    def state(**kw):
+        base = {"title": "日報の集計", "steps": [], "sources": [], "outputs": [], "recipients": [], "frequency": None, "duration": None, "pains": [], "unknowns": []}
+        base.update(kw)
+        return base
+
+    step1 = {"no": 1, "action": "生産管理システムから前日の実績をCSVで出す", "system": "生産管理システム", "input": "前日の実績", "output": "", "to": ""}
+    step2 = {"no": 2, "action": "Excelの集計表に貼り付ける", "system": "Excel（集計表）", "input": "CSV", "output": "", "to": ""}
+    step3 = {"no": 3, "action": "不良件数を手で数えて追記する", "system": "Excel（集計表）", "input": "", "output": "日次実績集計表", "to": ""}
+    step4 = {"no": 4, "action": "課長にメールで送る", "system": "メール", "input": "", "output": "", "to": "課長"}
+    real_urlopen = urllib.request.urlopen
+    urllib.request.urlopen = fake_urlopen
+    try:
+        script.append(message({"reply": "「日報の集計」ですね。最初に何をしますか？", "chips": [], "done": False, "remaining": 5, "state": state()}))
+        r = client.post("/survey/api/intake", json={"title": "日報の集計", "messages": [], "state": {}})
+        j = r.get_json()
+        check(r.status_code == 200 and j["success"] and "最初に何を" in j["reply"] and j["done"] is False and j["remaining"] == 5 and j["diagram"] == "" and j["state"]["title"] == "日報の集計", "聞き取り1ターン目: 最初の質問が返り、図はまだ空")
+        b = calls[-1]["body"]
+        check(b["model"] == "gpt-6-test" and "聞き取り担当" in b["instructions"] and "現在の state" in b["instructions"] and isinstance(b["input"], list) and b["input"][0]["role"] == "user" and "日報の集計" in b["input"][0]["content"] and "temperature" not in calls[-1]["raw"], "1ターン目の本文: 聞き取りのプロンプト・state・業務名。temperature なし")
+        check("交代勤務（昼勤・夜勤あり）" in b["instructions"] and "昼勤・夜勤の両方" in b["instructions"], "交代勤務の人には、いつやるかを聞く指示が入る")
+        msgs = [{"role": "ai", "text": j["reply"]}, {"role": "user", "text": "生産管理システムから前日の実績をCSVで出す"}]
+        script.append(message({"reply": "なるほど。次に何をしますか？", "chips": [], "done": False, "remaining": 4, "state": state(steps=[step1], sources=["生産管理システム"])}))
+        r = client.post("/survey/api/intake", json={"title": "日報の集計", "messages": msgs, "state": j["state"], "shown": 0})
+        j = r.get_json()
+        b = calls[-1]["body"]
+        check(r.status_code == 200 and len(j["state"]["steps"]) == 1 and "st1" in j["diagram"] and "生産管理システム" in j["diagram"] and "flowchart LR" in j["diagram"], "2ターン目: 手順1が入り、図に手順とシステムが出る")
+        check(len(j["frames"]) == 1 and j["frames"][0] == j["diagram"], "増えた手順のぶんだけコマ送りの図（frames）が返る")
+        check([m["role"] for m in b["input"]] == ["assistant", "user"] and b["input"][1]["content"] == "生産管理システムから前日の実績をCSVで出す", "会話の記録をそのまま送る")
+        msgs += [{"role": "ai", "text": j["reply"]}, {"role": "user", "text": "Excelの集計表に貼り付ける\n不良件数を手で数えて追記する"}]
+        script.append(message({"reply": "集計表は誰に渡しますか？", "chips": ["課長", "生産管理課", "自分だけ", "分からない"], "done": False, "remaining": 3, "state": state(steps=[step1, step2, step3], sources=["生産管理システム"], outputs=["日次実績集計表"])}))
+        r = client.post("/survey/api/intake", json={"title": "日報の集計", "messages": msgs, "state": j["state"], "shown": 1})
+        j = r.get_json()
+        check(r.status_code == 200 and len(j["state"]["steps"]) == 3 and j["chips"] == ["課長", "生産管理課", "自分だけ", "分からない"] and "o3" in j["diagram"], "一気に書いた2行が手順2・3になり、選択肢（chips）が返る")
+        check(len(j["frames"]) == 2 and "st2" in j["frames"][0] and "st3" not in j["frames"][0] and "st3" in j["frames"][1], "一気に2手順増えたら、1手順ずつのコマが2枚返る")
+        msgs += [{"role": "ai", "text": j["reply"]}, {"role": "user", "text": "手順書（写真）を送りました。読み取ってください"}]
+        image = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+        script.append(message({"reply": "写真から4つ目の手順を読み取りました。この流れで合っていますか？", "chips": [], "done": True, "remaining": 0, "state": state(steps=[step1, step2, step3, step4], sources=["生産管理システム"], outputs=["日次実績集計表"], recipients=["課長"], frequency="毎日", duration="15〜30分")}))
+        r = client.post("/survey/api/intake", json={"title": "日報の集計", "messages": msgs, "state": j["state"], "image": image, "shown": 3})
+        j = r.get_json()
+        b = calls[-1]["body"]
+        last = b["input"][-1]["content"]
+        check(r.status_code == 200 and isinstance(last, list) and last[0]["type"] == "input_text" and last[1]["type"] == "input_image" and last[1]["image_url"] == image, "写真は最後のユーザー発言に input_image として付く")
+        check(j["done"] is True and len(j["state"]["steps"]) == 4 and j["state"]["frequency"] == "毎日" and j["state"]["duration"] == "15〜30分" and "課長" in j["diagram"] and len(j["frames"]) == 1, "写真を読んで手順4・頻度・時間がそろい、確認（done）になる")
+        final_state = j["state"]
+        msgs += [{"role": "ai", "text": j["reply"]}, {"role": "user", "text": "はい、合っています"}]
+
+        r = client.post("/survey/api/intake", json={"title": "x", "messages": [], "state": {}, "image": "data:text/plain;base64,AAAA"})
+        check(r.status_code == 400 and "写真" in r.get_json()["message"], "画像以外のデータは受け付けない")
+
+        r = client.post("/survey/api/tasks", json={"name": "", "state": {}, "messages": [], "frequency": "", "duration": "", "wish": ""})
+        e = r.get_json()["errors"]
+        check(r.status_code == 400 and "name" in e and "steps" in e and "frequency" in e and "duration" in e and "wish" in e, "登録: 業務名・手順・頻度・時間・希望がないとエラー")
+        r = client.post("/survey/api/tasks", json={"state": final_state, "messages": msgs, "frequency": "毎日", "duration": "15〜30分", "wish": "自動化したい"})
+        check(r.status_code == 400 and "wish" in r.get_json()["errors"], "希望は3つの選択肢以外を受け付けない")
+
+        finalize = {
+            "name": "日報の実績を集計表にまとめて課長に送る", "purpose": "前日の生産実績を朝会で確認するため", "output": "日次実績集計表", "output_users": ["上司"], "output_users_note": "朝会で使う",
+            "inputs": ["生産管理システム", "他のExcel"], "inputs_note": "生産管理システムの実績CSV、Excelの集計表", "info_from": "生産管理システム", "actors": "課長", "prev_task": "", "next_task": "週報の作成",
+            "tools": ["Excel", "メール", "社内システム"], "nature": ["転記・コピー", "集計・グラフ作成", "メール・配布"], "pains": ["時間がかかる", "同じ情報を何度も入力する"], "pains_note": "手で数えている", "headcount": 2,
+            "domain": "製造実行・管理", "related": ["週報の作成"], "summary": "日次実績を集計表にまとめて課長に送る日次業務。", "ecrs": {"eliminate": None, "combine": "不良件数は品質システムから取れる可能性", "rearrange": None, "simplify": "集計表の自動更新"},
+            "automation": "Power Query で CSV を取り込み、メールは自動送信", "flags": ["自動化候補", "重複入力候補"], "priority": "高", "questions": ["不良件数は品質システムに入っていますか？"],
+            "tobe_steps": ["CSV を Power Query で取り込む", "集計表が自動で更新される", "課長はダッシュボードで確認"], "saving_minutes_per_month": 400, "first_impression": "手で数えている不良件数は、システムから取れそうです", "hearing_questions": [],
+        }
+        r = client.post("/survey/api/tasks", json={"state": final_state, "messages": msgs, "frequency": "毎日", "duration": "15〜30分", "wish": "減らしたい"})
+        check(r.status_code == 400 and "shift" in r.get_json()["errors"], "交代勤務の人は、いつやるか（昼勤／夜勤／両方）がないと登録できない")
+        script.append(message(finalize))
+        r = client.post("/survey/api/tasks", json={"state": final_state, "messages": msgs, "frequency": "毎日", "duration": "15〜30分", "wish": "減らしたい", "self_improve": True, "skills": ["Excel関数"], "learn": ["Python"], "shift": "夜勤"})
+        j = r.get_json()
+        b = calls[-1]["body"]
+        check(r.status_code == 200 and j["success"] and j["first_impression"] == finalize["first_impression"] and len(j["tasks"]) == 1 and j["suggested"] == ["出勤簿の転記"], "登録: AI の一言が返り、候補から登録した業務が消える")
+        check("業務分析アシスタント" in b["instructions"] and "聞き取りの結果" in b["input"] and "減らしたい" in b["input"] and "製造実行・管理" in b["input"] and "## 勤務\n夜勤" in b["input"] and "temperature" not in calls[-1]["raw"], "登録時の分析: state・希望・勤務・業務領域リストを送る。temperature なし")
+        with app.app_context():
+            t = Task.query.filter_by(name="日報の集計").first()
+            check(t is not None and len(t.steps) == 4 and t.steps[3]["to"] == "課長" and t.frequency == "毎日" and t.duration == "15〜30分" and t.wish == "減らしたい" and t.self_improve == "スキルを身につけながら、一緒にやってみたい" and t.shift == "夜勤" and t.monthly_minutes > 0, "案件に手順・頻度・時間・希望・一緒にやってみたい・勤務（夜勤）が保存される")
+            check(t.purpose == finalize["purpose"] and t.output_users_list == ["上司"] and t.inputs_list == ["生産管理システム", "他のExcel"] and t.tools_list == ["Excel", "メール", "社内システム"] and t.pains_list == ["時間がかかる", "同じ情報を何度も入力する"] and t.headcount == 2 and t.domain.name == "製造実行・管理" and t.next_task == "週報の作成", "AI が埋めた項目が案件に入る")
+            check(set(t.ai_fields_list) >= {"purpose", "output", "inputs", "tools", "domain", "headcount"} and t.ai_source == "openai" and t.ai_priority == "高" and "自動化候補" in t.ai_flags_list and t.ai_extra_dict["saving_minutes_per_month"] == 400 and t.ai_extra_dict["tobe_steps"][0].startswith("CSV"), "AI推定の印・分析結果・改善後の流れが保存される")
+            check(len(t.intake) == len(msgs) and t.intake[-1]["text"] == "はい、合っています", "聞き取りの記録が保存される")
+            r_ = Respondent.query.filter_by(emp_id="T001").first()
+            check(r_.c2_skills == "Excel関数" and r_.c3_learn == "Python" and r_.wants_to_improve, "一緒にやってみたい人の技術が残り、自主改善希望者になる")
+            tid = t.id
+
+        script.append(message(dict(finalize, name="相談の業務", hearing_questions=["いまの帳票は誰が見ていますか？", "数字を使う会議はありますか？"], wish="まずは相談したい")))
+        r = client.post("/survey/api/tasks", json={"name": "相談したい業務", "state": state(title="相談したい業務", steps=[step1, step2]), "messages": [], "frequency": "毎週", "duration": "15分未満", "wish": "まずは相談したい", "shift": "昼勤"})
+        check(r.status_code == 200 and r.get_json()["success"], "「まずは相談したい」でも登録できる")
+        with app.app_context():
+            t2 = Task.query.filter_by(name="相談したい業務").first()
+            check(t2 is not None and t2.is_candidate and len(t2.ai_extra_dict["hearing_questions"]) == 2, "相談の案件は候補に数え、ヒアリング質問が残る")
+
+        script.append(urllib.error.URLError("接続できない（テスト）"))
+        r = client.post("/survey/api/tasks", json={"name": "AIなしでも登録", "state": state(title="AIなしでも登録", steps=[step1, step4], sources=["生産管理システム"], recipients=["課長"], shift="昼勤・夜勤の両方"), "messages": [], "frequency": "毎月", "duration": "1〜2時間", "wish": "なくしたい"})
+        check(r.status_code == 200 and r.get_json()["success"], "AI が応答しなくても登録はできる（ルールベースで補う）")
+        with app.app_context():
+            t3 = Task.query.filter_by(name="AIなしでも登録").first()
+            check(t3 is not None and t3.ai_source == "rules" and "生産管理システム" in t3.inputs_list and t3.purpose == "不明" and t3.output_users and "社内システム" in t3.tools_list, "AI なしのときは手順から入力元・ツールを推定し、目的は不明にする")
+
+        client.post("/login", data={"emp_id": "admin", "password": "adminpass"})
+        code, html, r = get(f"/cases/{tid}")
+        check(code == 200 and "手順（聞き取り）" in html and "生産管理システムから前日の実績をCSVで出す" in html and "AI推定" in html and "改善後の流れ（AI案）" in html and "約 400 分/月" in html and "聞き取りの記録" in html and "はい、合っています" in html and "／夜勤）" in html, "案件詳細: 手順・AI推定の印・改善後の流れ・聞き取りの記録・勤務")
+        check('id="def-task"' in html and "st1" in html and "st4" in html and "週報の作成" in html, "案件詳細の流れ図は手順の連鎖（前後の業務つき）")
+        code, html, r = get("/cases/")
+        check(code == 200 and '<span class="badge text-bg-dark">夜勤</span>' in html and '<span class="badge text-bg-dark">昼勤・夜勤の両方</span>' in html, "改善案件の一覧に夜勤・両方のバッジが出る")
+        code, html, r = get("/people/")
+        check(code == 200 and "<th>勤務形態</th>" in html and "交代勤務" in html, "DX人財情報に勤務形態の列が出る")
+        code, html, r = get("/bizmap/")
+        check(code == 200 and "日報の集計" in html, "業務マップに新しい案件が載る")
+        code, html, r = get("/cases/?wish=まずは相談したい")
+        check(code == 200 and "相談したい業務" in html, "改善案件の一覧を「まずは相談したい」で絞れる")
+        client.post("/logout")
+        r = client.delete(f"/survey/api/tasks/{tid}")
+        check(r.status_code == 200 and r.get_json()["success"] and "日報の集計" in r.get_json()["suggested"], "取り消すと候補に戻る")
+        check(not script, "用意した応答をすべて使った")
+    finally:
+        urllib.request.urlopen = real_urlopen
+
+    client.post("/survey/api/reset")
+    r = client.post("/survey/api/respondent", json={"emp_id": "", "name": "x", "workplace_id": ""})
+    check(r.status_code == 400 and "emp_id" in r.get_json()["errors"], "社員IDが空ならエラー")
+    r = client.post("/survey/api/respondent", json={"emp_id": "ZZZ9", "name": "", "workplace_id": ""})
+    check(r.status_code == 400 and "name" in r.get_json()["errors"], "見つからないIDは氏名が必要")
+    r = client.post("/survey/api/intake", json={"title": "x", "messages": [], "state": {}})
+    check(r.status_code == 400, "あなたのことを保存していないと聞き取りできない")
+    client.post("/survey/api/respondent", json={"emp_id": "T002", "name": "試験 次郎", "workplace_id": 1, "work_pattern": "普通勤務"})
+    client.post("/login", data={"emp_id": "admin", "password": "adminpass"})
+    client.post("/admin/ai", data={"openai_api_url": "", "openai_api_key": "", "openai_model": ""})
+    client.post("/logout")
+    r = client.post("/survey/api/intake", json={"title": "x", "messages": [], "state": {}})
+    check(r.status_code == 400 and "AI連携が設定されていません" in r.get_json()["message"], "AI 未設定なら聞き取りは始められず、設定を案内する")
 
     return fails
+
 
 def smoke_writeback():
     tmpdir = tempfile.mkdtemp()
@@ -905,16 +1038,25 @@ def smoke_ai():
 
     URL = "https://ai.example.test/api/responses"
 
-    html = client.get("/admin/").data.decode("utf-8")
-    check(app_module.ai_enabled() is False and "OPENAI_API_URL が未設定" in html, "URL 未設定のときは ai_enabled=False、管理画面は『未設定（ルールベース）』")
-    conf.override("OPENAI_API_URL", URL)
-    conf.override("OPENAI_API_KEY", "test-key")
-    conf.override("OPENAI_MODEL", "gpt-6-test")
+    AI_FORM = {"openai_api_url": URL, "openai_api_key": "test-key", "openai_model": "gpt-6-test"}
     conf.override("OPENAI_REASONING_EFFORT", "low")
     conf.override("OPENAI_MAX_OUTPUT_TOKENS", 4000)
     conf.override("OPENAI_API_TIMEOUT", 90)
+
     html = client.get("/admin/").data.decode("utf-8")
-    check(app_module.ai_enabled() is True and "ChatGPT API 連携 有効" in html and "gpt-6-test" in html and "Responses API" in html, "URL とキーがあれば有効。管理画面に『ChatGPT API 連携 有効（モデル名、Responses API）』")
+    with app.app_context():
+        check(app_module.ai_enabled() is False and app_module._api_url() == "" and app_module._model() == "", "未設定のときは URL もモデル名も空のまま（既定の URL・モデル名を使わない）")
+    check("URL・API キー・モデル名 が未設定" in html and 'name="openai_api_url"' in html and 'name="openai_api_key"' in html and 'name="openai_model"' in html, "管理画面に未設定の表示と、URL・API キー・モデル名の入力欄")
+    r = client.post("/admin/ai", data=dict(AI_FORM, openai_model=""), follow_redirects=True)
+    html = r.data.decode("utf-8")
+    with app.app_context():
+        check(app_module.ai_enabled() is False and app_module._api_url() == URL and app_module._model() == "", "URL とキーだけではまだ無効。モデル名は空のまま（既定のモデル名で補わない）")
+    check("モデル名 が未設定" in html and "ルールベースで動きます" in html, "モデル名が空なら『モデル名 が未設定』と出る")
+    r = client.post("/admin/ai", data=dict(AI_FORM, openai_api_url="  " + URL + "  "), follow_redirects=True)
+    html = r.data.decode("utf-8")
+    with app.app_context():
+        check(app_module.ai_enabled() is True and app_module._api_url() == URL and app_module._model() == "gpt-6-test", "3つそろえば有効（前後の空白は除く）。再起動は不要")
+    check("ChatGPT API 連携 有効" in html and "gpt-6-test" in html and "Responses API" in html and 'value="gpt-6-test"' in html and 'value="test-key"' in html, "管理画面に『ChatGPT API 連携 有効（モデル名、Responses API）』と保存した値")
 
     calls, script = [], []
 
@@ -1000,11 +1142,22 @@ def smoke_ai():
         html = r.data.decode("utf-8")
         check(r.status_code == 200 and "テスト提案のタイトル" in html, "ダッシュボードの『AIで提案を生成』も Responses API 経由で出る")
         check("temperature" not in calls[-1]["raw"] and calls[-1]["body"].get("reasoning") == {"effort": "low"}, "提案生成も temperature なし・reasoning あり")
+        script.append(message("OK"))
+        r = client.post("/admin/ai/test", data=AI_FORM, follow_redirects=True)
+        html = r.data.decode("utf-8")
+        check(r.status_code == 200 and "接続できました" in html and calls[-1]["body"]["model"] == "gpt-6-test" and "temperature" not in calls[-1]["raw"], "接続テスト: 保存した設定で1回呼んで応答を表示")
+        script.append(http_error(404, "not found"))
+        r = client.post("/admin/ai/test", data=AI_FORM, follow_redirects=True)
+        html = r.data.decode("utf-8")
+        check("接続できませんでした" in html and "404" in html, "接続テスト: 失敗したら理由を表示")
+        r = client.post("/admin/ai", data={"openai_api_url": "", "openai_api_key": "", "openai_model": ""}, follow_redirects=True)
+        html = r.data.decode("utf-8")
+        with app.app_context():
+            check(app_module.ai_enabled() is False and app_module._api_url() == "" and app_module._api_key() == "" and app_module._model() == "", "空で保存すると空に戻る（何も補わない）")
+        check("URL・API キー・モデル名 が未設定" in html, "空に戻すと未設定の表示")
         check(not script, "用意した応答をすべて使った")
     finally:
         urllib.request.urlopen = real_urlopen
-        for k in ("OPENAI_API_URL", "OPENAI_API_KEY"):
-            conf.override(k, "")
 
     return fails
 

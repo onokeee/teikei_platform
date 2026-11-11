@@ -31,10 +31,7 @@ LDAP_NAME_ATTR = "displayName"
 LDAP_DEPT_ATTR = "department"
 LDAP_MAIL_ATTR = "mail"
 
-# ---- AI連携: 社内 Azure OpenAI の ChatGPT API（Responses API）。URL かキーが空ならルールベース。temperature / top_p は送らない ----
-OPENAI_API_URL = ""  # 例 "https://openai-api-service.<社内ホスト名>:82/api/responses"
-OPENAI_API_KEY = ""
-OPENAI_MODEL = "gpt-6-luna"  # 社内で案内されている GPT-6 系の名前に合わせる
+# ---- AI連携: 社内 Azure OpenAI の ChatGPT API（Responses API）。URL・API キー・モデル名は管理画面で設定する。temperature / top_p は送らない ----
 OPENAI_REASONING_EFFORT = "low"  # "" なら送らない
 OPENAI_MAX_OUTPUT_TOKENS = 4000
 OPENAI_API_TIMEOUT = 90

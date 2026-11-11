@@ -60,9 +60,17 @@ DURATIONS = ["15分未満", "15〜30分", "30分〜1時間", "1〜2時間", "2�
 TOOLS = ["Excel", "Access", "メール", "社内システム", "紙", "VBA・マクロ", "RPA", "その他"]
 NATURES = ["転記・コピー", "集計・グラフ作成", "資料作成", "確認・チェック", "データ取得", "メール・配布", "台帳更新", "判断を伴う"]
 PAINS = ["時間がかかる", "ミスが起きやすい", "同じ情報を何度も入力する", "手順が人によって違う", "急ぎで割り込まれる", "何のためか分からない", "特になし"]
-WISHES = ["なくしたい", "減らしたい", "自動化したい", "このままでよい", "分からない"]
+WISHES = ["なくしたい", "減らしたい", "まずは相談したい"]
+LEGACY_WISHES = {"自動化したい": "減らしたい", "分からない": "まずは相談したい"}
 SYSTEM_SOURCES = {"生産管理システム", "品質システム", "設備データ"}
-SELF_IMPROVE = ["取り組みたい", "教えてもらえれば取り組みたい", "改善チームに任せたい", "分からない"]
+SELF_IMPROVE_YES = "スキルを身につけながら、一緒にやってみたい"
+SELF_IMPROVE_NO = "改善チームに任せたい"
+SELF_IMPROVE = [SELF_IMPROVE_YES, SELF_IMPROVE_NO]
+INTAKE_MAX_QUESTIONS = 6
+INTAKE_STEP_LIMIT = 12
+WORK_PATTERNS = ["普通勤務", "交代勤務"]
+SHIFT_OPTIONS = ["昼勤", "夜勤", "昼勤・夜勤の両方"]
+FREQUENCY_HINTS = {"毎日": "毎日（出勤のたび）"}
 
 # ---- パートC 改善への参加意欲とスキル ----
 C1_OPTIONS = ["ぜひ取り組みたい", "教えてもらえれば取り組みたい", "興味はあるが時間がない", "今は考えていない"]
@@ -120,8 +128,8 @@ STAGE_INDEX = {k: i for i, k in enumerate(STAGE_KEYS)}
 STAGE_NAMES = {s[0]: s[1] for s in STAGES}
 BUILD_STAGE_SELF = "伴走"
 
-CANDIDATE_WISHES = {"なくしたい", "減らしたい", "自動化したい"}
-SELF_IMPROVE_POSITIVE = {"取り組みたい", "教えてもらえれば取り組みたい"}
+CANDIDATE_WISHES = {"なくしたい", "減らしたい", "まずは相談したい", "自動化したい"}
+SELF_IMPROVE_POSITIVE = {SELF_IMPROVE_YES, "取り組みたい", "教えてもらえれば取り組みたい"}
 C1_POSITIVE = {"ぜひ取り組みたい", "教えてもらえれば取り組みたい"}
 
 # ---- 分析不足領域の判定しきい値 ----
@@ -138,14 +146,23 @@ AI_FLAGS = ["目的不明", "廃止候補", "統合候補", "重複入力候補"
 
 # ---- 月次アンケート（voiceloop 方式: 月度ごとの設問セット。基本設問は毎月同じで KPI につなぐ） ----
 SHIFTS_PER_MONTH = 20
+SHIFTS_PER_MONTH_BY_PATTERN = {"普通勤務": 20, "交代勤務": 20}
+
+
+def shifts_per_month(pattern=None):
+    return SHIFTS_PER_MONTH_BY_PATTERN.get(pattern or "", SHIFTS_PER_MONTH)
 MONTHLY_HOURS_VALUE = {"0時間": 0.0, "30分未満": 0.25, "30分〜1時間": 0.75, "1〜2時間": 1.5, "2〜4時間": 3.0, "4時間以上": 5.0}
+_IF_HAS = {"key": "has", "show_if": ["ある"], "required": True}
 MONTHLY_CORE_QUESTIONS = [
-    {"key": "has", "type": "choice", "text": "PCでおこなう定型業務（繰り返しの手動作業）はありますか", "options": ["ある", "少しある", "ない"], "required": True},
-    {"key": "hours", "type": "choice", "text": "1シフト（1出勤）あたり、PCの定型業務を行っている時間は", "options": list(MONTHLY_HOURS_VALUE), "required": True},
-    {"key": "trend", "type": "choice", "text": "先月と比べて、PC定型業務は", "options": ["減った", "変わらない", "増えた"], "required": True},
+    {"key": "has", "type": "choice", "text": "PCでおこなう定型業務（繰り返しの手動作業）はありますか", "options": ["ある", "ない"], "required": True},
+    {"key": "hours", "type": "choice", "text": "1シフト（1出勤）あたり、PCの定型・定期業務を行っている時間は", "options": list(MONTHLY_HOURS_VALUE), "required": False, "depends": dict(_IF_HAS)},
+    {"key": "task_names", "type": "text", "text": "行っているPCの定型・定期業務名", "required": False, "placeholder": "例：日報の集計、出勤簿の転記（複数あれば「、」で区切る）", "depends": dict(_IF_HAS)},
+    {"key": "trend", "type": "choice", "text": "先月と比べて、PC定型業務は", "options": ["減った", "変わらない", "増えた"], "required": False, "depends": dict(_IF_HAS, main=True)},
+    {"key": "decreased_reason", "type": "text", "text": "なぜ減ったのか", "required": False, "placeholder": "例：日報の転記を自動化した、やり方を見直した、担当が変わった",
+     "depends": {"key": "trend", "show_if": ["減った"], "required": True}},
     {"key": "new_tasks", "type": "text", "text": "増えたPC定型業務名", "required": False, "placeholder": "例：新しい報告フォーマットへの転記",
      "depends": {"key": "trend", "show_if": ["増えた"], "required": True}},
-    {"key": "wants", "type": "choice", "text": "なくしたい・自動化したいPC定型業務はありますか", "options": ["ある", "ない"], "required": True},
+    {"key": "wants", "type": "choice", "text": "なくしたい・自動化したいPC定型業務はありますか", "options": ["ある", "ない"], "required": False, "depends": dict(_IF_HAS, main=True)},
     {"key": "wants_tasks", "type": "text", "text": "あれば、その業務名（1行に1件）", "required": False, "placeholder": "例：日報の実績をExcelに転記する",
      "depends": {"key": "wants", "show_if": ["ある"], "required": True}},
     {"key": "stance", "type": "choice", "text": "どのように進めたいですか", "options": ["自分で取り組みたい", "改善チームに依頼したい"], "required": False,
@@ -160,10 +177,11 @@ MONTHLY_KPI_LABELS = {
     "wants_tasks": "挙げられた業務（本登録へ誘導）",
     "stance": "依頼したい率・自分でやりたい率",
     "new_tasks": "新規業務の件数",
+    "task_names": "挙げられた定型・定期業務",
+    "decreased_reason": "減った理由",
 }
 MONTHLY_KPI = {
-    "has_positive": {"ある", "少しある"},
-    "has_strong": {"ある"},
+    "has_positive": {"ある"},
     "trend_decreased": {"減った"},
     "trend_increased": {"増えた"},
     "wants_positive": {"ある"},
@@ -177,68 +195,8 @@ PERSON_FIELDS = [
     {"key": "emp_id", "type": "text", "label": "社員ID", "required": True, "lookup": True, "placeholder": "例：E001"},
     {"key": "name", "type": "text", "label": "氏名", "required": True, "fallback": True},
     {"key": "workplace_id", "type": "select", "label": "職場", "required": True, "options": "workplaces"},
+    {"key": "work_pattern", "type": "select", "label": "勤務形態", "required": True, "options": "work_patterns"},
 ]
-
-TASK_SECTIONS = [
-    {
-        "title": "何を・何のために",
-        "fields": [
-            {"key": "name", "type": "text", "label": "業務名", "required": True, "placeholder": "例：日報の実績をExcelの集計表に転記する"},
-            {"key": "domain_id", "type": "choice", "label": "業務領域", "required": True, "options": "domains"},
-            {"key": "purpose", "type": "text", "label": "目的", "required": True, "placeholder": "例：日次の生産実績を朝会で確認するため（分からなければ「不明」）"},
-            {"key": "output", "type": "text", "label": "できるもの", "required": True, "placeholder": "例：日次実績集計表（Excel）"},
-            {"key": "output_users", "type": "multi", "label": "使う人", "required": True, "options": C.OUTPUT_USERS, "note": {"key": "output_users_note", "placeholder": "部署名や用途（任意）"}},
-            {"key": "inputs", "type": "multi", "label": "情報のもと", "required": True, "options": C.INPUT_SOURCES, "note": {"key": "inputs_note", "placeholder": "システム名やファイル名（任意）"}},
-        ],
-    },
-    {
-        "title": "どれくらい",
-        "fields": [
-            {"key": "frequency", "type": "choice", "label": "頻度", "required": True, "options": C.FREQUENCIES},
-            {"key": "duration", "type": "choice", "label": "1回の時間", "required": True, "options": C.DURATIONS},
-            {"key": "headcount", "type": "number", "label": "同じ作業をしている人数", "required": False, "min": 1, "default": 1, "unit": "人"},
-        ],
-    },
-    {
-        "title": "やり方と困りごと",
-        "fields": [
-            {"key": "tools", "type": "multi", "label": "使うツール", "required": True, "options": C.TOOLS},
-            {"key": "nature", "type": "multi", "label": "作業の種類", "required": True, "options": C.NATURES},
-            {"key": "pains", "type": "multi", "label": "困りごと", "required": True, "options": C.PAINS, "note": {"key": "pains_note", "placeholder": "具体的に（任意）"}},
-            {"key": "wish", "type": "choice", "label": "どうしたい", "required": True, "options": C.WISHES},
-            {"key": "self_improve", "type": "choice", "label": "自分でやってみたい？", "required": True, "options": C.SELF_IMPROVE},
-            {"key": "note", "type": "textarea", "label": "補足", "required": False, "placeholder": "改善案や気づいたこと（任意）"},
-        ],
-    },
-    {
-        "title": "つながり（前後の業務・関わる人・情報の受け取り元）",
-        "optional": True,
-        "collapsed": True,
-        "fields": [
-            {"key": "prev_task", "type": "text", "label": "前の業務", "placeholder": "例：各ラインの日報記入"},
-            {"key": "next_task", "type": "text", "label": "後の業務", "placeholder": "例：週報の作成"},
-            {"key": "actors", "type": "text", "label": "関わる人・部署", "placeholder": "例：各ライン作業者、課長、生産管理課"},
-            {"key": "info_from", "type": "text", "label": "情報の受け取り元", "placeholder": "例：営業からの受注メール、品質システムの検査データ"},
-        ],
-    },
-]
-
-C_FIELDS = [
-    {"key": "c1_wish", "type": "choice", "label": "自分で改善に取り組みたい？", "required": True, "options": C.C1_OPTIONS},
-    {"key": "c2_skills", "type": "multi", "label": "使える技術", "required": True, "options": C.SKILLS},
-    {"key": "c3_learn", "type": "multi", "label": "学びたい技術", "options": C.SKILLS},
-    {"key": "c4_hours", "type": "choice", "label": "改善に使える時間（週）", "options": C.C4_HOURS},
-    {"key": "c5_targets", "type": "text", "label": "取り組みたい業務", "placeholder": "登録した業務名（複数可）"},
-    {"key": "c6_share", "type": "choice", "label": "事例の発表・共有", "options": C.C6_OPTIONS},
-]
-
-D_FIELDS = [
-    {"key": "d1", "type": "textarea", "label": "他部署とのやりとりで手間なこと", "placeholder": "例：毎月〇〇へ実績を送る、△△からの依頼を転記する"},
-    {"key": "d2", "type": "textarea", "label": "同じ情報を何度も入力しているもの", "placeholder": "例：日報の数字を日次表・週報・月報に3回入れている"},
-    {"key": "d3", "type": "textarea", "label": "誰が何に使うか分からない帳票・報告", "placeholder": "例：毎週出している〇〇集計表"},
-    {"key": "d4", "type": "textarea", "label": "PC定型業務について感じていること", "placeholder": "自由にどうぞ"},
-]
-
 
 # ===== データモデル（SQLite） =====
 db = SQLAlchemy()
@@ -275,6 +233,7 @@ class Respondent(db.Model):
     workplace_id = db.Column(db.Integer, db.ForeignKey("workplaces.id"))
     created_at = db.Column(db.DateTime, default=datetime.now)
     is_demo = db.Column(db.Boolean, default=False)
+    work_pattern = db.Column(db.String(20), default="")
 
     c1_wish = db.Column(db.String(50))
     c2_skills = db.Column(db.Text, default="")
@@ -341,6 +300,11 @@ class Task(db.Model):
 
     actors = db.Column(db.Text, default="")
     info_from = db.Column(db.Text, default="")
+    steps_json = db.Column(db.Text, default="[]")
+    intake_json = db.Column(db.Text, default="[]")
+    ai_fields = db.Column(db.Text, default="")
+    ai_extra = db.Column(db.Text, default="{}")
+    shift = db.Column(db.String(20), default="")
 
     monthly_minutes = db.Column(db.Float, default=0.0)
 
@@ -540,6 +504,34 @@ class Task(db.Model):
         except ValueError:
             return []
 
+    @property
+    def steps(self):
+        try:
+            data = json.loads(self.steps_json or "[]")
+        except ValueError:
+            data = []
+        return [x for x in data if isinstance(x, dict) and x.get("action")] if isinstance(data, list) else []
+
+    @property
+    def intake(self):
+        try:
+            data = json.loads(self.intake_json or "[]")
+        except ValueError:
+            data = []
+        return [m for m in data if isinstance(m, dict)] if isinstance(data, list) else []
+
+    @property
+    def ai_fields_list(self):
+        return C.split_list(self.ai_fields)
+
+    @property
+    def ai_extra_dict(self):
+        try:
+            data = json.loads(self.ai_extra or "{}")
+        except ValueError:
+            data = {}
+        return data if isinstance(data, dict) else {}
+
     def apply_ai_result(self, result):
         self.ai_domain = result.get("domain")
         self.ai_related = json.dumps(result.get("related") or [], ensure_ascii=False)
@@ -594,6 +586,7 @@ class Employee(db.Model):
     emp_id = db.Column(db.String(50), unique=True, nullable=False)
     name = db.Column(db.String(100), nullable=False)
     department = db.Column(db.String(100), default="")
+    work_pattern = db.Column(db.String(20), default="")
     workplace_id = db.Column(db.Integer, db.ForeignKey("workplaces.id"), nullable=True)
     email = db.Column(db.String(200), default="")
     active = db.Column(db.Boolean, default=True)
@@ -635,6 +628,7 @@ class MonthlyResponse(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     period = db.Column(db.String(7), nullable=False)
     emp_id = db.Column(db.String(50), nullable=False)
+    work_pattern = db.Column(db.String(20), default="")
     name = db.Column(db.String(100), default="")
     workplace_id = db.Column(db.Integer, db.ForeignKey("workplaces.id"), nullable=True)
     respondent_id = db.Column(db.Integer, db.ForeignKey("respondents.id"), nullable=True)
@@ -687,11 +681,16 @@ class FlowMap(db.Model):
 _ADDED_COLUMNS = {
     "respondents": {
         "emp_id": "VARCHAR(50)",
+        "work_pattern": "VARCHAR(20) DEFAULT ''",
+    },
+    "employees": {
+        "work_pattern": "VARCHAR(20) DEFAULT ''",
     },
     "monthly_responses": {
         "survey_id": "INTEGER",
         "answers_json": "TEXT DEFAULT '{}'",
         "comment": "TEXT DEFAULT ''",
+        "work_pattern": "VARCHAR(20) DEFAULT ''",
     },
     "tasks": {
         "actors": "TEXT DEFAULT ''",
@@ -699,6 +698,11 @@ _ADDED_COLUMNS = {
         "stage": "VARCHAR(20)",
         "stage_at": "DATETIME",
         "progress_note": "TEXT DEFAULT ''",
+        "steps_json": "TEXT DEFAULT '[]'",
+        "intake_json": "TEXT DEFAULT '[]'",
+        "ai_fields": "TEXT DEFAULT ''",
+        "ai_extra": "TEXT DEFAULT '{}'",
+        "shift": "VARCHAR(20) DEFAULT ''",
     },
 }
 
@@ -778,10 +782,10 @@ def lookup(emp_id):
         emp = Employee.query.filter_by(emp_id=emp_id).first()
     if emp is None:
         return None
-    name, workplace_id = emp.name or "", emp.workplace_id
-    if not name or not workplace_id:
-        r_name, r_wp = remembered_person(emp_id)
-        name, workplace_id = name or r_name, workplace_id or r_wp
+    name, workplace_id, work_pattern = emp.name or "", emp.workplace_id, emp.work_pattern or ""
+    if not name or not workplace_id or not work_pattern:
+        r_name, r_wp, r_pat = remembered_person(emp_id)
+        name, workplace_id, work_pattern = name or r_name, workplace_id or r_wp, work_pattern or r_pat
     workplace = db.session.get(Workplace, workplace_id) if workplace_id else None
     return {
         "emp_id": emp.emp_id,
@@ -790,26 +794,28 @@ def lookup(emp_id):
         "email": emp.email or "",
         "workplace_id": workplace_id,
         "workplace": workplace.name if workplace else "",
+        "work_pattern": work_pattern,
         "source": emp.source,
     }
 
 def remembered_person(emp_id):
     emp_id = (emp_id or "").strip()
-    name, workplace_id = "", None
+    name, workplace_id, work_pattern = "", None, ""
     if not emp_id:
-        return name, workplace_id
+        return name, workplace_id, work_pattern
     r = Respondent.query.filter_by(emp_id=emp_id).order_by(Respondent.id.desc()).first()
     if r is not None:
-        name, workplace_id = r.name or "", r.workplace_id
-    if not name or not workplace_id:
+        name, workplace_id, work_pattern = r.name or "", r.workplace_id, r.work_pattern or ""
+    if not name or not workplace_id or not work_pattern:
         for row in MonthlyResponse.query.filter_by(emp_id=emp_id).order_by(MonthlyResponse.created_at.desc(), MonthlyResponse.id.desc()).all():
             name = name or (row.name or "")
             workplace_id = workplace_id or row.workplace_id
-            if name and workplace_id:
+            work_pattern = work_pattern or (row.work_pattern or "")
+            if name and workplace_id and work_pattern:
                 break
-    return name, workplace_id
+    return name, workplace_id, work_pattern
 
-def remember_person(emp_id, name=None, workplace_id=None):
+def remember_person(emp_id, name=None, workplace_id=None, work_pattern=None):
     emp = Employee.query.filter_by(emp_id=(emp_id or "").strip()).first()
     if emp is None:
         return False
@@ -819,6 +825,9 @@ def remember_person(emp_id, name=None, workplace_id=None):
         changed = True
     if workplace_id and emp.workplace_id != workplace_id:
         emp.workplace_id = workplace_id
+        changed = True
+    if work_pattern in C.WORK_PATTERNS and emp.work_pattern != work_pattern:
+        emp.work_pattern = work_pattern
         changed = True
     return changed
 
@@ -1051,13 +1060,13 @@ def dx_people(workplace_id=None, wish=None):
     def blank(emp_id, name, workplace, wp_id):
         return {
             "emp_id": emp_id or "", "name": name, "workplace": workplace, "workplace_id": wp_id, "respondent": None,
-            "wish": "", "skills": [], "learn": [], "hours": "", "share": "", "targets": "", "target_tasks": [], "task_count": 0, "monthly": [],
+            "wish": "", "skills": [], "learn": [], "hours": "", "share": "", "targets": "", "target_tasks": [], "task_count": 0, "monthly": [], "work_pattern": "",
         }
 
     for r in Respondent.query.all():
         p = blank(r.emp_id, r.name, r.workplace, r.workplace_id)
         p.update(
-            respondent=r, wish=r.c1_wish or "", skills=r.skills, learn=r.learn, hours=r.c4_hours or "", share=r.c6_share or "",
+            respondent=r, wish=r.c1_wish or "", skills=r.skills, learn=r.learn, hours=r.c4_hours or "", share=r.c6_share or "", work_pattern=r.work_pattern or "",
             targets=r.c5_targets or "", target_tasks=[t for t in r.tasks if t.self_improve in C.SELF_IMPROVE_POSITIVE], task_count=len(r.tasks),
         )
         people[key_for(r.emp_id, r.name)] = p
@@ -1067,6 +1076,8 @@ def dx_people(workplace_id=None, wish=None):
         if p is None:
             p = people[k] = blank(m.emp_id, m.name, m.workplace, m.workplace_id)
         p["monthly"].append(m)
+        if not p["work_pattern"] and m.work_pattern:
+            p["work_pattern"] = m.work_pattern
 
     wish_rank = {opt: i for i, opt in enumerate(C.C1_OPTIONS)}
     stance_options = next((q["options"] for q in C.MONTHLY_CORE_QUESTIONS if q["key"] == "stance"), [])
@@ -1210,6 +1221,8 @@ def monthly_summary():
             return (len([r for r in rs if r.answer(key) in positive]) / n * 100.0) if n else 0.0
 
         hours_shift = sum(r.hours_shift for r in rs)
+        hours_month = sum(r.hours_shift * C.shifts_per_month(r.work_pattern) for r in rs)
+        pattern_counts = Counter((r.work_pattern or "未設定") for r in rs)
         rows.append(
             {
                 "period": p,
@@ -1217,9 +1230,9 @@ def monthly_summary():
                 "n": n,
                 "response_rate": (n / denominator * 100.0) if denominator else None,
                 "has_rate": rate("has", kpi["has_positive"]),
-                "has_strong_rate": rate("has", kpi["has_strong"]),
                 "hours_shift": hours_shift,
-                "hours_month": hours_shift * C.SHIFTS_PER_MONTH,
+                "hours_month": hours_month,
+                "pattern_counts": {p: pattern_counts[p] for p in list(C.WORK_PATTERNS) + ["未設定"] if pattern_counts.get(p)},
                 "decreased_rate": rate("trend", kpi["trend_decreased"]),
                 "increased_rate": rate("trend", kpi["trend_increased"]),
                 "wants_rate": rate("wants", kpi["wants_positive"]),
@@ -1265,11 +1278,31 @@ def monthly_workplace_trends():
                 {
                     "n": n,
                     "has_rate": (len([r for r in sub if r.answer("has") in kpi["has_positive"]]) / n * 100.0) if n else None,
-                    "hours_month": sum(r.hours_shift for r in sub) * C.SHIFTS_PER_MONTH if n else None,
+                    "hours_month": sum(r.hours_shift * C.shifts_per_month(r.work_pattern) for r in sub) if n else None,
                 }
             )
         if any(c["n"] for c in cells):
             rows.append({"workplace": wp, "cells": cells})
+    return {"periods": periods, "labels": [period_label(p) for p in periods], "rows": rows}
+
+def monthly_pattern_trends():
+    periods, by_period = _responses_by_period()
+    kpi = C.MONTHLY_KPI
+    rows = []
+    for pattern in list(C.WORK_PATTERNS) + ["未設定"]:
+        cells = []
+        for p in periods:
+            sub = [r for r in by_period[p] if (r.work_pattern or "未設定") == pattern]
+            n = len(sub)
+            cells.append(
+                {
+                    "n": n,
+                    "has_rate": (len([r for r in sub if r.answer("has") in kpi["has_positive"]]) / n * 100.0) if n else None,
+                    "hours_month": sum(r.hours_shift * C.shifts_per_month(r.work_pattern) for r in sub) if n else None,
+                }
+            )
+        if any(c["n"] for c in cells):
+            rows.append({"pattern": pattern, "cells": cells})
     return {"periods": periods, "labels": [period_label(p) for p in periods], "rows": rows}
 
 def monthly_question_stats(survey, responses):
@@ -1395,15 +1428,30 @@ def esc(text):
         s = s.replace(a, b)
     return s
 
+_BREAK_AFTER = set("、。，．・：；）」』】をにでがはのともへやから ")
+_BREAK_BEFORE = set("（「『【")
+
 def wrap(text, width=14, max_lines=3):
-    s = esc(text)
-    if len(s) <= width:
-        return s
-    lines = [s[i : i + width] for i in range(0, len(s), width)]
-    if len(lines) > max_lines:
-        lines = lines[:max_lines]
+    raw = str(text or "").strip()
+    if len(raw) <= width:
+        return esc(raw)
+    lines, rest = [], raw
+    while rest:
+        if len(rest) <= width or len(lines) == max_lines - 1:
+            lines.append(rest)
+            break
+        cut = width
+        for i in range(width, int(width * 0.55), -1):
+            if rest[i - 1] in _BREAK_AFTER or rest[i] in _BREAK_BEFORE:
+                cut = i
+                break
+        if 0 < len(rest) - cut <= 2 and len(rest) <= width + 2:
+            cut = len(rest)
+        lines.append(rest[:cut].rstrip())
+        rest = rest[cut:].lstrip()
+    if len(lines[-1]) > width + 2:
         lines[-1] = lines[-1][: width - 1] + "…"
-    return "<br/>".join(lines)
+    return "<br/>".join(esc(l) for l in lines)
 
 def nid(prefix, text):
     return prefix + "_" + hashlib.md5(normalize_text(text).encode("utf-8")).hexdigest()[:8]
@@ -1961,7 +2009,43 @@ def source_rows(tasks):
     return rows
 
 # ----- 1業務の流れ（案件詳細用） -----
+_CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
+
+def _circled(n):
+    return _CIRCLED[n - 1] if 1 <= n <= len(_CIRCLED) else f"({n})"
+
+def build_steps_flow(steps):
+    d = Diagram("LR")
+    prev = None
+    for x in steps:
+        sid = f"st{x['no']}"
+        d.node(sid, f"{_circled(x['no'])} {x['action']}", "task", "rect", width=14)
+        system = (x.get("system") or "").strip()
+        if system:
+            cls = "system" if any(k in system for k in ("システム", "データ", "DB")) else "source"
+            d.edge(d.node(nid("s", system), system, cls), sid)
+        if prev:
+            d.edge(prev, sid)
+        target = sid
+        if (x.get("output") or "").strip():
+            oid = f"o{x['no']}"
+            d.node(oid, x["output"], "output")
+            d.edge(sid, oid)
+            target = oid
+        if (x.get("to") or "").strip():
+            d.edge(target, d.node(nid("p", x["to"]), x["to"], "wp"))
+        prev = sid
+    return d
+
 def build_task_flow(t):
+    steps = t.steps
+    if steps:
+        d = build_steps_flow(steps)
+        if (t.prev_task or "").strip():
+            d.edge(d.node("prev_task", t.prev_task, "note"), "st1", "前の業務", "dotted")
+        if (t.next_task or "").strip():
+            d.edge(f"st{steps[-1]['no']}", d.node("next_task", t.next_task, "note"), "次の業務", "dotted")
+        return d
     d = Diagram("LR")
     tid = f"t{t.id}"
     d.node(tid, t.name, "done" if t.status == "完了" else "task", "rect", width=16)
@@ -1977,7 +2061,7 @@ def build_task_flow(t):
 # ===== AI連携（社内 Azure OpenAI の ChatGPT API を Responses API で呼ぶ。なければルールベース） =====
 log = logging.getLogger(__name__)
 
-MODEL = "gpt-6-luna"
+AI_SETTING_LABELS = (("openai_api_url", "URL"), ("openai_api_key", "API キー"), ("openai_model", "モデル名"))
 
 SYSTEM_PROMPT = """あなたは製造部の「PC定型業務ゼロ化プロジェクト」を支援する業務分析アシスタントです。
 現場から登録された1件のPC業務を分析し、業務全体像の把握と改善検討に使う情報をJSONで返します。
@@ -2009,25 +2093,24 @@ SYSTEM_PROMPT = """あなたは製造部の「PC定型業務ゼロ化プロジ�
 
 
 def _api_url():
-    return str(conf.get("OPENAI_API_URL", "") or "").strip()
+    return (Setting.get("openai_api_url") or "").strip()
 
 def _api_key():
-    return str(conf.get("OPENAI_API_KEY", "") or "").strip()
+    return (Setting.get("openai_api_key") or "").strip()
 
 def _model():
-    return str(conf.get("OPENAI_MODEL", "") or "").strip() or MODEL
+    return (Setting.get("openai_model") or "").strip()
 
 def ai_enabled():
-    return bool(_api_url()) and bool(_api_key())
+    return bool(_api_url()) and bool(_api_key()) and bool(_model())
 
 _LAST_ERROR = {"text": ""}
 
 
 def ai_status_text():
-    if not _api_url():
-        return "config.py の OPENAI_API_URL が未設定（ルールベースで動作中）"
-    if not _api_key():
-        return "config.py の OPENAI_API_KEY が未設定（ルールベースで動作中）"
+    missing = [label for key, label in AI_SETTING_LABELS if not (Setting.get(key) or "").strip()]
+    if missing:
+        return "ChatGPT API の " + "・".join(missing) + " が未設定（ルールベースで動作中）"
     text = f"ChatGPT API 連携 有効（モデル: {_model()}、Responses API）"
     if _LAST_ERROR["text"]:
         text += f"／直近のエラー: {_LAST_ERROR['text']}"
@@ -2105,11 +2188,11 @@ def _call_ai(system, user_text, max_tokens=None):
         if status in (401, 403):
             _LAST_ERROR["text"] = f"HTTP {status}: APIキーが無効か、権限がありません"
         elif status == 404:
-            _LAST_ERROR["text"] = "HTTP 404: URL が違います（OPENAI_API_URL が Responses API の URL か確認）"
+            _LAST_ERROR["text"] = "HTTP 404: URL が違います（管理画面の URL が Responses API のものか確認）"
         elif status == 429:
             _LAST_ERROR["text"] = "HTTP 429: 利用量の上限（レート制限）に達しました"
         elif status == 200:
-            _LAST_ERROR["text"] = "応答が JSON ではありません（OPENAI_API_URL を確認）"
+            _LAST_ERROR["text"] = "応答が JSON ではありません（管理画面の URL を確認）"
         else:
             _LAST_ERROR["text"] = f"HTTP {status}: {snippet}"
         return None
@@ -2126,6 +2209,179 @@ def _call_ai(system, user_text, max_tokens=None):
     if text is not None:
         _LAST_ERROR["text"] = ""
     return text
+
+INTAKE_PROMPT = """あなたは製造部「PC定型業務ゼロ化プロジェクト」の聞き取り担当です。依頼者と短い会話をしながら、その人が行っているPCの定型・定期業務の「現状の流れ（手順）」を組み立てます。
+
+進め方:
+- 1回の返事で質問は1つだけ。60字以内。やさしい言葉で、相手の答えに一言だけ反応してから聞く（例:「なるほど、まず実績を出すんですね。次に何をしますか？」）。
+- 答えが選択で済むときは chips に2〜6個の選択肢を入れる（「分からない」「特にない」も入れる）。自由に書いてほしいときは chips を空にする。
+- 聞く順番: ①最初に何をするか → ②次に何をするか（相手が「ここまで」と言うか、手順が {step_limit} 個になるまで繰り返す）→（交代勤務の人だけ）この業務をいつやるか（昼勤／夜勤／昼勤・夜勤の両方）→ ③情報の取り出し元（システム・ファイル・紙・人）→ ④できるものと渡す相手 → ⑤頻度 → ⑥1回にかかる時間。困っていることは、余裕があれば最後に1問だけ。
+- 頻度を聞くときの chips は必ず次のとおり: {frequencies}
+- 時間を聞くときの chips は必ず次のとおり: {durations}
+- すでに state に入っていることは聞き直さない。相手がまとめて書いたり、手順書や画面の写真を送ったりしたら、読み取れることをすべて state に入れ、足りないことだけ聞く。
+- 手順を聞いている間は、毎回「次に何をしますか？」と聞き、chips に「ここまで（手順はこれで全部）」を入れる。相手が「ここまで」「以上」「終わり」「最後」などと答えたら手順は確定とし、それまでは別のことを聞かない。
+- 特定の手順について聞くときは、必ず番号と手順名を添える（例:「①の『装置のトラブル状況を確認する』は、何を見て確認しますか？」）。「確認には何を使いますか？」のように、どの手順の話か分からない聞き方はしない。
+- 相手が「意味が分からない」「おかしい」と言ったら、謝らずに言い換えて、同じことを聞き直す。
+- 手順を聞く「次に何をしますか？」は回数に数えない。それ以外の質問が全部で {max_q} 回まで。remaining は「手順以外であと何回聞くつもりか」。手順が2つ以上、できるものと渡す相手、頻度、時間がそろったら done を true にし、reply は「この流れで合っていますか？」と確認の一言にする（chips は空）。
+- 相手が「違う」「直したい」と言ったら、state を直して done は false のまま確認し直す。
+- 写真が読めないときは、そう伝えて文字で教えてほしいと頼む。
+- 推測で手順を作らない。相手が言ったことだけを入れる。
+- 引き継ぎの話が出たら、前の勤務からの引き継ぎは情報の取り出し元（sources と steps の input）、次の勤務への引き継ぎは渡す相手（recipients と steps の to）として扱う。
+
+state は次の形（必ず全部のキーを返す。不明は "" か [] か null）:
+{
+  "title": "<業務名。『〜を〜する』で短く>",
+  "steps": [{"no": 1, "action": "<その手順でやること>", "system": "<使うシステム・ファイル・ツール名。なければ空>", "input": "<元になる情報。なければ空>", "output": "<その手順でできるもの。なければ空>", "to": "<渡す相手（人・部署）。なければ空>"}],
+  "sources": ["<情報の取り出し元（システム名・帳票名・人）>"],
+  "outputs": ["<最終的にできるもの>"],
+  "recipients": ["<最終的に渡す相手>"],
+  "frequency": "<頻度。上の選択肢の中の1つ。不明なら null>",
+  "duration": "<1回の時間。上の選択肢の中の1つ。不明なら null>",
+  "shift": "<交代勤務の人だけ: 昼勤／夜勤／昼勤・夜勤の両方。普通勤務の人は「普通勤務」。不明なら null>",
+  "pains": ["<困っていること>"],
+  "unknowns": ["<相手が『分からない』と答えたこと>"]
+}
+
+出力はこの JSON オブジェクトだけ（前後に説明を付けない）:
+{"reply": "<相手への一言と次の質問>", "chips": ["<選択肢>"], "done": false, "remaining": <残り質問数>, "state": {...}}
+日本語で。"""
+
+FINALIZE_PROMPT = """あなたは製造部「PC定型業務ゼロ化プロジェクト」の業務分析アシスタントです。聞き取りで組み立てた1件のPC定型・定期業務の現状の流れ（state と会話記録）を読み、改善チームが使う情報を JSON で返します。
+
+プロジェクトの原則:
+- 受けた案件をそのまま自動化しない。まずアウトプットと「なぜやるのか」を確認し、ECRS（排除・結合・入替・簡素化）でムリ・ムダ・ムラを取り除いてから、残る作業を自動化する。
+- 目的が不明、できたものの利用者が分からない業務は廃止候補。同じ情報を何度も入力している、同じものを複数人が作っている業務は結合候補。
+- AI の推定は改善チームが確認して確定する。断定せず、確認すべき点も示す。
+- 勤務が「夜勤」「昼勤・夜勤の両方」の業務は、間接部門が不在の時間帯でも回る対策（自動配信、翌朝の確認に寄せる、引き継ぎ資料の自動作成など）を優先して考える。
+- 依頼者の希望（wish）が「なくしたい」なら目的と利用者の確認を最優先にし排除の案から、「減らしたい」なら結合・入替・簡素化の案を出して残る作業に自動化の手段を付け、「まずは相談したい」なら改善チームがヒアリングで聞くべき質問を用意する。
+
+次のキーを持つ JSON オブジェクトだけを返す（前後に説明文を付けない）:
+{
+  "name": "<業務名。『〜を〜する』で短く>",
+  "purpose": "<目的（なぜやるのか）。会話から分からなければ「不明」>",
+  "output": "<最終的にできるもの>",
+  "output_users": ["<利用者。次の中から: {output_users}>"],
+  "output_users_note": "<利用者の部署名や用途。なければ空>",
+  "inputs": ["<情報のもと。次の中から: {input_sources}>"],
+  "inputs_note": "<具体的なシステム名・ファイル名・帳票名>",
+  "info_from": "<情報の受け取り元（部署・人・システム・帳票）>",
+  "actors": "<関わる人・部署を「、」区切り>",
+  "prev_task": "<この業務の前に終わっている必要がある業務。なければ空>",
+  "next_task": "<この業務の後に始まる業務。なければ空>",
+  "tools": ["<次の中から: {tools}>"],
+  "nature": ["<次の中から: {natures}>"],
+  "pains": ["<次の中から: {pains}>"],
+  "pains_note": "<困りごとの具体。なければ空>",
+  "headcount": <同じ作業をしている人数。分からなければ 1>,
+  "domain": "<与えられた業務領域リストの中から最も近い1つ>",
+  "related": ["<候補リストにある関連業務名>"],
+  "summary": "<この業務の要点と位置づけを2文以内で>",
+  "ecrs": {"eliminate": "<排除の観点。該当なしなら null>", "combine": "<結合。該当なしなら null>", "rearrange": "<入替。該当なしなら null>", "simplify": "<簡素化。該当なしなら null>"},
+  "automation": "<最適化後に残る作業をどう自動化するか（Python / Excel VBA / Power Query / RPA / BI / 生成AI など）。該当なしなら null>",
+  "flags": ["<次の中から該当するもの: 目的不明, 廃止候補, 統合候補, 重複入力候補, 自動化候補, 判断業務, 要ヒアリング>"],
+  "priority": "<高 | 中 | 低>",
+  "questions": ["<改善チームが担当者に確認すべき質問（最大3件）>"],
+  "tobe_steps": ["<改善後の流れの案を手順ごとに（最大6行）>"],
+  "saving_minutes_per_month": <改善後に減る見込みの月間の分数。分からなければ null>,
+  "first_impression": "<依頼者に見せる前向きな一言（60字以内。例: 転記が3回あるので、入力を1回にまとめられそうです）>",
+  "hearing_questions": ["<「まずは相談したい」の人に改善チームが聞く質問（3〜5件）。それ以外は空>"]
+}
+日本語で、簡潔に。"""
+
+
+def _intake_prompt():
+    return INTAKE_PROMPT.replace("{frequencies}", "／".join(C.FREQUENCIES)).replace("{durations}", "／".join(C.DURATIONS)).replace("{max_q}", str(C.INTAKE_MAX_QUESTIONS)).replace("{step_limit}", str(C.INTAKE_STEP_LIMIT))
+
+
+def _finalize_prompt():
+    return (FINALIZE_PROMPT.replace("{output_users}", "／".join(C.OUTPUT_USERS)).replace("{input_sources}", "／".join(C.INPUT_SOURCES))
+            .replace("{tools}", "／".join(C.TOOLS)).replace("{natures}", "／".join(C.NATURES)).replace("{pains}", "／".join(C.PAINS)))
+
+
+def _intake_state_default():
+    return {"title": "", "steps": [], "sources": [], "outputs": [], "recipients": [], "frequency": None, "duration": None, "shift": None, "pains": [], "unknowns": []}
+
+
+def _clean_state(data):
+    base = _intake_state_default()
+    if not isinstance(data, dict):
+        return base
+    base["title"] = str(data.get("title") or "").strip()[:200]
+    steps = []
+    for x in data.get("steps") or []:
+        if not isinstance(x, dict):
+            continue
+        action = str(x.get("action") or "").strip()
+        if not action:
+            continue
+        steps.append({
+            "no": len(steps) + 1, "action": action[:200],
+            "system": str(x.get("system") or "").strip()[:100], "input": str(x.get("input") or "").strip()[:200],
+            "output": str(x.get("output") or "").strip()[:200], "to": str(x.get("to") or "").strip()[:100],
+        })
+        if len(steps) >= C.INTAKE_STEP_LIMIT:
+            break
+    base["steps"] = steps
+    for key in ("sources", "outputs", "recipients", "pains", "unknowns"):
+        base[key] = [str(v).strip()[:100] for v in (data.get(key) or []) if str(v).strip()][:10]
+    base["frequency"] = data.get("frequency") if data.get("frequency") in C.FREQUENCIES else None
+    base["duration"] = data.get("duration") if data.get("duration") in C.DURATIONS else None
+    base["shift"] = data.get("shift") if data.get("shift") in C.SHIFT_OPTIONS + ["普通勤務"] else None
+    return base
+
+
+def ai_intake(messages, state, image=None, work_pattern=""):
+    recent = messages[-24:]
+    items = []
+    for i, m in enumerate(recent):
+        role = "assistant" if m.get("role") == "ai" else "user"
+        text = str(m.get("text") or "").strip() or "（空）"
+        if role == "user" and image and i == len(recent) - 1:
+            items.append({"role": "user", "content": [{"type": "input_text", "text": text}, {"type": "input_image", "image_url": image}]})
+        else:
+            items.append({"role": role, "content": text})
+    if not items:
+        items.append({"role": "user", "content": "聞き取りを始めてください。" + (f"業務名は「{state['title']}」です。" if state.get("title") else "")})
+    elif image and items[-1]["role"] != "user":
+        items.append({"role": "user", "content": [{"type": "input_text", "text": "この写真の手順を読み取ってください"}, {"type": "input_image", "image_url": image}]})
+    if work_pattern == "交代勤務":
+        pattern_note = "\n\n## 依頼者の勤務形態\n交代勤務（昼勤・夜勤あり）。手順が2つ以上そろったら一度だけ「この業務はいつやりますか？」と聞き、chips は必ず「昼勤」「夜勤」「昼勤・夜勤の両方」の3つ。答えを state.shift に入れる。"
+    elif work_pattern:
+        pattern_note = "\n\n## 依頼者の勤務形態\n普通勤務（日勤のみ）。勤務時間帯は聞かず、state.shift は「普通勤務」にする。"
+    else:
+        pattern_note = ""
+    system = _intake_prompt() + pattern_note + "\n\n## 現在の state\n" + json.dumps(state, ensure_ascii=False)
+    data = _extract_json(_call_ai(system, items))
+    if not isinstance(data, dict):
+        return None
+    try:
+        remaining = max(0, int(data.get("remaining")))
+    except (TypeError, ValueError):
+        remaining = 0
+    return {
+        "reply": str(data.get("reply") or "").strip()[:400] or "続けてください。",
+        "chips": [str(c).strip()[:40] for c in (data.get("chips") or []) if str(c).strip()][:6],
+        "done": bool(data.get("done")),
+        "remaining": remaining,
+        "state": _clean_state(data.get("state") or state),
+    }
+
+
+def ai_finalize(state, messages, wish, domains, candidates, shift=""):
+    domain_names = [d.name for d in domains]
+    cand = [{"業務名": t.name, "領域": t.domain.name if t.domain else "", "アウトプット": t.output or ""} for t in candidates[:40]]
+    log_text = "\n".join(("AI: " if m.get("role") == "ai" else "依頼者: ") + str(m.get("text") or "") for m in messages[-40:])
+    user_text = (
+        "## 聞き取りの結果（state）\n" + json.dumps(state, ensure_ascii=False, indent=1)
+        + "\n\n## 会話の記録\n" + (log_text or "（なし）")
+        + "\n\n## 依頼者の希望\n" + (wish or "")
+        + "\n\n## 勤務\n" + (shift or "不明")
+        + "\n\n## 業務領域リスト（domain はこの中から選ぶ）\n" + json.dumps(domain_names, ensure_ascii=False)
+        + "\n\n## 関連候補の業務（related はこの中から選ぶ）\n" + json.dumps(cand, ensure_ascii=False, indent=1)
+    )
+    data = _extract_json(_call_ai(_finalize_prompt(), user_text))
+    return data if isinstance(data, dict) else None
+
 
 def _extract_json(text):
     if not text:
@@ -2166,6 +2422,8 @@ def task_payload(task):
         "改善の希望": task.wish or "",
         "自分で改善": task.self_improve or "",
         "補足": task.note or "",
+        "勤務": task.shift or "",
+        "手順（聞き取り）": [f"{x['no']}. {x['action']}" + (f"［{x['system']}］" if x.get("system") else "") + (f" → {x['output']}" if x.get("output") else "") for x in task.steps],
     }
 
 def analyze_task(task, domains, candidate_tasks):
@@ -2379,6 +2637,9 @@ DEFAULT_SETTINGS = {
     "deadline": "3年後（1年目の棚卸し結果を踏まえて確定）",
     "ai_suggestions": "[]",
     "board_show_names": "1",
+    "openai_api_url": "",
+    "openai_api_key": "",
+    "openai_model": "",
 }
 
 RENAMED_DEFAULTS = {
@@ -2411,6 +2672,19 @@ def seed_masters():
         if row is not None:
             db.session.delete(row)
             changed = True
+    for t in Task.query.filter(Task.wish.in_(list(C.LEGACY_WISHES))).all():
+        t.wish = C.LEGACY_WISHES[t.wish]
+        changed = True
+    patterns = {e.emp_id: e.work_pattern for e in Employee.query.filter(Employee.work_pattern != "").all()}
+    if patterns:
+        for r in Respondent.query.filter(db.or_(Respondent.work_pattern.is_(None), Respondent.work_pattern == "")).all():
+            if r.emp_id in patterns:
+                r.work_pattern = patterns[r.emp_id]
+                changed = True
+        for m in MonthlyResponse.query.filter(db.or_(MonthlyResponse.work_pattern.is_(None), MonthlyResponse.work_pattern == "")).all():
+            if m.emp_id in patterns:
+                m.work_pattern = patterns[m.emp_id]
+                changed = True
     changed = _migrate_monthly_questions() or changed
     for m in FlowMap.query.filter(FlowMap.kind != "info").all():
         db.session.delete(m)
@@ -2431,7 +2705,7 @@ _STANCE_OLD_TO_NEW = {"教えてもらいながら自分で取り組みたい": 
 _HOURS_WEEK_TO_SHIFT = {"1時間未満": "30分未満", "1〜3時間": "30分未満", "3〜5時間": "30分〜1時間", "5〜10時間": "1〜2時間", "10時間以上": "2〜4時間"}
 _PREVIOUS_TEXTS = {
     "has": {"今月、PC定型業務（繰り返しの手作業）はありますか"},
-    "hours": {"1週間あたり、PC定型業務にかかっている時間は"},
+    "hours": {"1週間あたり、PC定型業務にかかっている時間は", "1シフト（1出勤）あたり、PCの定型業務を行っている時間は"},
     "wants": {"なくしたい・自動化したい業務はありますか"},
     "stance": {"なくしたい業務の改善は、どう進めたいですか"},
     "new_tasks": {"今月、新たに発生したPC定型業務"},
@@ -2470,6 +2744,18 @@ def _migrate_monthly_questions():
                         q.pop("depends", None)
                     touched = True
             new_qs.append(q)
+        present = {q.get("key") for q in new_qs}
+        for idx, cq in enumerate(C.MONTHLY_CORE_QUESTIONS):
+            if cq["key"] in present:
+                continue
+            before = {c["key"] for c in C.MONTHLY_CORE_QUESTIONS[:idx]}
+            pos = max([i for i, q in enumerate(new_qs) if q.get("key") in before], default=-1) + 1
+            item = dict(cq, options=list(cq.get("options", [])))
+            if cq.get("depends"):
+                item["depends"] = dict(cq["depends"])
+            new_qs.insert(pos, item)
+            present.add(cq["key"])
+            touched = True
         core_order = [q["key"] for q in C.MONTHLY_CORE_QUESTIONS]
         slots = [i for i, q in enumerate(new_qs) if q.get("key") in core]
         core_sorted = sorted((new_qs[i] for i in slots), key=lambda q: core_order.index(q["key"]))
@@ -2491,8 +2777,11 @@ def _migrate_monthly_questions():
         if answers.get("hours") in _HOURS_WEEK_TO_SHIFT:
             answers["hours"] = _HOURS_WEEK_TO_SHIFT[answers["hours"]]
             touched = True
-        if not answers.get("hours") and answers.get("has") == "ない":
-            answers["hours"] = "0時間"
+        if answers.get("has") == "少しある":
+            answers["has"] = "ある"
+            touched = True
+        if answers.get("has") == "ない" and answers.get("hours"):
+            answers["hours"] = ""
             touched = True
         if answers.get("trend") == "初回なので分からない":
             answers["trend"] = ""
@@ -2619,6 +2908,50 @@ DEMO_D = {
 }
 
 
+_DEMO_WISH = {"自動化したい": "減らしたい", "分からない": "まずは相談したい", "このままでよい": "まずは相談したい"}
+DEMO_STEPS = {
+    "日報の実績をExcelの集計表に転記する": [
+        {"no": 1, "action": "各ラインから手書きの日報を集める", "system": "紙の日報", "input": "前日の生産実績", "output": "", "to": ""},
+        {"no": 2, "action": "日報の数字を日次実績集計表に転記する", "system": "Excel（日次実績集計表）", "input": "日報", "output": "", "to": ""},
+        {"no": 3, "action": "不良件数と稼働時間を手で集計する", "system": "Excel（日次実績集計表）", "input": "", "output": "日次実績集計表", "to": ""},
+        {"no": 4, "action": "朝会用に印刷して課長に渡す", "system": "", "input": "", "output": "印刷した集計表", "to": "課長"},
+    ],
+    "週報の作成": [
+        {"no": 1, "action": "日次実績集計表から1週間分の数字を週報に転記する", "system": "Excel（週報）", "input": "日次実績集計表", "output": "", "to": ""},
+        {"no": 2, "action": "前週比のコメントを書く", "system": "Excel（週報）", "input": "", "output": "週報", "to": ""},
+        {"no": 3, "action": "課長にメールで送る", "system": "メール", "input": "", "output": "", "to": "課長"},
+    ],
+    "組立実績の日次入力（生産管理システム）": [
+        {"no": 1, "action": "組立作業者の手書き実績票を回収する", "system": "紙の実績票", "input": "組立数・不良数", "output": "", "to": ""},
+        {"no": 2, "action": "生産管理システムに品番ごとの実績を入力する", "system": "生産管理システム", "input": "実績票", "output": "システム上の実績データ", "to": "生産管理課"},
+        {"no": 3, "action": "入力後に紙の実績票をファイリングする", "system": "", "input": "", "output": "", "to": ""},
+    ],
+}
+DEMO_INTAKE = {
+    "日報の実績をExcelの集計表に転記する": [
+        {"role": "ai", "text": "「日報の実績をExcelの集計表に転記する」ですね。最初に何をしますか？"},
+        {"role": "user", "text": "各ラインから手書きの日報を集める"},
+        {"role": "ai", "text": "なるほど。次にその日報をどうしますか？"},
+        {"role": "user", "text": "日次実績集計表（Excel）に数字を転記して、不良件数と稼働時間を手で集計する"},
+        {"role": "ai", "text": "集計表ができたら、誰に渡しますか？"},
+        {"role": "user", "text": "印刷して課長に。朝会で使う"},
+        {"role": "ai", "text": "これはどのくらいの頻度ですか？"},
+        {"role": "user", "text": "毎日"},
+        {"role": "ai", "text": "1回にかかる時間はどのくらいですか？"},
+        {"role": "user", "text": "15〜30分"},
+        {"role": "ai", "text": "この流れで合っていますか？"},
+        {"role": "user", "text": "はい、合っています"},
+    ],
+}
+DEMO_AI_EXTRA = {
+    "日報の実績をExcelの集計表に転記する": {
+        "tobe_steps": ["各ラインでタブレットから日報を直接入力する", "集計表は入力データから自動で更新する", "朝会は画面で確認し、印刷をやめる"],
+        "saving_minutes_per_month": 300,
+        "first_impression": "転記と手集計が重なっているので、入力を1回にまとめられそうです",
+        "hearing_questions": [],
+    },
+}
+
 def seed_demo():
     clear_demo()
     wp_by_name = {w.name: w for w in Workplace.query.all()}
@@ -2636,7 +2969,7 @@ def seed_demo():
         d = DEMO_D.get(name, ("", "", "", ""))
         r = Respondent(
             emp_id=f"E{i + 1:03d}",
-            name=name, workplace=workplace, is_demo=True,
+            name=name, workplace=workplace, is_demo=True, work_pattern=("交代勤務" if i % 2 else "普通勤務"),
             c1_wish=c1, c2_skills=C.join_list(skills), c3_learn=C.join_list(learn), c4_hours=c4, c6_share=c6,
             part_c_done=True, part_d_done=bool(any(d)),
             d1=d[0], d2=d[1], d3=d[2], d4=d[3],
@@ -2661,10 +2994,16 @@ def seed_demo():
             name=name, domain=domain, purpose=purpose, output=output,
             output_users=C.join_list(users), inputs=C.join_list(inputs), prev_task=prev, next_task=nxt,
             frequency=freq, duration=dur, headcount=head, tools=C.join_list(tools), nature=C.join_list(nature),
-            pains=C.join_list(pains), wish=wish, self_improve=selfimp, note=note,
+            pains=C.join_list(pains), wish=_DEMO_WISH.get(wish, wish), self_improve=(C.SELF_IMPROVE_YES if selfimp in C.SELF_IMPROVE_POSITIVE else C.SELF_IMPROVE_NO), note=note,
+            shift=("普通勤務" if r.work_pattern != "交代勤務" else C.SHIFT_OPTIONS[i % 3]),
             created_at=base + timedelta(days=i % 15, hours=i),
         )
         t.compute_minutes()
+        if name in DEMO_STEPS:
+            t.steps_json = json.dumps(DEMO_STEPS[name], ensure_ascii=False)
+            t.intake_json = json.dumps(DEMO_INTAKE.get(name, []), ensure_ascii=False)
+            t.ai_extra = json.dumps(DEMO_AI_EXTRA.get(name, {}), ensure_ascii=False)
+            t.ai_fields = C.join_list(["inputs", "tools", "nature", "actors"])
         flow = DEMO_FLOWS.get(name, {})
         for k, v in flow.items():
             setattr(t, k, C.join_list(v) if isinstance(v, list) else v)
@@ -2710,7 +3049,7 @@ def _seed_employees_and_monthly(resp_by_name, wp_by_name):
     for i, (name, r) in enumerate(resp_by_name.items()):
         employees.append(
             Employee(
-                emp_id=r.emp_id, name=name, department=r.workplace.name if r.workplace else "",
+                emp_id=r.emp_id, name=name, department=r.workplace.name if r.workplace else "", work_pattern=r.work_pattern or "",
                 workplace_id=r.workplace_id, email=f"user{i + 1:02d}@example.local", active=True, source="csv", is_demo=True,
             )
         )
@@ -2718,7 +3057,7 @@ def _seed_employees_and_monthly(resp_by_name, wp_by_name):
         workplace = wp_by_name.get(wp)
         employees.append(
             Employee(
-                emp_id=emp_id, name=name, department=wp, workplace_id=workplace.id if workplace else None,
+                emp_id=emp_id, name=name, department=wp, workplace_id=workplace.id if workplace else None, work_pattern=("交代勤務" if j % 2 else "普通勤務"),
                 email=f"user{len(resp_by_name) + j + 1:02d}@example.local", active=True, source="csv", is_demo=True,
             )
         )
@@ -2746,8 +3085,8 @@ def _seed_employees_and_monthly(resp_by_name, wp_by_name):
                 continue
             level = max(0, (i % 3) + 2 - p_idx)
             prev_level = max(0, (i % 3) + 2 - (p_idx - 1))
-            has = "ない" if level == 0 else ("少しある" if level == 1 else "ある")
-            hours = hours_options[0] if not level else hours_options[min(len(hours_options) - 1, level + (1 if i % 4 == 0 else 0))]
+            has = "ない" if level == 0 else "ある"
+            hours = "" if not level else hours_options[min(len(hours_options) - 1, level + (1 if i % 4 == 0 else 0))]
             if p_idx == 0 or level == prev_level:
                 trend = "変わらない"
             elif level < prev_level:
@@ -2762,19 +3101,23 @@ def _seed_employees_and_monthly(resp_by_name, wp_by_name):
             answers = {
                 "has": has,
                 "hours": hours,
+                "task_names": ("、".join(t.name for t in r.tasks[:2]) if r and r.tasks else "日報の集計、出勤簿の転記") if has == "ある" else "",
                 "trend": trend,
+                "decreased_reason": "日報の転記を自動化した" if trend == "減った" else "",
                 "wants": wants,
                 "wants_tasks": ((r.tasks[0].name if r and r.tasks else "日報の実績の転記") if wants == "ある" else ""),
                 "stance": stance_options[stance_idx] if wants == "ある" else "",
                 "new_tasks": "新しい報告フォーマットへの転記" if (trend == "増えた" or (trend == "変わらない" and p_idx == last and i % 5 == 0)) else "",
             }
+            if has == "ない":
+                answers = {k: ("ない" if k == "has" else "") for k in answers}
             comment = ""
             if p_idx == last and i % 4 == 1:
                 comment = ["日報の転記が減って朝の時間に余裕ができました", "Excelの集計を自分で自動化してみたい", "新しい帳票が増えたので見直してほしい"][i % 3]
             yy, mm = (int(x) for x in period.split("-"))
             db.session.add(
                 MonthlyResponse(
-                    period=period, emp_id=emp.emp_id, name=emp.name, workplace_id=emp.workplace_id,
+                    period=period, emp_id=emp.emp_id, name=emp.name, workplace_id=emp.workplace_id, work_pattern=emp.work_pattern or "",
                     respondent_id=r.id if r else None, survey_id=surveys[period].id,
                     answers_json=json.dumps(answers, ensure_ascii=False), comment=comment,
                     is_demo=True, created_at=datetime(yy, mm, 5, 9, 0),
@@ -2900,7 +3243,7 @@ def index():
 @bp_main.post("/ai/suggest")
 def ai_suggest():
     if not ai_enabled():
-        flash("AI連携が無効です。config.py の OPENAI_API_URL と OPENAI_API_KEY を設定して再起動してください。", "warning")
+        flash("AI連携が無効です。管理画面の「AI連携」で URL・API キー・モデル名を設定してください。", "warning")
         return redirect(url_for("main.index"))
     k = kpis()
     have, learn = skills_summary()
@@ -2990,6 +3333,7 @@ def _respondent_json(r):
         "name": r.name,
         "workplace_id": r.workplace_id,
         "workplace": r.workplace.name if r.workplace else "",
+        "work_pattern": r.work_pattern or "",
         "c1_wish": r.c1_wish or "",
         "c2_skills": r.skills,
         "c3_learn": r.learn,
@@ -3032,33 +3376,54 @@ def _task_json(t):
         "monthly_minutes": t.monthly_minutes or 0,
         "hours": round((t.monthly_minutes or 0) / 60.0, 1),
         "ai_flags": t.ai_flags_list,
+        "steps": t.steps,
+        "shift": t.shift or "",
     }
+
+def _suggested_tasks(r):
+    names = []
+    latest = MonthlyResponse.query.filter_by(emp_id=r.emp_id).order_by(MonthlyResponse.period.desc()).first()
+    if latest is not None:
+        for key in ("task_names", "wants_tasks"):
+            for part in re.split(r"[、,，\n・/／]+", latest.answer(key)):
+                part = part.strip()
+                if part and part not in names:
+                    names.append(part)
+    done = {normalize_text(t.name) for t in r.tasks}
+    return [n for n in names if normalize_text(n) not in done][:8]
 
 def _state(r):
     if r is None:
-        return {"respondent": None, "tasks": []}
+        return {"respondent": None, "tasks": [], "suggested": []}
     tasks = Task.query.filter_by(respondent_id=r.id).order_by(Task.created_at).all()
-    return {"respondent": _respondent_json(r), "tasks": [_task_json(t) for t in tasks]}
+    return {"respondent": _respondent_json(r), "tasks": [_task_json(t) for t in tasks], "suggested": _suggested_tasks(r)}
 
 def _options():
     return {
         "workplaces": [{"id": w.id, "name": w.name} for w in _workplaces()],
-        "domains": [{"id": d.id, "name": d.name} for d in _domains()],
         "person": survey_spec.PERSON_FIELDS,
-        "task_sections": survey_spec.TASK_SECTIONS,
-        "c_fields": survey_spec.C_FIELDS,
-        "d_fields": survey_spec.D_FIELDS,
+        "frequencies": C.FREQUENCIES,
+        "durations": C.DURATIONS,
+        "wishes": C.WISHES,
+        "work_patterns": C.WORK_PATTERNS,
+        "shift_options": C.SHIFT_OPTIONS,
+        "frequency_hints": C.FREQUENCY_HINTS,
+        "self_improve_yes": C.SELF_IMPROVE_YES,
+        "skills": C.SKILLS,
+        "max_questions": C.INTAKE_MAX_QUESTIONS,
     }
 
 @bp_survey.route("/")
 def index():
     emp = (request.args.get("emp") or "").strip()
-    return render_template("survey/index.html", state=_state(_current()), options=_options(), emp=emp)
+    task = (request.args.get("task") or "").strip()[:200]
+    return render_template("survey/index.html", state=_state(_current()), options=_options(), emp=emp, prefill=task)
 
 @bp_survey.route("/start")
 def start():
     emp = (request.args.get("emp") or "").strip()
-    return redirect(url_for("survey.index", emp=emp or None))
+    task = (request.args.get("task") or "").strip()[:200]
+    return redirect(url_for("survey.index", emp=emp or None, task=task or None))
 
 # ----- API: あなたのこと -----
 @bp_survey.post("/api/respondent")
@@ -3067,15 +3432,18 @@ def api_respondent():
     emp_id = (f.get("emp_id") or "").strip()
     name = (f.get("name") or "").strip()
     workplace_id = f.get("workplace_id", type=int)
-    if emp_id and (not name or not workplace_id):
+    work_pattern = (f.get("work_pattern") or "").strip()
+    if emp_id and (not name or not workplace_id or not work_pattern):
         info = lookup(emp_id)
         if info:
             name = name or info["name"]
             workplace_id = workplace_id or info.get("workplace_id")
-        if not name or not workplace_id:
-            r_name, r_wp = remembered_person(emp_id)
+            work_pattern = work_pattern or info.get("work_pattern") or ""
+        if not name or not workplace_id or not work_pattern:
+            r_name, r_wp, r_pat = remembered_person(emp_id)
             name = name or r_name
             workplace_id = workplace_id or r_wp
+            work_pattern = work_pattern or r_pat
     errors = {}
     if not emp_id:
         errors["emp_id"] = "入力してください"
@@ -3083,6 +3451,8 @@ def api_respondent():
         errors["name"] = "入力してください"
     if not workplace_id:
         errors["workplace_id"] = "選択してください"
+    if work_pattern not in C.WORK_PATTERNS:
+        errors["work_pattern"] = "選択してください"
     if errors:
         return jsonify({"success": False, "errors": errors}), 400
     r = Respondent.query.filter_by(emp_id=emp_id).first()
@@ -3093,7 +3463,8 @@ def api_respondent():
     r.emp_id = emp_id
     r.name = name
     r.workplace_id = workplace_id
-    remember_person(emp_id, name, workplace_id)
+    r.work_pattern = work_pattern
+    remember_person(emp_id, name, workplace_id, work_pattern)
     db.session.commit()
     session["respondent_id"] = r.id
     return jsonify({"success": True, "resumed": resumed, **_state(r)})
@@ -3103,71 +3474,28 @@ def api_reset():
     session.pop("respondent_id", None)
     return jsonify({"success": True})
 
-# ----- API: 依頼する業務 -----
-def _fill_task(task, form, errors):
-    task.name = (form.get("name") or "").strip()
-    task.domain_id = form.get("domain_id", type=int)
-    task.purpose = (form.get("purpose") or "").strip()
-    task.output = (form.get("output") or "").strip()
-    task.output_users = C.join_list(form.getlist("output_users"))
-    task.output_users_note = (form.get("output_users_note") or "").strip()
-    task.inputs = C.join_list(form.getlist("inputs"))
-    task.inputs_note = (form.get("inputs_note") or "").strip()
-    task.prev_task = (form.get("prev_task") or "").strip()
-    task.next_task = (form.get("next_task") or "").strip()
-    task.frequency = form.get("frequency")
-    task.duration = form.get("duration")
-    task.headcount = form.get("headcount", type=int) or 1
-    task.tools = C.join_list(form.getlist("tools"))
-    task.nature = C.join_list(form.getlist("nature"))
-    task.pains = C.join_list(form.getlist("pains"))
-    task.pains_note = (form.get("pains_note") or "").strip()
-    task.wish = form.get("wish")
-    task.self_improve = form.get("self_improve")
-    task.note = (form.get("note") or "").strip()
-    task.actors = (form.get("actors") or "").strip()
-    task.info_from = (form.get("info_from") or "").strip()
+# ----- API: 依頼する業務（AI の聞き取り → 登録） -----
+_IMAGE_PREFIX = re.compile(r"^data:image/(png|jpe?g|webp|gif);base64,")
+_SOURCE_WORDS = [("生産管理", "生産管理システム"), ("品質", "品質システム"), ("設備", "設備データ"), ("紙", "紙の帳票"), ("帳票", "紙の帳票"), ("手書き", "紙の帳票"), ("メール", "メール"), ("Excel", "他のExcel"), ("エクセル", "他のExcel"), ("聞", "人から聞く"), ("口頭", "人から聞く")]
+_TOOL_WORDS = [("Excel", "Excel"), ("エクセル", "Excel"), ("Access", "Access"), ("メール", "メール"), ("システム", "社内システム"), ("紙", "紙"), ("マクロ", "VBA・マクロ"), ("VBA", "VBA・マクロ"), ("RPA", "RPA")]
 
-    if not task.name:
-        errors["name"] = "入力してください"
-    if not task.domain_id:
-        errors["domain_id"] = "選択してください"
-    if not task.purpose:
-        errors["purpose"] = "入力してください（分からなければ「不明」）"
-    if not task.output:
-        errors["output"] = "入力してください"
-    if not task.output_users:
-        errors["output_users"] = "1つ以上選んでください"
-    if not task.inputs:
-        errors["inputs"] = "1つ以上選んでください"
-    if task.frequency not in C.FREQUENCIES:
-        errors["frequency"] = "選択してください"
-    if task.duration not in C.DURATIONS:
-        errors["duration"] = "選択してください"
-    if task.headcount < 1:
-        errors["headcount"] = "1以上にしてください"
-    if not task.tools:
-        errors["tools"] = "1つ以上選んでください"
-    if not task.nature:
-        errors["nature"] = "1つ以上選んでください"
-    if not task.pains:
-        errors["pains"] = "選んでください（なければ「特になし」）"
-    if task.wish not in C.WISHES:
-        errors["wish"] = "選択してください"
-    if task.self_improve not in C.SELF_IMPROVE:
-        errors["self_improve"] = "選択してください"
-    task.compute_minutes()
 
-def _run_ai(task):
-    domains = _domains()
-    cands = related_tasks_for(task, limit=40)
-    if len(cands) < 10:
-        extra = Task.query.filter(Task.id != task.id).order_by(Task.created_at.desc()).limit(20).all()
-        seen = {t.id for t in cands}
-        cands += [t for t in extra if t.id not in seen]
-    result = analyze_task(task, domains, cands)
-    task.apply_ai_result(result)
-    return result
+def _guess(text, table, default):
+    for word, value in table:
+        if word.lower() in (text or "").lower():
+            return value
+    return default
+
+
+def _clean_messages(items):
+    out = []
+    for m in items or []:
+        if isinstance(m, dict):
+            text = str(m.get("text") or "").strip()[:2000]
+            if text:
+                out.append({"role": "ai" if m.get("role") == "ai" else "user", "text": text})
+    return out[-40:]
+
 
 def _need_respondent():
     r = _current()
@@ -3175,85 +3503,189 @@ def _need_respondent():
         return None, (jsonify({"success": False, "message": "先に「あなたのこと」を保存してください", "errors": {"_": "respondent"}}), 400)
     return r, None
 
+
+@bp_survey.post("/api/intake")
+def api_intake():
+    r, err = _need_respondent()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    messages = _clean_messages(data.get("messages"))
+    state = _clean_state(data.get("state") or {})
+    if not state["title"] and data.get("title"):
+        state["title"] = str(data.get("title")).strip()[:200]
+    image = data.get("image") or None
+    if image is not None and (not isinstance(image, str) or len(image) > 6_000_000 or not _IMAGE_PREFIX.match(image)):
+        return jsonify({"success": False, "message": "写真は PNG・JPEG・WebP・GIF で、4MB までにしてください"}), 400
+    if not ai_enabled():
+        return jsonify({"success": False, "message": "AI連携が設定されていません。管理画面の「AI連携」で URL・API キー・モデル名を設定してください"}), 400
+    result = ai_intake(messages, state, image, r.work_pattern or "")
+    if result is None:
+        return jsonify({"success": False, "message": "AI から応答がありませんでした。もう一度送ってください（" + (_LAST_ERROR["text"] or "原因不明") + "）"}), 502
+    steps = result["state"]["steps"]
+    try:
+        shown = max(0, min(int(data.get("shown") or 0), len(steps)))
+    except (TypeError, ValueError):
+        shown = 0
+    result["frames"] = [build_steps_flow(steps[:i]).render() for i in range(shown + 1, len(steps) + 1)]
+    result["diagram"] = build_steps_flow(steps).render() if steps else ""
+    return jsonify({"success": True, **result})
+
+
+def _fill_from_state(task, state, only_missing=False):
+    if not (task.output or "").strip() and state["outputs"]:
+        task.output = "、".join(state["outputs"])[:500]
+    if not (task.inputs_note or "").strip() and state["sources"]:
+        task.inputs_note = "、".join(state["sources"])[:500]
+    if not (task.output_users_note or "").strip() and state["recipients"]:
+        task.output_users_note = "、".join(state["recipients"])[:500]
+    if not (task.pains_note or "").strip() and state["pains"]:
+        task.pains_note = "、".join(state["pains"])[:500]
+    if only_missing:
+        return
+    systems = [x.get("system") for x in state["steps"] if x.get("system")]
+    if not (task.purpose or "").strip():
+        task.purpose = "不明"
+    if not task.inputs:
+        task.inputs = C.join_list(list(dict.fromkeys(_guess(v, _SOURCE_WORDS, "その他") for v in (state["sources"] + systems))) or ["その他"])
+    if not task.output_users:
+        task.output_users = C.join_list(["分からない"] if not state["recipients"] else ["職場内"])
+    if not task.tools:
+        task.tools = C.join_list(list(dict.fromkeys(_guess(v, _TOOL_WORDS, "その他") for v in systems)) or ["その他"])
+    if not task.nature:
+        task.nature = C.join_list(["転記・コピー"])
+    if not task.actors and state["recipients"]:
+        task.actors = "、".join(state["recipients"])[:300]
+
+
+def _finalize_task(task, state, messages):
+    domains = _domains()
+    cands = related_tasks_for(task, limit=40)
+    data = ai_finalize(state, messages, task.wish, domains, cands, task.shift or "") if ai_enabled() else None
+    if data is None:
+        _fill_from_state(task, state)
+        result = rule_analyze(task, domains, cands)
+        result["source"] = "rules"
+        task.apply_ai_result(result)
+        task.ai_extra = json.dumps({"first_impression": "受け付けました。改善チームが内容を確認して連絡します"}, ensure_ascii=False)
+        return
+    ai_fields = []
+    for key in ("purpose", "output", "output_users_note", "inputs_note", "info_from", "actors", "prev_task", "next_task", "pains_note"):
+        value = str(data.get(key) or "").strip()[:500]
+        if value:
+            setattr(task, key, value)
+            ai_fields.append(key)
+    for key, allowed in (("output_users", C.OUTPUT_USERS), ("inputs", C.INPUT_SOURCES), ("tools", C.TOOLS), ("nature", C.NATURES), ("pains", C.PAINS)):
+        values = [v for v in (data.get(key) or []) if isinstance(v, str) and v in allowed]
+        if values:
+            setattr(task, key, C.join_list(values))
+            ai_fields.append(key)
+    try:
+        hc = int(data.get("headcount") or 1)
+        if hc > 1 and task.headcount == 1:
+            task.headcount = hc
+            ai_fields.append("headcount")
+    except (TypeError, ValueError):
+        pass
+    if not (task.name or "").strip() and data.get("name"):
+        task.name = str(data["name"]).strip()[:200]
+    by_name = {d.name: d for d in domains}
+    if data.get("domain") in by_name:
+        task.domain = by_name[data["domain"]]
+        ai_fields.append("domain")
+    _fill_from_state(task, state, only_missing=True)
+    task.ai_fields = C.join_list(ai_fields)
+    cand_names = {t.name for t in cands}
+    ecrs = data.get("ecrs") if isinstance(data.get("ecrs"), dict) else {}
+    task.apply_ai_result({
+        "domain": data.get("domain") if data.get("domain") in by_name else None,
+        "related": [x for x in (data.get("related") or []) if isinstance(x, str) and x in cand_names][:5],
+        "summary": str(data.get("summary") or ""),
+        "ecrs": {
+            "eliminate": ecrs.get("eliminate"), "combine": ecrs.get("combine"), "rearrange": ecrs.get("rearrange"), "simplify": ecrs.get("simplify"),
+            "automation": data.get("automation"), "questions": [q for q in (data.get("questions") or []) if isinstance(q, str)][:3],
+        },
+        "flags": [f for f in (data.get("flags") or []) if f in C.AI_FLAGS],
+        "priority": data.get("priority") if data.get("priority") in ("高", "中", "低") else "中",
+        "source": "openai",
+    })
+    saving = data.get("saving_minutes_per_month")
+    task.ai_extra = json.dumps({
+        "tobe_steps": [str(x).strip()[:200] for x in (data.get("tobe_steps") or []) if str(x).strip()][:6],
+        "saving_minutes_per_month": int(saving) if isinstance(saving, (int, float)) and saving > 0 else None,
+        "first_impression": str(data.get("first_impression") or "").strip()[:120],
+        "hearing_questions": [str(q).strip()[:200] for q in (data.get("hearing_questions") or []) if str(q).strip()][:5],
+    }, ensure_ascii=False)
+
+
 @bp_survey.post("/api/tasks")
 def api_task_create():
     r, err = _need_respondent()
     if err:
         return err
+    data = request.get_json(silent=True) or {}
+    state = _clean_state(data.get("state") or {})
+    messages = _clean_messages(data.get("messages"))
     errors = {}
-    task = Task()
-    _fill_task(task, _JsonForm(request.get_json(silent=True) or {}), errors)
+    name = (str(data.get("name") or "").strip() or state["title"])[:200]
+    if not name:
+        errors["name"] = "業務名を入力してください"
+    if not state["steps"]:
+        errors["steps"] = "手順を1つ以上聞き取ってから登録してください"
+    frequency = data.get("frequency") or state["frequency"]
+    duration = data.get("duration") or state["duration"]
+    if frequency not in C.FREQUENCIES:
+        errors["frequency"] = "頻度を選んでください"
+    if duration not in C.DURATIONS:
+        errors["duration"] = "1回の時間を選んでください"
+    wish = data.get("wish")
+    if wish not in C.WISHES:
+        errors["wish"] = "この業務をどうしたいかを選んでください"
+    shift = str(data.get("shift") or state.get("shift") or "").strip()
+    if (r.work_pattern or "") == "交代勤務":
+        if shift not in C.SHIFT_OPTIONS:
+            errors["shift"] = "この業務をいつやるか（昼勤／夜勤／両方）を選んでください"
+    else:
+        shift = "普通勤務"
     if errors:
-        return jsonify({"success": False, "errors": errors}), 400
-    task.respondent_id = r.id
-    task.workplace_id = r.workplace_id
+        return jsonify({"success": False, "errors": errors, "message": next(iter(errors.values()))}), 400
+    try:
+        headcount = max(1, int(data.get("headcount") or 1))
+    except (TypeError, ValueError):
+        headcount = 1
+    task = Task(
+        respondent_id=r.id, workplace_id=r.workplace_id, name=name, frequency=frequency, duration=duration, headcount=headcount, wish=wish, shift=shift,
+        self_improve=C.SELF_IMPROVE_YES if data.get("self_improve") else C.SELF_IMPROVE_NO,
+        steps_json=json.dumps(state["steps"], ensure_ascii=False), intake_json=json.dumps(messages, ensure_ascii=False),
+    )
+    if data.get("self_improve"):
+        skills = [v for v in (data.get("skills") or []) if v in C.SKILLS]
+        learn = [v for v in (data.get("learn") or []) if v in C.SKILLS]
+        if skills:
+            r.c2_skills = C.join_list(skills)
+        if learn:
+            r.c3_learn = C.join_list(learn)
+        r.part_c_done = True
     db.session.add(task)
+    db.session.flush()
+    _finalize_task(task, state, messages)
+    task.compute_minutes()
     db.session.commit()
-    result = _run_ai(task)
-    db.session.commit()
-    return jsonify({"success": True, "task": _task_json(task), "flags": result.get("flags") or [], "tasks": _state(r)["tasks"]})
+    return jsonify({"success": True, "task": _task_json(task), "first_impression": task.ai_extra_dict.get("first_impression") or "", **_state(r)})
 
-@bp_survey.route("/api/tasks/<int:task_id>", methods=["PUT", "DELETE"])
-def api_task_update(task_id):
+
+@bp_survey.delete("/api/tasks/<int:task_id>")
+def api_task_delete(task_id):
     r, err = _need_respondent()
     if err:
         return err
     task = db.session.get(Task, task_id)
     if task is None or task.respondent_id != r.id:
         abort(404)
-    if request.method == "DELETE":
-        db.session.delete(task)
-        db.session.commit()
-        return jsonify({"success": True, "tasks": _state(r)["tasks"]})
-    errors = {}
-    _fill_task(task, _JsonForm(request.get_json(silent=True) or {}), errors)
-    if errors:
-        db.session.rollback()
-        return jsonify({"success": False, "errors": errors}), 400
-    db.session.commit()
-    result = _run_ai(task)
-    db.session.commit()
-    return jsonify({"success": True, "task": _task_json(task), "flags": result.get("flags") or [], "tasks": _state(r)["tasks"]})
-
-# ----- API: 改善への関わり方・部全体について -----
-@bp_survey.post("/api/part-c")
-def api_part_c():
-    r, err = _need_respondent()
-    if err:
-        return err
-    f = _JsonForm(request.get_json(silent=True) or {})
-    errors = {}
-    c1 = f.get("c1_wish")
-    skills = f.getlist("c2_skills")
-    if c1 not in C.C1_OPTIONS:
-        errors["c1_wish"] = "選択してください"
-    if not skills:
-        errors["c2_skills"] = "1つ以上選んでください（なければ「特になし」）"
-    if errors:
-        return jsonify({"success": False, "errors": errors}), 400
-    r.c1_wish = c1
-    r.c2_skills = C.join_list(skills)
-    r.c3_learn = C.join_list(f.getlist("c3_learn"))
-    r.c4_hours = f.get("c4_hours") or None
-    r.c5_targets = (f.get("c5_targets") or "").strip()
-    r.c6_share = f.get("c6_share") or None
-    r.part_c_done = True
-    db.session.commit()
-    return jsonify({"success": True, "respondent": _respondent_json(r)})
-
-@bp_survey.post("/api/part-d")
-def api_part_d():
-    r, err = _need_respondent()
-    if err:
-        return err
-    f = _JsonForm(request.get_json(silent=True) or {})
-    r.d1 = (f.get("d1") or "").strip()
-    r.d2 = (f.get("d2") or "").strip()
-    r.d3 = (f.get("d3") or "").strip()
-    r.d4 = (f.get("d4") or "").strip()
-    r.part_d_done = True
+    db.session.delete(task)
     db.session.commit()
     return jsonify({"success": True, **_state(r)})
+
 
 # ===== 画面: 改善案件 =====
 bp_cases = Blueprint("cases", __name__, url_prefix="/cases")
@@ -3714,6 +4146,8 @@ def index():
         "period_label": period_label(latest_period) if latest_period else "月次の回答はまだありません",
         "share": len([p for p in everyone if p["share"] == "できる"]),
     }
+    positive_counts = Counter((p["work_pattern"] or "未設定") for p in everyone if p["positive"])
+    summary["positive_by_pattern"] = {k: positive_counts[k] for k in list(C.WORK_PATTERNS) + ["未設定"] if positive_counts.get(k)}
     c1_counts = [(opt, len([p for p in everyone if p["wish"] == opt])) for opt in C.C1_OPTIONS]
     return render_template(
         "people/index.html",
@@ -3752,6 +4186,37 @@ def save_settings():
     Setting.set("board_show_names", "1" if request.form.get("board_show_names") else "0")
     db.session.commit()
     flash("設定を保存しました。", "success")
+    return redirect(url_for("admin.index"))
+
+
+def _save_ai_form():
+    for key, _label in AI_SETTING_LABELS:
+        Setting.set(key, (request.form.get(key) or "").strip())
+    db.session.commit()
+    _LAST_ERROR["text"] = ""
+
+
+@bp_admin.post("/ai")
+def save_ai_settings():
+    _save_ai_form()
+    if ai_enabled():
+        flash("AI連携の設定を保存しました。", "success")
+    else:
+        flash("AI連携の設定を保存しました。URL・API キー・モデル名がそろうまではルールベースで動きます。", "success")
+    return redirect(url_for("admin.index"))
+
+
+@bp_admin.post("/ai/test")
+def test_ai_settings():
+    _save_ai_form()
+    if not ai_enabled():
+        flash("URL・API キー・モデル名をすべて入力してから接続テストしてください。", "warning")
+        return redirect(url_for("admin.index"))
+    text = _call_ai("接続確認です。", "「OK」とだけ返してください。")
+    if text is None:
+        flash("接続できませんでした: " + (_LAST_ERROR["text"] or "原因不明"), "danger")
+    else:
+        flash("接続できました。応答: " + " ".join(text.split())[:60], "success")
     return redirect(url_for("admin.index"))
 
 # ----- 職場・業務領域 -----
@@ -3835,7 +4300,7 @@ def employees():
         workplaces=Workplace.query.order_by(Workplace.sort, Workplace.id).all(),
     )
 
-def _upsert_employee(emp_id, name, department, email, workplace_id=None, source="manual"):
+def _upsert_employee(emp_id, name, department, email, workplace_id=None, source="manual", work_pattern=None):
     emp = Employee.query.filter_by(emp_id=emp_id).first()
     created = emp is None
     if emp is None:
@@ -3845,6 +4310,8 @@ def _upsert_employee(emp_id, name, department, email, workplace_id=None, source=
     emp.department = department if department is not None else emp.department
     emp.email = email if email is not None else emp.email
     emp.source = source
+    if work_pattern in C.WORK_PATTERNS:
+        emp.work_pattern = work_pattern
     if workplace_id:
         emp.workplace_id = workplace_id
     else:
@@ -3892,6 +4359,7 @@ _HEADER_ALIASES = {
     "name": ["氏名", "名前", "name", "displayname"],
     "department": ["所属", "部署", "職場", "department", "dept"],
     "email": ["メール", "メールアドレス", "email", "mail", "e-mail"],
+    "work_pattern": ["勤務形態", "勤務", "work_pattern", "shift"],
 }
 
 
@@ -3934,7 +4402,8 @@ def import_employees():
             continue
         dept = (row.get(cols["department"]) or "").strip() if "department" in cols else None
         email = (row.get(cols["email"]) or "").strip() if "email" in cols else None
-        if _upsert_employee(emp_id, name, dept, email, None, "csv"):
+        pattern = (row.get(cols["work_pattern"]) or "").strip() if "work_pattern" in cols else None
+        if _upsert_employee(emp_id, name, dept, email, None, "csv", pattern):
             created += 1
         else:
             updated += 1
@@ -3946,9 +4415,9 @@ def import_employees():
 def export_employees():
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["社員ID", "氏名", "所属", "職場", "メール", "対象", "元"])
+    w.writerow(["社員ID", "氏名", "所属", "職場", "勤務形態", "メール", "対象", "元"])
     for e in Employee.query.order_by(Employee.workplace_id, Employee.emp_id).all():
-        w.writerow([e.emp_id, e.name, e.department, e.workplace.name if e.workplace else "", e.email, "1" if e.active else "0", e.source])
+        w.writerow([e.emp_id, e.name, e.department, e.workplace.name if e.workplace else "", e.work_pattern or "", e.email, "1" if e.active else "0", e.source])
     return Response(buf.getvalue().encode("utf-8-sig"), mimetype="text/csv", headers={"Content-Disposition": "attachment; filename=employees.csv"})
 
 # ----- デモデータ・エクスポート -----
@@ -4047,11 +4516,11 @@ def _person(emp_id):
     info = lookup(emp_id)
     if info:
         return info
-    name, workplace_id = remembered_person(emp_id)
+    name, workplace_id, work_pattern = remembered_person(emp_id)
     if not name and not workplace_id:
         return None
     workplace = db.session.get(Workplace, workplace_id) if workplace_id else None
-    return {"emp_id": emp_id, "name": name, "department": "", "email": "", "workplace_id": workplace_id, "workplace": workplace.name if workplace else "", "source": "answers"}
+    return {"emp_id": emp_id, "name": name, "department": "", "email": "", "workplace_id": workplace_id, "workplace": workplace.name if workplace else "", "work_pattern": work_pattern, "source": "answers"}
 
 # ----- 回答（ログイン不要） -----
 @bp_monthly.route("/")
@@ -4085,10 +4554,12 @@ def submit():
         workplace_id = int(data.get("workplace_id") or 0) or None
     except (TypeError, ValueError):
         workplace_id = None
+    work_pattern = (data.get("work_pattern") or "").strip()
     info = _person(emp_id)
     if info:
         name = name or info["name"]
         workplace_id = workplace_id or info.get("workplace_id")
+        work_pattern = work_pattern or info.get("work_pattern") or ""
 
     errors = {}
     if not emp_id:
@@ -4097,6 +4568,8 @@ def submit():
         errors["name"] = "氏名を入力してください（照会で分からないときは初回だけ手入力）"
     if not workplace_id:
         errors["workplace_id"] = "職場を選んでください"
+    if work_pattern not in C.WORK_PATTERNS:
+        errors["work_pattern"] = "勤務形態を選んでください（普通勤務／交代勤務）"
     raw = data.get("answers") if request.is_json else None
     answers = {}
     for q in survey.questions:
@@ -4136,12 +4609,14 @@ def submit():
         return redirect(url_for("monthly.form", period=period, emp=emp_id or None))
 
     row = MonthlyResponse(
-        period=period, emp_id=emp_id, name=name, workplace_id=workplace_id, survey_id=survey.id,
+        period=period, emp_id=emp_id, name=name, workplace_id=workplace_id, work_pattern=work_pattern, survey_id=survey.id,
         answers_json=json.dumps(answers, ensure_ascii=False), comment=comment,
     )
     respondent = Respondent.query.filter_by(emp_id=emp_id).first()
     row.respondent_id = respondent.id if respondent else None
-    remember_person(emp_id, name, workplace_id)
+    if respondent is not None and not respondent.work_pattern:
+        respondent.work_pattern = work_pattern
+    remember_person(emp_id, name, workplace_id, work_pattern)
     db.session.add(row)
     db.session.commit()
     session["monthly_last"] = row.id
@@ -4152,7 +4627,7 @@ def submit():
                 "success": True,
                 "message": f"{period_label(period)}の回答を受け付けました。ご協力ありがとうございました。",
                 "wants": wants,
-                "register_url": url_for("survey.start", emp=emp_id),
+                "register_url": url_for("survey.start", emp=emp_id, task=((answers.get("wants_tasks") or "").strip().split("\n")[0][:100] or None)),
             }
         )
     return redirect(url_for("monthly.done", period=period))
@@ -4209,7 +4684,7 @@ def results():
         comments=[r for r in responses if (r.comment or "").strip()],
         trends=trends,
         trends_json=json.dumps(trends_json, ensure_ascii=False),
-        wp_trends=monthly_workplace_trends(),
+        wp_trends=monthly_workplace_trends(), pattern_trends=monthly_pattern_trends(),
         chart_json=json.dumps(chart, ensure_ascii=False),
         choice_keys=[q["key"] for q in (survey.questions if survey else []) if q["type"] == "choice"],
     )
@@ -4437,11 +4912,11 @@ TEMPLATES = {
   <h5 class="card-title">社員一覧（{{ employees|length }} 人、回答率の分母 {{ active_count }} 人）</h5>
   <div class="table-responsive">
   <table class="table table-sm align-middle mb-0">
-    <thead><tr><th>社員ID</th><th>氏名</th><th>所属</th><th>職場</th><th>メール</th><th>元</th><th>対象</th><th></th></tr></thead>
+    <thead><tr><th>社員ID</th><th>氏名</th><th>所属</th><th>職場</th><th>勤務形態</th><th>メール</th><th>元</th><th>対象</th><th></th></tr></thead>
     <tbody>
     {% for e in employees %}
     <tr class="{% if not e.active %}text-muted{% endif %}">
-      <td>{{ e.emp_id }}</td><td>{{ e.name }}</td><td class="small">{{ e.department }}</td><td class="small">{{ e.workplace.name if e.workplace else '' }}</td>
+      <td>{{ e.emp_id }}</td><td>{{ e.name }}</td><td class="small">{{ e.department }}</td><td class="small">{{ e.workplace.name if e.workplace else '' }}</td><td class="small">{{ e.work_pattern or '' }}</td>
       <td class="small">{{ e.email }}</td><td class="small">{{ e.source }}</td>
       <td>{% if e.active %}<span class="badge text-bg-success">対象</span>{% else %}<span class="badge text-bg-secondary">除外</span>{% endif %}</td>
       <td class="text-nowrap">
@@ -4450,7 +4925,7 @@ TEMPLATES = {
       </td>
     </tr>
     {% else %}
-    <tr><td colspan="8" class="text-muted">社員が登録されていません。CSV取込か追加フォームから登録してください。</td></tr>
+    <tr><td colspan="9" class="text-muted">社員が登録されていません。CSV取込か追加フォームから登録してください。</td></tr>
     {% endfor %}
     </tbody>
   </table>
@@ -4511,11 +4986,18 @@ document.getElementById("test-btn").addEventListener("click", async function () 
       </div>
     </div></div>
 
-    <div class="card mb-3"><div class="card-body">
-      <h5 class="card-title">AI連携</h5>
-      <p class="mb-1">{{ ai_status }}</p>
-      <p class="small text-muted mb-0">有効にするには、プロジェクト直下の <code>config.py</code> の <code>OPENAI_API_URL</code>（社内 Azure OpenAI 中継サービスの Responses API の URL）と <code>OPENAI_API_KEY</code>、<code>OPENAI_MODEL</code>（GPT-6 系のモデル名）を書いて再起動してください。temperature / top_p は送りません。未設定の場合はルールベースで同じ形式の分析を行います。</p>
-    </div></div>
+    <form method="post" action="{{ url_for('admin.save_ai_settings') }}" class="card mb-3" autocomplete="off"><div class="card-body">
+      <h5 class="card-title">AI連携（ChatGPT API）</h5>
+      <p class="mb-2">{{ ai_status }}</p>
+      <div class="mb-2"><label class="form-label small mb-0">API の URL（Responses API）</label><input type="text" name="openai_api_url" class="form-control form-control-sm" value="{{ settings.openai_api_url }}" placeholder="社内の中継サービスの Responses API の URL"></div>
+      <div class="mb-2"><label class="form-label small mb-0">API キー</label><input type="text" name="openai_api_key" class="form-control form-control-sm" value="{{ settings.openai_api_key }}"></div>
+      <div class="mb-2"><label class="form-label small mb-0">モデル名</label><input type="text" name="openai_model" class="form-control form-control-sm" value="{{ settings.openai_model }}" placeholder="社内で案内されている GPT-6 系の名前"></div>
+      <div class="d-flex flex-wrap gap-2">
+        <button class="btn btn-primary btn-sm">保存</button>
+        <button class="btn btn-outline-secondary btn-sm" formaction="{{ url_for('admin.test_ai_settings') }}">保存して接続テスト</button>
+      </div>
+      <p class="small text-muted mt-2 mb-0">空欄のままなら AI は使わず、ルールベースで同じ形式の分析をします（既定の URL やモデル名はありません）。保存すればすぐ反映され、再起動は不要です。temperature / top_p は送りません。</p>
+    </div></form>
 
     <div class="card mb-3"><div class="card-body">
       <h5 class="card-title">データ</h5>
@@ -5251,7 +5733,7 @@ document.getElementById("test-btn").addEventListener("click", async function () 
     <div class="text-muted">
       {{ task.workplace.name if task.workplace else '' }}／{{ task.respondent.name if task.respondent else '' }}
       ・ 登録 {{ task.created_at|jpdate }}
-      ・ 月間 <strong>{{ task.monthly_minutes|hours }} 時間</strong>（{{ task.frequency }}／{{ task.duration }}／{{ task.headcount }}人）
+      ・ 月間 <strong>{{ task.monthly_minutes|hours }} 時間</strong>（{{ task.frequency }}／{{ task.duration }}／{{ task.headcount }}人{% if task.shift %}／{{ task.shift }}{% endif %}）
     </div>
   </div>
   <div>
@@ -5266,21 +5748,28 @@ document.getElementById("test-btn").addEventListener("click", async function () 
     <div class="card mb-3"><div class="card-body">
       <h5 class="card-title">依頼内容（登録された業務情報）</h5>
       <table class="table table-sm mb-0">
-        <tr><th class="w-25">業務領域</th><td>{{ task.domain.name if task.domain else '未選択' }}{% if task.ai_domain and (not task.domain or task.ai_domain != task.domain.name) %} <span class="badge badge-flag">AI推定: {{ task.ai_domain }}</span>{% endif %}</td></tr>
-        <tr><th>目的</th><td>{{ task.purpose }}{% if task.purpose_unknown %} <span class="badge text-bg-danger">目的不明</span>{% endif %}</td></tr>
-        <tr><th>アウトプット</th><td>{{ task.output }}</td></tr>
-        <tr><th>利用者</th><td>{{ task.output_users_list|join('・') }}{% if task.output_users_note %}<div class="small text-muted">{{ task.output_users_note }}</div>{% endif %}</td></tr>
-        <tr><th>入力情報</th><td>{{ task.inputs_list|join('・') }}{% if task.inputs_note %}<div class="small text-muted">{{ task.inputs_note }}</div>{% endif %}</td></tr>
-        <tr><th>前後の業務</th><td>{{ task.prev_task or '－' }} → <strong>{{ task.name }}</strong> → {{ task.next_task or '－' }}</td></tr>
-        <tr><th>関わる人・部署</th><td>{{ task.actors_list|join('・') or '－' }}</td></tr>
-        <tr><th>情報の受け取り元</th><td>{{ task.info_from or '－' }}</td></tr>
-        <tr><th>使用ツール</th><td>{{ task.tools_list|join('・') }}</td></tr>
-        <tr><th>作業の性質</th><td>{{ task.nature_list|join('・') }}</td></tr>
-        <tr><th>困りごと</th><td>{{ task.pains_list|join('・') }}{% if task.pains_note %}<div class="small text-muted">{{ task.pains_note }}</div>{% endif %}</td></tr>
+        {% set aif = [] if task.verified else task.ai_fields_list %}
+        {% if task.steps %}<tr><th class="w-25">手順（聞き取り）</th><td><ol class="mb-0 ps-3 rq-steps-table">{% for x in task.steps %}<li>{{ x.action }}{% if x.system %} <span class="text-muted small">［{{ x.system }}］</span>{% endif %}{% if x.output %} <span class="small">→ {{ x.output }}</span>{% endif %}{% if x.to %} <span class="small text-muted">（{{ x.to }} へ）</span>{% endif %}</li>{% endfor %}</ol></td></tr>{% endif %}
+        <tr><th class="w-25">業務領域</th><td>{% if 'domain' in aif %}<span class="badge badge-flag me-1">AI推定</span>{% endif %}{{ task.domain.name if task.domain else '未選択' }}{% if task.ai_domain and (not task.domain or task.ai_domain != task.domain.name) %} <span class="badge badge-flag">AI推定: {{ task.ai_domain }}</span>{% endif %}</td></tr>
+        <tr><th>目的</th><td>{% if 'purpose' in aif %}<span class="badge badge-flag me-1">AI推定</span>{% endif %}{{ task.purpose }}{% if task.purpose_unknown %} <span class="badge text-bg-danger">目的不明</span>{% endif %}</td></tr>
+        <tr><th>アウトプット</th><td>{% if 'output' in aif %}<span class="badge badge-flag me-1">AI推定</span>{% endif %}{{ task.output }}</td></tr>
+        <tr><th>利用者</th><td>{% if 'output_users' in aif %}<span class="badge badge-flag me-1">AI推定</span>{% endif %}{{ task.output_users_list|join('・') }}{% if task.output_users_note %}<div class="small text-muted">{{ task.output_users_note }}</div>{% endif %}</td></tr>
+        <tr><th>入力情報</th><td>{% if 'inputs' in aif %}<span class="badge badge-flag me-1">AI推定</span>{% endif %}{{ task.inputs_list|join('・') }}{% if task.inputs_note %}<div class="small text-muted">{{ task.inputs_note }}</div>{% endif %}</td></tr>
+        <tr><th>前後の業務</th><td>{% if 'prev_task' in aif or 'next_task' in aif %}<span class="badge badge-flag me-1">AI推定</span>{% endif %}{{ task.prev_task or '－' }} → <strong>{{ task.name }}</strong> → {{ task.next_task or '－' }}</td></tr>
+        <tr><th>関わる人・部署</th><td>{% if 'actors' in aif %}<span class="badge badge-flag me-1">AI推定</span>{% endif %}{{ task.actors_list|join('・') or '－' }}</td></tr>
+        <tr><th>情報の受け取り元</th><td>{% if 'info_from' in aif %}<span class="badge badge-flag me-1">AI推定</span>{% endif %}{{ task.info_from or '－' }}</td></tr>
+        <tr><th>使用ツール</th><td>{% if 'tools' in aif %}<span class="badge badge-flag me-1">AI推定</span>{% endif %}{{ task.tools_list|join('・') }}</td></tr>
+        <tr><th>作業の性質</th><td>{% if 'nature' in aif %}<span class="badge badge-flag me-1">AI推定</span>{% endif %}{{ task.nature_list|join('・') }}</td></tr>
+        <tr><th>困りごと</th><td>{% if 'pains' in aif %}<span class="badge badge-flag me-1">AI推定</span>{% endif %}{{ task.pains_list|join('・') }}{% if task.pains_note %}<div class="small text-muted">{{ task.pains_note }}</div>{% endif %}</td></tr>
         <tr><th>改善の希望</th><td>{{ task.wish or '' }}</td></tr>
         <tr><th>自分で改善</th><td>{{ task.self_improve or '' }}</td></tr>
         {% if task.note %}<tr><th>補足</th><td>{{ task.note }}</td></tr>{% endif %}
       </table>
+      {% if task.intake %}
+      <details class="small mt-2"><summary class="text-muted">聞き取りの記録（{{ task.intake|length }} 件）</summary>
+        <div class="rq-log mt-1">{% for m in task.intake %}<div class="{{ 'rq-log-ai' if m.role == 'ai' else 'rq-log-user' }}"><span class="text-muted">{{ 'AI' if m.role == 'ai' else '依頼者' }}:</span> {{ m.text }}</div>{% endfor %}</div>
+      </details>
+      {% endif %}
     </div></div>
 
     <div class="card mb-3"><div class="card-body">
@@ -5330,6 +5819,18 @@ document.getElementById("test-btn").addEventListener("click", async function () 
         <ul class="mb-0">{% for q in ecrs.get('questions') %}<li>{{ q }}</li>{% endfor %}</ul>
       </div>
       {% endif %}
+      {% endif %}
+      {% set extra = task.ai_extra_dict %}
+      {% if extra.get('tobe_steps') %}
+      <div class="small mt-2"><strong>改善後の流れ（AI案）</strong>
+        <ol class="mb-1 ps-3">{% for x in extra.tobe_steps %}<li>{{ x }}</li>{% endfor %}</ol>
+        {% if extra.get('saving_minutes_per_month') %}<div class="text-success">削減の見込み 約 {{ extra.saving_minutes_per_month }} 分/月</div>{% endif %}
+      </div>
+      {% endif %}
+      {% if extra.get('hearing_questions') %}
+      <div class="small mt-2"><strong>ヒアリングで聞くこと（まずは相談したい）</strong>
+        <ul class="mb-0">{% for q in extra.hearing_questions %}<li>{{ q }}</li>{% endfor %}</ul>
+      </div>
       {% endif %}
       {% if not task.ai_source %}
       <p class="text-muted small mb-0">まだ分析されていません。「再分析」を押してください。</p>
@@ -5545,7 +6046,7 @@ document.getElementById("test-btn").addEventListener("click", async function () 
   <tbody>
   {% for t in tasks %}
   <tr>
-    <td><a href="{{ url_for('cases.detail', task_id=t.id) }}">{{ t.name }}</a><div class="small text-muted">{{ t.output }}</div></td>
+    <td><a href="{{ url_for('cases.detail', task_id=t.id) }}">{{ t.name }}</a>{% if t.shift and t.shift != '普通勤務' %} <span class="badge text-bg-dark">{{ t.shift }}</span>{% endif %}<div class="small text-muted">{{ t.output }}</div></td>
     <td class="small">{{ t.workplace.name if t.workplace else '' }}<br>{{ t.respondent.name if t.respondent else '' }}</td>
     <td class="small">{{ t.domain.name if t.domain else '' }}</td>
     <td class="text-end">{{ t.monthly_minutes|hours }} h</td>
@@ -5677,7 +6178,7 @@ document.getElementById("test-btn").addEventListener("click", async function () 
         <a class="small" href="{{ url_for('monthly.results') }}">月次集計へ</a>
       </div>
       {% if monthly_latest %}
-      <div class="small text-muted mb-2">最新 {{ monthly_latest.label }}：回答 {{ monthly_latest.n }} 人{% if monthly_latest.response_rate is not none %}（{{ '%.0f'|format(monthly_latest.response_rate) }}%）{% endif %}</div>
+      <div class="small text-muted mb-2">最新 {{ monthly_latest.label }}：回答 {{ monthly_latest.n }} 人{% if monthly_latest.response_rate is not none %}（{{ '%.0f'|format(monthly_latest.response_rate) }}%）{% endif %}{% if monthly_latest.pattern_counts %}・{% for k, v in monthly_latest.pattern_counts.items() %}{{ k }} {{ v }}人{% if not loop.last %}／{% endif %}{% endfor %}{% endif %}</div>
       <div class="row g-2 text-center mb-2">
         <div class="col-4"><div class="kpi-label">繰り返し業務あり</div><div class="mini-value">{{ '%.0f'|format(monthly_latest.has_rate) }}%</div></div>
         <div class="col-4"><div class="kpi-label">先月より減った</div><div class="mini-value text-green">{{ '%.0f'|format(monthly_latest.decreased_rate) }}%</div></div>
@@ -5752,7 +6253,7 @@ document.getElementById("test-btn").addEventListener("click", async function () 
       <div class="d-flex justify-content-between align-items-center">
         <h6 class="mb-0">AIによる提案</h6>
         <form method="post" action="{{ url_for('main.ai_suggest') }}">
-          <button class="btn btn-sm btn-outline-primary" {% if not ai_enabled %}disabled title="config.py の OPENAI_API_URL と OPENAI_API_KEY を設定すると使えます"{% endif %}>AIで提案を生成</button>
+          <button class="btn btn-sm btn-outline-primary" {% if not ai_enabled %}disabled title="管理画面の AI連携で URL・API キー・モデル名を設定すると使えます"{% endif %}>AIで提案を生成</button>
         </form>
       </div>
       {% if ai_suggestions %}
@@ -5766,7 +6267,7 @@ document.getElementById("test-btn").addEventListener("click", async function () 
         <li class="list-group-item px-0 small text-muted">生成日時: {{ ai_suggestions[0].generated_at }}</li>
       </ul>
       {% elif not ai_enabled %}
-      <p class="small text-muted mt-2 mb-0">AI連携は未設定です。config.py の OPENAI_API_URL と OPENAI_API_KEY を設定して起動すると、案件登録時のAI分析とここでの提案生成が有効になります。</p>
+      <p class="small text-muted mt-2 mb-0">AI連携は未設定です。管理画面の「AI連携」で URL・API キー・モデル名を設定すると、案件登録時のAI分析とここでの提案生成が有効になります。</p>
       {% endif %}
     </div></div>
   </div>
@@ -6094,6 +6595,13 @@ document.getElementById("test-btn").addEventListener("click", async function () 
               {% for w in workplaces %}<option value="{{ w.id }}" {% if info and info.workplace_id == w.id %}selected{% endif %}>{{ w.name }}</option>{% endfor %}
             </select>
           </div>
+          <div class="col-sm-6">
+            <label class="form-label" for="work_pattern">勤務形態</label>
+            <select name="work_pattern" id="work_pattern" class="form-select" required>
+              <option value="">選択</option>
+              {% for w in C.WORK_PATTERNS %}<option value="{{ w }}" {% if info and info.work_pattern == w %}selected{% endif %}>{{ w }}</option>{% endfor %}
+            </select>
+          </div>
           <div class="col-sm-6 d-none" id="mq-fallback">
             <label class="form-label" for="name">氏名</label>
             <input type="text" name="name" id="name" class="form-control" value="{{ info.name if info else '' }}">
@@ -6104,15 +6612,17 @@ document.getElementById("test-btn").addEventListener("click", async function () 
 
       {% set ns = namespace(main=0, nos={}, subs={}) %}
       {% for q in questions %}
-      {% if q.depends %}
-        {% set _ = ns.subs.update({q.depends.key: ns.subs.get(q.depends.key, 0) + 1}) %}
-        {% set label = ns.nos.get(q.depends.key, '?') ~ '-' ~ ns.subs[q.depends.key] %}
+      {% set is_sub = q.depends and not q.depends.main %}
+      {% if is_sub %}
+        {% set grp = q.depends.key ~ '|' ~ ((q.depends.show_if or q.depends.required_if or [])|join('/')) %}
+        {% set _ = ns.subs.update({grp: ns.subs.get(grp, 1) + 1}) %}
+        {% set label = ns.nos.get(q.depends.key, '?') ~ '-' ~ ns.subs[grp] %}
       {% else %}
         {% set ns.main = ns.main + 1 %}
         {% set _ = ns.nos.update({q.key: ns.main}) %}
         {% set label = ns.main %}
       {% endif %}
-      <div class="mq-q{% if q.depends %} mq-sub d-none{% endif %}" data-key="{{ q.key }}" data-type="{{ q.type }}" data-required="{{ 1 if q.required else 0 }}"{% if q.depends %} data-dep-key="{{ q.depends.key }}" data-dep-show='{{ (q.depends.show_if or q.depends.required_if or [])|tojson }}' data-dep-required="{{ 1 if (q.depends.required or q.depends.required_if) else 0 }}"{% endif %}>
+      <div class="mq-q{% if is_sub %} mq-sub{% endif %}{% if q.depends %} d-none{% endif %}" data-key="{{ q.key }}" data-type="{{ q.type }}" data-required="{{ 1 if q.required else 0 }}"{% if q.depends %} data-dep-key="{{ q.depends.key }}" data-dep-show='{{ (q.depends.show_if or q.depends.required_if or [])|tojson }}' data-dep-required="{{ 1 if (q.depends.required or q.depends.required_if) else 0 }}"{% endif %}>
         <div class="mq-q-head">
           <span class="mq-no">{{ label }}</span>
           <span class="mq-text">{{ q.text }}</span>
@@ -6159,6 +6669,7 @@ document.getElementById("test-btn").addEventListener("click", async function () 
   var empInput = document.getElementById("emp_id");
   var nameInput = document.getElementById("name");
   var wpSelect = document.getElementById("workplace_id");
+  var patSelect = document.getElementById("work_pattern");
   var fallback = document.getElementById("mq-fallback");
   var msg = document.getElementById("emp-msg");
   var lookupTimer = null;
@@ -6178,6 +6689,7 @@ document.getElementById("test-btn").addEventListener("click", async function () 
     if (j.found) {
       nameInput.value = j.name || "";
       if (j.workplace_id) wpSelect.value = String(j.workplace_id);
+      if (j.work_pattern) patSelect.value = j.work_pattern;
       fallback.classList.toggle("d-none", !!j.name);
       var noName = !j.name, noWp = !wpSelect.value;
       msg.textContent = noName && noWp ? "氏名と職場を入れてください（初回だけ）" : noName ? "氏名を入れてください（初回だけ）" : noWp ? "職場を選んでください（初回だけ）" : "";
@@ -6227,7 +6739,7 @@ document.getElementById("test-btn").addEventListener("click", async function () 
       if (q.dataset.required === "1" && !val) { err.textContent = q.dataset.type === "choice" ? "選択してください" : "入力してください"; if (!firstMissing) firstMissing = q; }
       answers[key] = val;
     });
-    var missing = !form.emp_id.value.trim() ? "社員IDを入力してください" : !form.name.value.trim() ? "氏名を入力してください" : !form.workplace_id.value ? "職場を選んでください" : "";
+    var missing = !form.emp_id.value.trim() ? "社員IDを入力してください" : !form.name.value.trim() ? "氏名を入力してください" : !form.workplace_id.value ? "職場を選んでください" : !form.work_pattern.value ? "勤務形態を選んでください" : "";
     if (missing) {
       if (form.emp_id.value.trim() && !form.name.value.trim()) fallback.classList.remove("d-none");
       errBox.textContent = missing; errBox.classList.remove("d-none");
@@ -6235,7 +6747,7 @@ document.getElementById("test-btn").addEventListener("click", async function () 
       return;
     }
     if (firstMissing) { firstMissing.scrollIntoView({ behavior: "smooth", block: "center" }); return; }
-    var payload = { period: form.period.value, emp_id: form.emp_id.value.trim(), name: form.name.value.trim(), workplace_id: form.workplace_id.value, answers: answers, comment: form.comment.value.trim() };
+    var payload = { period: form.period.value, emp_id: form.emp_id.value.trim(), name: form.name.value.trim(), workplace_id: form.workplace_id.value, work_pattern: form.work_pattern.value, answers: answers, comment: form.comment.value.trim() };
     submitBtn.disabled = true; submitBtn.textContent = "送信中…";
     try {
       var r = await fetch(form.action, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify(payload) });
@@ -6367,6 +6879,28 @@ document.getElementById("test-btn").addEventListener("click", async function () 
   </table>
   </div>
   <p class="small text-muted mt-2 mb-0">上段が繰り返し業務あり率、下段が推計月間時間と回答者数です。</p>
+</div></div>
+
+<h2 class="section-title">勤務形態別の推移 <span class="section-sub">普通勤務と交代勤務の違い</span></h2>
+<div class="card mb-2"><div class="card-body">
+  <div class="table-responsive">
+  <table class="table table-sm trend-table mb-0">
+    <thead><tr><th>勤務形態</th>{% for l in pattern_trends.labels %}<th class="text-end">{{ l|replace('年', '/')|replace('月度', '') }}</th>{% endfor %}</tr></thead>
+    <tbody>
+    {% for row in pattern_trends.rows %}
+    <tr>
+      <td>{{ row.pattern }}</td>
+      {% for c in row.cells %}
+      <td class="text-end">{% if c.n %}<div>{{ '%.0f'|format(c.has_rate) }}%</div><div class="cell-sub">{{ '%.0f'|format(c.hours_month) }} h・{{ c.n }}人</div>{% else %}<span class="text-muted">－</span>{% endif %}</td>
+      {% endfor %}
+    </tr>
+    {% else %}
+    <tr><td colspan="{{ 1 + pattern_trends.labels|length }}" class="text-muted">回答はまだありません</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <p class="small text-muted mt-2 mb-0">勤務形態は本人が初回に選んだものです。「未設定」は勤務形態を聞く前の回答です。</p>
 </div></div>
 {% endif %}
 
@@ -6506,6 +7040,7 @@ document.getElementById("test-btn").addEventListener("click", async function () 
     <div class="kpi-label">自分で改善したい</div>
     <div class="kpi-value fs-3">{{ summary.positive }}<span class="fs-6 text-muted"> 人</span></div>
     <div class="kpi-sub">関わり方・業務ごとの回答・月次のいずれかで「自分で取り組みたい」</div>
+    {% if summary.positive_by_pattern %}<div class="kpi-sub">{% for k, v in summary.positive_by_pattern.items() %}{{ k }} {{ v }}人{% if not loop.last %}／{% endif %}{% endfor %}</div>{% endif %}
   </div></div></div>
   <div class="col-6 col-lg-3"><div class="card kpi-card h-100"><div class="card-body py-2">
     <div class="kpi-label">直近の月次で「自分で取り組みたい」</div>
@@ -6544,7 +7079,7 @@ document.getElementById("test-btn").addEventListener("click", async function () 
   <div class="table-responsive">
   <table class="table table-sm align-middle mb-0 dx-table">
     <thead><tr>
-      <th>氏名</th><th>職場</th><th>意欲（自動化依頼）</th><th>月次：改善の進め方</th>
+      <th>氏名</th><th>職場</th><th>勤務形態</th><th>意欲（自動化依頼）</th><th>月次：改善の進め方</th>
       <th>使える技術</th><th>学びたい技術</th><th>割ける時間</th><th>発表・共有</th><th>業務</th>
     </tr></thead>
     <tbody>
@@ -6552,6 +7087,7 @@ document.getElementById("test-btn").addEventListener("click", async function () 
     <tr>
       <td class="text-nowrap">{{ p.name }}{% if p.emp_id %}<div class="small text-muted">{{ p.emp_id }}</div>{% endif %}</td>
       <td class="small text-nowrap">{{ p.workplace.name if p.workplace else '' }}</td>
+      <td class="small text-nowrap">{{ p.work_pattern or '－' }}</td>
       <td class="small text-nowrap">
         {% if p.wish %}<span class="badge {{ 'text-bg-success' if p.wish_positive else 'text-bg-light border' }}">{{ p.wish }}</span>{% else %}<span class="text-muted">－</span>{% endif %}
       </td>
@@ -6573,7 +7109,7 @@ document.getElementById("test-btn").addEventListener("click", async function () 
       </td>
     </tr>
     {% else %}
-    <tr><td colspan="9" class="text-muted">該当する人はいません</td></tr>
+    <tr><td colspan="10" class="text-muted">該当する人はいません</td></tr>
     {% endfor %}
     </tbody>
   </table>
@@ -6633,6 +7169,7 @@ document.getElementById("test-btn").addEventListener("click", async function () 
 <div class="rq" id="rq">
   <div class="rq-top">
     <h1 class="rq-title">自動化依頼</h1>
+    <p class="rq-lead">AI が短い質問をしながら、あなたの業務の流れを図にしていきます。所要時間は2〜3分。正確でなくて大丈夫、あとで改善チームが確認します。</p>
   </div>
 
   <section class="card rq-card rq-sec" id="sec-person">
@@ -6644,25 +7181,80 @@ document.getElementById("test-btn").addEventListener("click", async function () 
 
   <section class="card rq-card rq-sec" id="sec-task">
     <div class="card-body">
-      <div class="rq-sec-head"><span class="rq-no">2</span><span class="rq-sec-title">依頼する業務</span></div>
-      <div id="rq-task"></div>
-      <div class="rq-actions">
-        <button type="button" class="btn btn-primary btn-lg" id="rq-save-task"><i class="bi bi-plus-lg"></i> この業務を登録</button>
+      <div class="rq-sec-head"><span class="rq-no">2</span><span class="rq-sec-title">依頼する業務</span><span class="rq-sec-sub" id="rq-registered-count"></span></div>
+      <div id="rq-registered" class="rq-registered"></div>
+
+      <div id="rq-pick">
+        <div class="rq-label"><span>どの業務を依頼しますか</span></div>
+        <div class="rq-suggest d-none" id="rq-suggest"></div>
+        <div class="rq-pick-row">
+          <input type="text" class="form-control" id="rq-title" placeholder="業務名（分かる範囲で。例：日報の実績を集計表に転記する）" maxlength="200">
+          <button type="button" class="btn btn-primary" id="rq-start"><i class="bi bi-chat-dots"></i> 聞き取りを始める</button>
+        </div>
+        <div class="small text-muted mt-2">業務名が決まっていなくても始められます。AI が聞きながら決めます。</div>
       </div>
-    </div>
-  </section>
 
-  <section class="card rq-card rq-sec" id="sec-c">
-    <div class="card-body">
-      <div class="rq-sec-head"><span class="rq-no">3</span><span class="rq-sec-title">改善への関わり方</span><span class="rq-opt">任意</span></div>
-      <div id="rq-c"></div>
-    </div>
-  </section>
+      <div id="rq-intake" class="rq-intake d-none">
+        <div class="rq-flowpane" id="rq-flowpane">
+          <div class="rq-flowhead">
+            <span class="rq-flowtitle" id="rq-flow-title">流れ図</span>
+            <span class="rq-flowhead-right"><button type="button" class="btn btn-link btn-sm rq-replay d-none" id="rq-replay"><i class="bi bi-play-fill"></i> 最初から見る</button><span class="rq-stepcount" id="rq-stepcount">手順 0</span></span>
+          </div>
+          <div class="rq-flowbox" id="rq-flow"><div class="rq-flow-empty">ここに流れができていきます</div></div>
+          <ol class="rq-steps" id="rq-steps"></ol>
+        </div>
+        <div class="rq-chatpane">
+          <div class="rq-chathead"><span id="rq-progress">AI が質問します</span><button type="button" class="btn btn-link btn-sm" id="rq-restart">最初からやり直す</button></div>
+          <div class="rq-messages" id="rq-messages"></div>
+          <div class="rq-chips" id="rq-chips"></div>
+          <div class="rq-inputrow" id="rq-inputrow">
+            <input type="text" class="form-control" id="rq-input" placeholder="答えを入力" maxlength="1000" autocomplete="off">
+            <button type="button" class="btn btn-primary" id="rq-send" aria-label="送る"><i class="bi bi-send"></i></button>
+          </div>
+          <div class="rq-tools">
+            <button type="button" class="btn btn-outline-secondary btn-sm" id="rq-bulk-toggle"><i class="bi bi-pencil"></i> 一気に書く</button>
+            <label class="btn btn-outline-secondary btn-sm mb-0"><i class="bi bi-camera"></i> 写真を貼る<input type="file" id="rq-photo" accept="image/*" class="d-none"></label>
+          </div>
+          <div class="rq-bulk d-none" id="rq-bulk">
+            <textarea class="form-control" id="rq-bulk-text" rows="5" placeholder="やっている順に、1行に1手順で。&#10;例：&#10;生産管理システムから前日の実績をCSVで出す&#10;Excelの集計表に貼り付ける&#10;不良件数を手で数えて追記する&#10;課長にメールで送る"></textarea>
+            <button type="button" class="btn btn-primary btn-sm mt-2" id="rq-bulk-send">読み取ってもらう</button>
+          </div>
+          <div class="rq-confirm d-none" id="rq-confirm">
+            <div class="rq-confirm-q">この流れで合っていますか？</div>
+            <div class="d-flex gap-2 flex-wrap">
+              <button type="button" class="btn btn-success" id="rq-confirm-yes"><i class="bi bi-check-lg"></i> はい、合っています</button>
+              <button type="button" class="btn btn-outline-secondary" id="rq-confirm-no">直したい（会話で伝える）</button>
+            </div>
+          </div>
+        </div>
+      </div>
 
-  <section class="card rq-card rq-sec" id="sec-d">
-    <div class="card-body">
-      <div class="rq-sec-head"><span class="rq-no">4</span><span class="rq-sec-title">部全体について</span><span class="rq-opt">任意</span></div>
-      <div id="rq-d"></div>
+      <div id="rq-final" class="rq-final d-none">
+        <div class="rq-final-title">あと少しです。3つ選んで登録してください。</div>
+        <div class="rq-field" data-key="frequency"><div class="rq-label"><span>頻度</span><span class="rq-req">必須</span></div><div class="rq-pills" id="rq-frequency"></div><div class="rq-err"></div></div>
+        <div class="rq-field" data-key="duration"><div class="rq-label"><span>1回の時間</span><span class="rq-req">必須</span></div><div class="rq-pills" id="rq-duration"></div><div class="rq-err"></div></div>
+        <div class="rq-field d-none" data-key="shift" id="rq-shift-field"><div class="rq-label"><span>この業務はいつやりますか</span><span class="rq-req">必須</span></div><div class="rq-pills" id="rq-shift"></div><div class="rq-err"></div></div>
+        <div class="rq-field" data-key="wish"><div class="rq-label"><span>この業務をどうしたいですか</span><span class="rq-req">必須</span></div><div class="rq-pills" id="rq-wish"></div><div class="rq-err"></div></div>
+        <div class="form-check rq-self">
+          <input class="form-check-input" type="checkbox" id="rq-self">
+          <label class="form-check-label" for="rq-self" id="rq-self-label"></label>
+        </div>
+        <div id="rq-skills" class="rq-skills d-none">
+          <div class="rq-field"><div class="rq-label"><span>使える技術</span><span class="rq-opt">任意</span></div><div class="rq-pills" id="rq-skills-have"></div></div>
+          <div class="rq-field"><div class="rq-label"><span>学びたい技術</span><span class="rq-opt">任意</span></div><div class="rq-pills" id="rq-skills-learn"></div></div>
+        </div>
+        <div class="rq-actions">
+          <button type="button" class="btn btn-primary btn-lg" id="rq-save-task"><i class="bi bi-plus-lg"></i> この業務を登録</button>
+        </div>
+      </div>
+
+      <div id="rq-result" class="rq-result d-none">
+        <div class="rq-check"><i class="bi bi-check-lg"></i></div>
+        <div class="fw-semibold" id="rq-result-title"></div>
+        <div class="rq-impression" id="rq-impression"></div>
+        <div class="small text-muted mt-1">改善チームが内容を確認して連絡します。活動状況にも載ります。</div>
+        <button type="button" class="btn btn-outline-primary mt-3" id="rq-another"><i class="bi bi-plus-lg"></i> 続けて別の業務を依頼する</button>
+      </div>
     </div>
   </section>
 
@@ -6687,16 +7279,17 @@ document.getElementById("test-btn").addEventListener("click", async function () 
 <script>
   window.RQ_CONFIG = {
     emp: {{ emp|tojson }},
+    prefill: {{ prefill|tojson }},
     api: {
       lookup: "{{ url_for('monthly.api_employee', emp_id='') }}",
       respondent: "{{ url_for('survey.api_respondent') }}",
       reset: "{{ url_for('survey.api_reset') }}",
       tasks: "{{ url_for('survey.api_task_create') }}",
-      partC: "{{ url_for('survey.api_part_c') }}",
-      partD: "{{ url_for('survey.api_part_d') }}"
+      intake: "{{ url_for('survey.api_intake') }}"
     }
   };
 </script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"></script>
 <script src="{{ url_for('static', filename='survey.js') }}"></script>
 {% endblock %}
 ''',
@@ -7569,7 +8162,7 @@ document.addEventListener("DOMContentLoaded", function () {
     securityLevel: "loose",
     theme: "neutral",
     fontFamily: "inherit",
-    flowchart: { htmlLabels: true, curve: "basis", nodeSpacing: 28, rankSpacing: 48, padding: 8 }
+    flowchart: { htmlLabels: true, curve: "basis", nodeSpacing: 28, rankSpacing: 48, padding: 8, wrappingWidth: 1000 }
   });
 
   var scales = {};
@@ -8356,15 +8949,79 @@ html { scroll-behavior: smooth; }
 .fe-lg-dupout { background: #fff3cd; border-color: #fd7e14; border-style: dashed; }
 .fe-cls-dupout { background: #fff3cd; border-color: #fd7e14; border-style: dashed; color: #664d03; transform: skewX(-6deg); }
 .fe-cls-dupout .fe-text { transform: skewX(6deg); }
+.rq-lead { color: var(--ui-text-2); margin: 0.25rem 0 0; max-width: 46rem; }
+.rq-sec-sub { margin-left: auto; font-size: 0.85rem; color: var(--ui-text-2); }
+.rq-registered { display: flex; flex-direction: column; gap: 0.25rem; margin-bottom: 0.75rem; }
+.rq-reg { display: flex; align-items: center; gap: 0.5rem; padding: 0.35rem 0.6rem; background: var(--ui-fill); border-radius: var(--ui-radius-sm); }
+.rq-reg-name { font-weight: 600; }
+.rq-reg-meta { color: var(--ui-text-2); font-size: 0.85rem; margin-left: auto; white-space: nowrap; }
+.rq-suggest { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; margin-bottom: 0.6rem; }
+.rq-suggest-label { font-size: 0.85rem; color: var(--ui-text-2); }
+.rq-pick-row { display: flex; gap: 0.5rem; }
+.rq-pick-row .btn { white-space: nowrap; }
+.rq-intake { display: grid; grid-template-columns: 1.1fr 1fr; gap: 1rem; align-items: start; }
+.rq-flowpane { position: sticky; top: 72px; background: var(--ui-fill); border-radius: var(--ui-radius); padding: 0.75rem; min-height: 16rem; transition: box-shadow 0.4s; }
+.rq-flowpane.is-done { box-shadow: 0 0 0 3px var(--ui-green-soft), 0 0 0 5px var(--ui-green); }
+.rq-flowhead { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.5rem; }
+.rq-flowtitle { font-weight: 700; }
+.rq-flowhead-right { display: flex; align-items: center; gap: 0.35rem; }
+.rq-replay { padding: 0 0.25rem; font-size: 0.8rem; text-decoration: none; }
+.rq-note { align-self: center; font-size: 0.78rem; color: var(--ui-accent-text); background: var(--ui-accent-soft); border-radius: 999px; padding: 0.15rem 0.7rem; cursor: pointer; }
+.rq-note.is-new { animation: rq-slide 0.35s ease-out; }
+.rq-stepcount { font-size: 0.8rem; font-weight: 600; color: var(--ui-accent-text); background: var(--ui-accent-soft); border-radius: 999px; padding: 0.15rem 0.6rem; display: inline-block; }
+.rq-stepcount.is-bump { animation: rq-bump 0.5s ease-out; }
+.rq-flowbox { background: var(--ui-surface); border-radius: var(--ui-radius-sm); padding: 0.5rem; overflow: auto; min-height: 9rem; display: flex; align-items: center; justify-content: center; }
+.rq-flowbox svg { max-width: 100%; height: auto; }
+.rq-flow-empty { color: var(--ui-text-3); font-size: 0.9rem; }
+.rq-steps { margin: 0.6rem 0 0; padding-left: 1.3rem; font-size: 0.88rem; }
+.rq-steps li { margin: 0.15rem 0; }
+.rq-steps li.is-new { animation: rq-slide 0.5s ease-out; }
+.rq-node-new { animation: rq-pop 0.6s ease-out; transform-box: fill-box; transform-origin: center; }
+.rq-chatpane { display: flex; flex-direction: column; gap: 0.5rem; min-height: 16rem; }
+.rq-chathead { display: flex; justify-content: space-between; align-items: center; font-size: 0.85rem; color: var(--ui-text-2); }
+.rq-messages { display: flex; flex-direction: column; gap: 0.45rem; max-height: 22rem; overflow-y: auto; padding: 0.25rem 0.1rem; }
+.rq-msg { max-width: 88%; padding: 0.5rem 0.75rem; border-radius: 14px; font-size: 0.95rem; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
+.rq-msg.is-ai { background: var(--ui-fill); color: var(--ui-text); align-self: flex-start; border-bottom-left-radius: 4px; }
+.rq-msg.is-user { background: var(--ui-accent); color: #fff; align-self: flex-end; border-bottom-right-radius: 4px; }
+.rq-msg.is-new { animation: rq-slide 0.35s ease-out; }
+.rq-typing { display: flex; gap: 4px; align-items: center; padding: 0.7rem 0.9rem; }
+.rq-typing span { width: 7px; height: 7px; border-radius: 50%; background: var(--ui-text-3); animation: rq-dot 1.2s infinite; }
+.rq-typing span:nth-child(2) { animation-delay: 0.2s; }
+.rq-typing span:nth-child(3) { animation-delay: 0.4s; }
+.rq-chips { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.rq-chip { animation: rq-slide 0.3s ease-out; }
+.rq-inputrow { display: flex; gap: 0.4rem; }
+.rq-tools { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+.rq-confirm { background: var(--ui-green-soft); border-radius: var(--ui-radius-sm); padding: 0.75rem; animation: rq-slide 0.4s ease-out; }
+.rq-confirm-q { font-weight: 700; margin-bottom: 0.5rem; }
+.rq-final { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--ui-line); }
+.rq-final-title { font-weight: 700; margin-bottom: 0.5rem; }
+.rq-self { margin: 0.5rem 0; }
+.rq-result { text-align: center; padding: 1rem 0 0.5rem; }
+.rq-impression { margin-top: 0.4rem; color: var(--ui-accent-text); font-weight: 600; }
+.rq-log { display: flex; flex-direction: column; gap: 0.2rem; }
+.rq-log-ai { color: var(--ui-text-2); }
+.rq-log-user { padding-left: 1rem; }
+.rq-steps-table li { margin: 0.1rem 0; }
+@keyframes rq-pop { 0% { transform: scale(0.6); opacity: 0; } 60% { transform: scale(1.08); opacity: 1; } 100% { transform: scale(1); } }
+@keyframes rq-slide { from { transform: translateY(6px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+@keyframes rq-bump { 0% { transform: scale(1); } 40% { transform: scale(1.3); } 100% { transform: scale(1); } }
+@keyframes rq-dot { 0%, 80%, 100% { transform: translateY(0); opacity: 0.4; } 40% { transform: translateY(-4px); opacity: 1; } }
+@media (max-width: 767.98px) {
+  .rq-intake { grid-template-columns: 1fr; }
+  .rq-flowpane { position: static; min-height: 0; }
+  .rq-messages { max-height: 16rem; }
+  .rq-pick-row { flex-direction: column; }
+}
+
 ''',
-    'survey.js': r'''// 自動化依頼（1枚のページ）。入力欄はサーバーの定義（rq-options）から描く。
-// 「あなたのこと」「関わり方」「全体について」は入力すると自動で保存、業務は「登録」ボタン、最後に「送信して完了」。
+    'survey.js': r'''// 自動化依頼: AI と会話しながら手順を聞き取り、流れ図がその場でできていく
 (function () {
   var O = JSON.parse(document.getElementById("rq-options").textContent);
   var S = JSON.parse(document.getElementById("rq-state").textContent);
   var CFG = window.RQ_CONFIG || { api: {} };
-  var toastTimer = null;
-  var timers = {};
+  var toastTimer = null, timers = {}, renderSeq = 0;
+  if (window.mermaid) mermaid.initialize({ startOnLoad: false, securityLevel: "loose", theme: "neutral", fontFamily: "inherit", flowchart: { htmlLabels: true, curve: "basis", nodeSpacing: 22, rankSpacing: 36, padding: 6, wrappingWidth: 1000 } });
 
   // ---------- 小さな道具 ----------
   function $(id) { return document.getElementById(id); }
@@ -8386,17 +9043,37 @@ html { scroll-behavior: smooth; }
     t.textContent = text;
     t.classList.add("is-show");
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(function () { t.classList.remove("is-show"); }, 2400);
+    toastTimer = setTimeout(function () { t.classList.remove("is-show"); }, 2600);
   }
   function debounce(key, fn, ms) { clearTimeout(timers[key]); timers[key] = setTimeout(fn, ms || 700); }
-  function optionsOf(f) {
-    if (f.options === "workplaces") return O.workplaces.map(function (w) { return { value: String(w.id), label: w.name }; });
-    if (f.options === "domains") return O.domains.map(function (d) { return { value: String(d.id), label: d.name }; });
-    return (f.options || []).map(function (o) { return { value: o, label: o }; });
-  }
   function isEmpty(v) { return v === "" || v === undefined || v === null || (Array.isArray(v) && v.length === 0); }
+  function pills(container, options, single, onChange) {
+    container.innerHTML = "";
+    options.forEach(function (o) {
+      var b = el("button", "rq-pill", (O.frequency_hints && O.frequency_hints[o]) || o);
+      b.type = "button";
+      b.dataset.value = o;
+      b.addEventListener("click", function () {
+        if (single) container.querySelectorAll(".rq-pill").forEach(function (p) { if (p !== b) p.classList.remove("is-on"); });
+        b.classList.toggle("is-on");
+        var f = container.closest(".rq-field");
+        if (f) { f.classList.remove("is-invalid"); var e = f.querySelector(".rq-err"); if (e) e.textContent = ""; }
+        if (onChange) onChange();
+      });
+      container.appendChild(b);
+    });
+  }
+  function pillValue(c) { var on = c.querySelector(".rq-pill.is-on"); return on ? on.dataset.value : ""; }
+  function pillValues(c) { return Array.prototype.map.call(c.querySelectorAll(".rq-pill.is-on"), function (p) { return p.dataset.value; }); }
+  function setPill(c, v) { c.querySelectorAll(".rq-pill").forEach(function (p) { p.classList.toggle("is-on", !!v && p.dataset.value === v); }); }
+  function fieldError(key, msg) {
+    var f = document.querySelector('#rq-final .rq-field[data-key="' + key + '"]');
+    if (!f) return;
+    f.classList.add("is-invalid");
+    f.querySelector(".rq-err").textContent = msg;
+  }
 
-  // ---------- 入力欄の描画 ----------
+  // ---------- 入力欄（あなたのこと） ----------
   function renderField(f, onChange) {
     var wrap = el("div", "rq-field");
     wrap.dataset.key = f.key;
@@ -8405,51 +9082,22 @@ html { scroll-behavior: smooth; }
     label.appendChild(el("span", null, f.label));
     if (f.required) label.appendChild(el("span", "rq-req", "必須"));
     wrap.appendChild(label);
-
-    if (f.type === "text" || f.type === "number") {
-      var input = el("input", "form-control");
-      input.type = f.type === "number" ? "number" : "text";
-      input.name = f.key;
-      if (f.placeholder) input.placeholder = f.placeholder;
-      if (f.type === "number") { input.min = f.min || 0; input.value = f.default !== undefined ? f.default : ""; input.classList.add("rq-num"); }
-      if (f.lookup) input.autocomplete = "off";
-      var box = el("div", f.unit ? "rq-unit-wrap" : "");
-      box.appendChild(input);
-      if (f.unit) box.appendChild(el("span", "rq-unit", f.unit));
-      wrap.appendChild(box);
-    } else if (f.type === "textarea") {
-      var ta = el("textarea", "form-control");
-      ta.name = f.key; ta.rows = 2;
-      if (f.placeholder) ta.placeholder = f.placeholder;
-      wrap.appendChild(ta);
-    } else if (f.type === "select") {
+    if (f.type === "select") {
       var sel = el("select", "form-select");
       sel.name = f.key;
       var first = el("option", null, "選択");
       first.value = "";
       sel.appendChild(first);
-      optionsOf(f).forEach(function (o) { var op = el("option", null, o.label); op.value = o.value; sel.appendChild(op); });
+      var opts = f.options === "work_patterns" ? O.work_patterns.map(function (w) { return { value: w, label: w }; }) : O.workplaces.map(function (w) { return { value: String(w.id), label: w.name }; });
+      opts.forEach(function (o) { var op = el("option", null, o.label); op.value = o.value; sel.appendChild(op); });
       wrap.appendChild(sel);
-    } else if (f.type === "choice" || f.type === "multi") {
-      var pills = el("div", "rq-pills");
-      optionsOf(f).forEach(function (o) {
-        var b = el("button", "rq-pill", o.label);
-        b.type = "button";
-        b.dataset.value = o.value;
-        b.addEventListener("click", function () {
-          if (f.type === "choice") pills.querySelectorAll(".rq-pill").forEach(function (p) { if (p !== b) p.classList.remove("is-on"); });
-          b.classList.toggle("is-on");
-          clearError(wrap);
-          if (onChange) onChange();
-        });
-        pills.appendChild(b);
-      });
-      wrap.appendChild(pills);
-      if (f.note) {
-        var note = el("input", "form-control form-control-sm rq-note");
-        note.type = "text"; note.name = f.note.key; note.placeholder = f.note.placeholder || "";
-        wrap.appendChild(note);
-      }
+    } else {
+      var input = el("input", "form-control");
+      input.type = "text";
+      input.name = f.key;
+      if (f.placeholder) input.placeholder = f.placeholder;
+      if (f.lookup) input.autocomplete = "off";
+      wrap.appendChild(input);
     }
     wrap.appendChild(el("div", "rq-err"));
     wrap.addEventListener("input", function () { clearError(wrap); if (onChange) onChange(); });
@@ -8457,64 +9105,14 @@ html { scroll-behavior: smooth; }
     return wrap;
   }
   function clearError(wrap) { wrap.classList.remove("is-invalid"); wrap.querySelector(".rq-err").textContent = ""; }
-  function renderFields(container, fields, grid, onChange) {
-    var host = grid ? el("div", "rq-grid") : container;
-    fields.forEach(function (f) { host.appendChild(renderField(f, onChange)); });
-    if (grid) container.appendChild(host);
-  }
-  function renderSections(container, sections) {
-    sections.forEach(function (sec) {
-      var s = el("div", "rq-section" + (sec.collapsed ? " is-collapsed" : ""));
-      var head = el("div", "rq-section-title");
-      head.appendChild(el("span", null, sec.title));
-      if (sec.optional) {
-        var tg = el("button", "rq-toggle", sec.collapsed ? "＋ 開く（任意）" : "－ 閉じる");
-        tg.type = "button";
-        tg.addEventListener("click", function () {
-          s.classList.toggle("is-collapsed");
-          tg.textContent = s.classList.contains("is-collapsed") ? "＋ 開く（任意）" : "－ 閉じる";
-        });
-        head.appendChild(tg);
-      }
-      s.appendChild(head);
-      var body = el("div", "rq-section-body");
-      var grid = sec.fields.every(function (f) { return f.type === "text" || f.type === "number" || f.type === "choice"; }) && sec.fields.length <= 3;
-      renderFields(body, sec.fields, grid);
-      s.appendChild(body);
-      container.appendChild(s);
-    });
-  }
-
-  // ---------- 値の読み書き ----------
   function getValues(container) {
     var v = {};
     container.querySelectorAll(".rq-field").forEach(function (w) {
-      var key = w.dataset.key, type = w.dataset.type;
-      if (type === "choice") { var on = w.querySelector(".rq-pill.is-on"); v[key] = on ? on.dataset.value : ""; }
-      else if (type === "multi") { v[key] = Array.prototype.map.call(w.querySelectorAll(".rq-pill.is-on"), function (p) { return p.dataset.value; }); }
-      else { var inp = w.querySelector("input, textarea, select"); v[key] = inp ? inp.value.trim() : ""; }
-      var note = w.querySelector(".rq-note");
-      if (note) v[note.name] = note.value.trim();
+      var inp = w.querySelector("input, select");
+      v[w.dataset.key] = inp ? inp.value.trim() : "";
     });
     return v;
   }
-  function setValues(container, obj) {
-    obj = obj || {};
-    container.querySelectorAll(".rq-field").forEach(function (w) {
-      var key = w.dataset.key, type = w.dataset.type, val = obj[key];
-      if (type === "choice" || type === "multi") {
-        var vals = Array.isArray(val) ? val.map(String) : (isEmpty(val) ? [] : [String(val)]);
-        w.querySelectorAll(".rq-pill").forEach(function (p) { p.classList.toggle("is-on", vals.indexOf(p.dataset.value) >= 0); });
-      } else {
-        var inp = w.querySelector("input, textarea, select");
-        if (inp) inp.value = isEmpty(val) ? (inp.classList.contains("rq-num") ? "1" : "") : String(val);
-      }
-      var note = w.querySelector(".rq-note");
-      if (note) note.value = obj[note.name] || "";
-      clearError(w);
-    });
-  }
-  function clearValues(container) { setValues(container, {}); }
   function showErrors(container, errors) {
     var first = null;
     Object.keys(errors || {}).forEach(function (k) {
@@ -8522,49 +9120,40 @@ html { scroll-behavior: smooth; }
       if (!w) return;
       w.classList.add("is-invalid");
       w.querySelector(".rq-err").textContent = errors[k];
-      var sec = w.closest(".rq-section");
-      if (sec && sec.classList.contains("is-collapsed")) sec.classList.remove("is-collapsed");
       if (!first) first = w;
     });
     if (first) first.scrollIntoView({ behavior: "smooth", block: "center" });
     return !!first;
   }
-  function requiredErrors(container, fields) {
-    var errors = {}, vals = getValues(container);
-    fields.forEach(function (f) {
-      if (f.required && isEmpty(vals[f.key])) errors[f.key] = (f.type === "text" || f.type === "textarea" || f.type === "number") ? "入力してください" : "選んでください";
-    });
-    return errors;
-  }
-  function hasAnyValue(container) {
-    var vals = getValues(container);
-    return Object.keys(vals).some(function (k) { return !isEmpty(vals[k]); });
-  }
-  var allTaskFields = O.task_sections.reduce(function (a, s) { return a.concat(s.fields); }, []);
 
   // ---------- 1. あなたのこと（社員IDだけ。氏名・職場は照会して表示） ----------
   var personBox = $("rq-person");
   var idField = O.person.filter(function (f) { return f.key === "emp_id"; })[0];
-  var fallbackFields = O.person.filter(function (f) { return f.fallback; });
+  var nameField = O.person.filter(function (f) { return f.fallback; })[0];
   var wpField = O.person.filter(function (f) { return f.key === "workplace_id"; })[0];
   var idRow = el("div", "rq-id-row");
   var idWrap = renderField(idField, null);
   idRow.appendChild(idWrap);
   var wpWrap = renderField(wpField, function () { debounce("person", function () { savePerson(false); }, 300); });
   idRow.appendChild(wpWrap);
+  var patField = O.person.filter(function (f) { return f.key === "work_pattern"; })[0];
+  var patWrap = renderField(patField, function () { debounce("person", function () { savePerson(false); }, 300); });
+  idRow.appendChild(patWrap);
   var identity = el("div", "rq-identity");
   idRow.appendChild(identity);
   personBox.appendChild(idRow);
   var fallback = el("div", "rq-fallback d-none");
-  renderFields(fallback, fallbackFields, true, function () { debounce("person", function () { savePerson(false); }, 800); });
+  fallback.appendChild(renderField(nameField, function () { debounce("person", function () { savePerson(false); }, 800); }));
   personBox.appendChild(fallback);
   var empInput = idWrap.querySelector("input");
   var found = null;
   function setIdentity(text, missing) { identity.textContent = text || ""; identity.classList.toggle("is-missing", !!missing); }
-  function fillFallback(name, workplaceId) {
+  function fillFallback(name, workplaceId, pattern) {
     fallback.querySelector('input[name="name"]').value = name || "";
     var ws = personBox.querySelector('select[name="workplace_id"]');
     if (ws && workplaceId) ws.value = String(workplaceId);
+    var ps = personBox.querySelector('select[name="work_pattern"]');
+    if (ps && pattern) ps.value = pattern;
   }
   async function lookupEmp() {
     var id = empInput.value.trim();
@@ -8574,7 +9163,7 @@ html { scroll-behavior: smooth; }
     if (empInput.value.trim() !== id) return;
     if (j.found) {
       found = j;
-      fillFallback(j.name, j.workplace_id);
+      fillFallback(j.name, j.workplace_id, j.work_pattern);
       fallback.classList.toggle("d-none", !!j.name);
       setIdentity(j.name ? "" : "初回だけ氏名を入れてください", !j.name);
       if (j.name) debounce("person", function () { savePerson(false); }, 200);
@@ -8593,21 +9182,23 @@ html { scroll-behavior: smooth; }
     var errors = {};
     if (!v.emp_id) errors.emp_id = "入力してください";
     if (!v.workplace_id) errors.workplace_id = "選んでください";
+    if (!v.work_pattern) errors.work_pattern = "選んでください";
     if (!v.name && !(found && found.name)) errors.name = "入力してください";
     if (Object.keys(errors).length) {
       if (showErr) { if (errors.name) fallback.classList.remove("d-none"); showErrors(personBox, errors); }
-      else if (found && !errors.emp_id) { var partial = {}; if (errors.workplace_id) partial.workplace_id = errors.workplace_id; if (errors.name) partial.name = errors.name; showErrors(personBox, partial); }
+      else if (found && !errors.emp_id) { var partial = {}; if (errors.workplace_id) partial.workplace_id = errors.workplace_id; if (errors.work_pattern) partial.work_pattern = errors.work_pattern; if (errors.name) partial.name = errors.name; showErrors(personBox, partial); }
       return Promise.resolve(false);
     }
-    personSaving = api("POST", CFG.api.respondent, { emp_id: v.emp_id, name: v.name, workplace_id: v.workplace_id }).then(function (j) {
+    personSaving = api("POST", CFG.api.respondent, { emp_id: v.emp_id, name: v.name, workplace_id: v.workplace_id, work_pattern: v.work_pattern }).then(function (j) {
       personSaving = null;
       if (!j._ok) { fallback.classList.remove("d-none"); showErrors(personBox, j.errors || {}); return false; }
       var changed = !S.respondent || S.respondent.id !== j.respondent.id;
       S.respondent = j.respondent;
       if (changed) {
         S.tasks = j.tasks || [];
-        setValues(cBox, S.respondent);
-        setValues(dBox, S.respondent);
+        S.suggested = j.suggested || [];
+        renderRegistered();
+        renderSuggest();
         if (j.resumed && S.tasks.length) toast("前回の続きから登録できます");
       }
       setIdentity("");
@@ -8616,87 +9207,345 @@ html { scroll-behavior: smooth; }
     return personSaving;
   }
 
-  // ---------- 2. 依頼する業務 ----------
-  var taskBox = $("rq-task");
-  renderSections(taskBox, O.task_sections);
-  $("rq-save-task").addEventListener("click", async function () {
-    var btn = this;
+  // ---------- 2. 依頼する業務（AI の聞き取り） ----------
+  var pickBox = $("rq-pick"), intakeBox = $("rq-intake"), finalBox = $("rq-final"), resultBox = $("rq-result");
+  var msgBox = $("rq-messages"), chipBox = $("rq-chips"), input = $("rq-input"), flowBox = $("rq-flow"), stepsBox = $("rq-steps");
+  var conv = null, busy = false;
+
+  function renderRegistered() {
+    var box = $("rq-registered");
+    box.innerHTML = "";
+    $("rq-registered-count").textContent = S.tasks.length ? "登録済み " + S.tasks.length + " 件" : "";
+    S.tasks.forEach(function (t) {
+      var row = el("div", "rq-reg");
+      row.appendChild(el("span", "rq-reg-name", t.name));
+      row.appendChild(el("span", "rq-reg-meta", "月 " + t.hours + " h・" + (t.wish || "")));
+      var del = el("button", "btn btn-link btn-sm text-danger", "取り消す");
+      del.type = "button";
+      del.addEventListener("click", async function () {
+        if (!confirm("「" + t.name + "」の依頼を取り消しますか？")) return;
+        var j = await api("DELETE", CFG.api.tasks + "/" + t.id);
+        if (j._ok) { S.tasks = j.tasks || []; S.suggested = j.suggested || []; renderRegistered(); renderSuggest(); }
+      });
+      row.appendChild(del);
+      box.appendChild(row);
+    });
+  }
+  function renderSuggest() {
+    var box = $("rq-suggest");
+    box.innerHTML = "";
+    var names = S.suggested || [];
+    box.classList.toggle("d-none", !names.length);
+    if (!names.length) return;
+    box.appendChild(el("span", "rq-suggest-label", "アンケートで挙げた業務から選ぶ:"));
+    names.forEach(function (n) {
+      var b = el("button", "rq-pill", n);
+      b.type = "button";
+      b.addEventListener("click", function () { $("rq-title").value = n; startIntake(); });
+      box.appendChild(b);
+    });
+  }
+  function addMsg(role, text, animate) {
+    var m = el("div", "rq-msg " + (role === "ai" ? "is-ai" : "is-user") + (animate ? " is-new" : ""), text);
+    msgBox.appendChild(m);
+    msgBox.scrollTop = msgBox.scrollHeight;
+    return m;
+  }
+  function typing(on) {
+    var t = msgBox.querySelector(".rq-typing");
+    if (on && !t) {
+      t = el("div", "rq-msg is-ai rq-typing");
+      t.innerHTML = "<span></span><span></span><span></span>";
+      msgBox.appendChild(t);
+      msgBox.scrollTop = msgBox.scrollHeight;
+    }
+    if (!on && t) t.remove();
+  }
+  function renderChips(chips) {
+    chipBox.innerHTML = "";
+    (chips || []).forEach(function (c) {
+      var b = el("button", "rq-pill rq-chip", (O.frequency_hints && O.frequency_hints[c]) || c);
+      b.type = "button";
+      b.addEventListener("click", function () { send(c); });
+      chipBox.appendChild(b);
+    });
+  }
+  var CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳";
+  function circled(n) { return n >= 1 && n <= CIRCLED.length ? CIRCLED.charAt(n - 1) : "(" + n + ")"; }
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  function renderSteps(steps, upto) {
+    stepsBox.innerHTML = "";
+    steps.slice(0, upto).forEach(function (x, i) {
+      stepsBox.appendChild(el("li", i >= conv.shownSteps ? "is-new" : null, x.action + (x.system ? "［" + x.system + "］" : "")));
+    });
+    var sc = $("rq-stepcount");
+    sc.textContent = "手順 " + upto;
+    if (upto > conv.shownSteps) { sc.classList.remove("is-bump"); void sc.offsetWidth; sc.classList.add("is-bump"); }
+  }
+  async function renderDef(def) {
+    if (!def) { flowBox.innerHTML = '<div class="rq-flow-empty">ここに流れができていきます</div>'; conv.lastNodes = []; return; }
+    if (!window.mermaid) return;
+    try {
+      var out = await mermaid.render("rq-flow-svg-" + (++renderSeq), def);
+      flowBox.innerHTML = out.svg;
+      var svg = flowBox.querySelector("svg");
+      if (svg) { svg.style.maxWidth = "100%"; svg.style.height = "auto"; svg.removeAttribute("height"); }
+      var ids = [];
+      flowBox.querySelectorAll("g.node").forEach(function (g) {
+        var id = (g.id || "").replace(/^flowchart-/, "").replace(/-\d+$/, "");
+        ids.push(id);
+        if (conv.lastNodes.indexOf(id) < 0) g.classList.add("rq-node-new");
+      });
+      conv.lastNodes = ids;
+    } catch (e) {
+      flowBox.innerHTML = '<div class="rq-flow-empty">図を描けませんでした</div>';
+    }
+  }
+  async function playFrames(frames, finalDef, state) {
+    var steps = (state && state.steps) || [];
+    var base = conv.shownSteps;
+    for (var i = 0; i < frames.length; i++) {
+      renderSteps(steps, Math.min(steps.length, base + i + 1));
+      await renderDef(frames[i]);
+      if (i < frames.length - 1) await sleep(550);
+    }
+    renderSteps(steps, steps.length);
+    if (!frames.length || frames[frames.length - 1] !== finalDef) await renderDef(steps.length ? finalDef : "");
+    conv.shownSteps = steps.length;
+    $("rq-replay").classList.toggle("d-none", !conv.frames.length);
+  }
+  function addNote(text) {
+    var n = el("div", "rq-note is-new", text);
+    n.addEventListener("click", function () { $("rq-flowpane").scrollIntoView({ behavior: "smooth", block: "center" }); });
+    msgBox.appendChild(n);
+    msgBox.scrollTop = msgBox.scrollHeight;
+  }
+  function setBusy(on) {
+    busy = on;
+    input.disabled = on;
+    $("rq-send").disabled = on;
+    $("rq-bulk-send").disabled = on;
+  }
+  async function turn(userText, image) {
+    if (busy || !conv) return;
+    setBusy(true);
+    renderChips([]);
+    if (userText !== null) { conv.messages.push({ role: "user", text: userText }); addMsg("user", userText); }
+    typing(true);
+    var j = await api("POST", CFG.api.intake, { title: conv.title, messages: conv.messages, state: conv.state, image: image || null, shown: conv.shownSteps });
+    typing(false);
+    setBusy(false);
+    if (!j._ok) {
+      if (userText !== null) conv.messages.pop();
+      toast(j.message || "AI と通信できませんでした。もう一度送ってください");
+      return;
+    }
+    conv.state = j.state || conv.state;
+    conv.messages.push({ role: "ai", text: j.reply });
+    addMsg("ai", j.reply, true);
+    renderChips(j.chips);
+    if (conv.state.title) $("rq-flow-title").textContent = conv.state.title;
+    var before = conv.shownSteps;
+    conv.frames = conv.frames.concat(j.frames || []);
+    conv.finalDef = j.diagram || "";
+    await playFrames(j.frames || [], conv.finalDef, conv.state);
+    if (conv.shownSteps > before) addNote("＋ 手順" + circled(before + 1) + (conv.shownSteps > before + 1 ? "〜" + circled(conv.shownSteps) : "") + " を流れ図に追加しました");
+    if (j.done) addNote("✓ 流れができました。右上の「最初から見る」で育つ様子を再生できます");
+    $("rq-progress").textContent = j.done ? "流れができました！" : (j.remaining > 0 ? "あと " + j.remaining + " 問くらい" : "もう少しです");
+    conv.done = !!j.done;
+    $("rq-confirm").classList.toggle("d-none", !j.done);
+    $("rq-inputrow").classList.toggle("d-none", !!j.done);
+    $("rq-flowpane").classList.toggle("is-done", !!j.done);
+    if (!j.done) input.focus();
+    else $("rq-confirm").scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+  function send(text) {
+    text = (text || input.value).trim();
+    if (!text) return;
+    input.value = "";
+    turn(text, null);
+  }
+  function shrinkImage(file) {
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onload = function () {
+        var img = new Image();
+        img.onload = function () {
+          var max = 1600, w = img.width, h = img.height;
+          var k = Math.min(1, max / Math.max(w, h));
+          var c = document.createElement("canvas");
+          c.width = Math.round(w * k); c.height = Math.round(h * k);
+          c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+          resolve(c.toDataURL("image/jpeg", 0.85));
+        };
+        img.onerror = reject;
+        img.src = reader.result;
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  }
+  async function startIntake() {
     if (!S.respondent) {
       var ok = await savePerson(true);
       if (!ok) { toast("先に「あなたのこと」を入力してください"); return; }
     }
-    var errors = requiredErrors(taskBox, allTaskFields);
-    if (showErrors(taskBox, errors)) return;
-    btn.disabled = true;
-    var j = await api("POST", CFG.api.tasks, getValues(taskBox));
-    btn.disabled = false;
-    if (!j._ok) { showErrors(taskBox, j.errors || {}); if (j.message) toast(j.message); return; }
-    S.tasks = j.tasks || S.tasks;
-    clearValues(taskBox);
-    toast("登録しました：" + j.task.name + "（月 " + j.task.hours + " h）");
-    $("sec-task").scrollIntoView({ behavior: "smooth", block: "start" });
+    var title = $("rq-title").value.trim();
+    conv = { title: title, messages: [], state: { title: title, steps: [], sources: [], outputs: [], recipients: [], frequency: null, duration: null, shift: null, pains: [], unknowns: [] }, done: false, lastNodes: [], shownSteps: 0, frames: [], finalDef: "" };
+    $("rq-replay").classList.add("d-none");
+    msgBox.innerHTML = "";
+    stepsBox.innerHTML = "";
+    flowBox.innerHTML = '<div class="rq-flow-empty">ここに流れができていきます</div>';
+    $("rq-flow-title").textContent = title || "流れ図";
+    $("rq-stepcount").textContent = "手順 0";
+    $("rq-progress").textContent = "AI が質問します";
+    $("rq-bulk").classList.add("d-none");
+    pickBox.classList.add("d-none");
+    resultBox.classList.add("d-none");
+    finalBox.classList.add("d-none");
+    intakeBox.classList.remove("d-none");
+    $("rq-confirm").classList.add("d-none");
+    $("rq-inputrow").classList.remove("d-none");
+    $("rq-flowpane").classList.remove("is-done");
+    intakeBox.scrollIntoView({ behavior: "smooth", block: "start" });
+    await turn(null, null);
+  }
+  function backToPick() {
+    conv = null;
+    intakeBox.classList.add("d-none");
+    finalBox.classList.add("d-none");
+    resultBox.classList.add("d-none");
+    pickBox.classList.remove("d-none");
+    $("rq-title").value = "";
+    renderSuggest();
+    pickBox.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+  $("rq-start").addEventListener("click", startIntake);
+  $("rq-title").addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); startIntake(); } });
+  $("rq-send").addEventListener("click", function () { send(); });
+  input.addEventListener("keydown", function (e) { if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); send(); } });
+  $("rq-restart").addEventListener("click", function () { if (!conv || confirm("聞き取りを最初からやり直しますか？")) backToPick(); });
+  $("rq-bulk-toggle").addEventListener("click", function () { $("rq-bulk").classList.toggle("d-none"); if (!$("rq-bulk").classList.contains("d-none")) $("rq-bulk-text").focus(); });
+  $("rq-bulk-send").addEventListener("click", function () {
+    var text = $("rq-bulk-text").value.trim();
+    if (!text) { toast("手順を書いてください"); return; }
+    $("rq-bulk-text").value = "";
+    $("rq-bulk").classList.add("d-none");
+    turn(text, null);
   });
-
-  // ---------- 3. 改善への関わり方（自動保存） ----------
-  var cBox = $("rq-c");
-  renderFields(cBox, O.c_fields, false, function () { debounce("c", function () { saveC(false); }, 800); });
-  async function saveC(showErr) {
-    if (!S.respondent || !hasAnyValue(cBox)) return true;
-    var errors = requiredErrors(cBox, O.c_fields);
-    if (Object.keys(errors).length) { if (showErr) showErrors(cBox, errors); return false; }
-    var j = await api("POST", CFG.api.partC, getValues(cBox));
-    if (!j._ok) { showErrors(cBox, j.errors || {}); return false; }
-    S.respondent = j.respondent || S.respondent;
-    return true;
-  }
-
-  // ---------- 4. 部全体について（自動保存） ----------
-  var dBox = $("rq-d");
-  renderFields(dBox, O.d_fields, false, function () { debounce("d", function () { saveD(); }, 900); });
-  async function saveD() {
-    if (!S.respondent || !hasAnyValue(dBox)) return true;
-    var j = await api("POST", CFG.api.partD, getValues(dBox));
-    if (!j._ok) { return false; }
-    S.respondent = j.respondent || S.respondent; S.tasks = j.tasks || S.tasks;
-    return true;
-  }
+  $("rq-photo").addEventListener("change", async function () {
+    var file = this.files && this.files[0];
+    this.value = "";
+    if (!file || !conv) return;
+    try {
+      var data = await shrinkImage(file);
+      turn("手順書（写真）を送りました。読み取ってください", data);
+    } catch (e) {
+      toast("写真を読み込めませんでした");
+    }
+  });
+  $("rq-confirm-no").addEventListener("click", function () {
+    conv.done = false;
+    $("rq-confirm").classList.add("d-none");
+    $("rq-inputrow").classList.remove("d-none");
+    $("rq-flowpane").classList.remove("is-done");
+    $("rq-progress").textContent = "直したいところを教えてください";
+    input.placeholder = "例：2番は違う。先に課長に確認する";
+    input.focus();
+  });
+  $("rq-confirm-yes").addEventListener("click", function () {
+    setPill($("rq-frequency"), conv.state.frequency);
+    setPill($("rq-duration"), conv.state.duration);
+    setPill($("rq-wish"), "");
+    var shiftWork = !!(S.respondent && S.respondent.work_pattern === "交代勤務");
+    $("rq-shift-field").classList.toggle("d-none", !shiftWork);
+    setPill($("rq-shift"), conv.state.shift);
+    $("rq-self").checked = false;
+    $("rq-skills").classList.add("d-none");
+    finalBox.classList.remove("d-none");
+    finalBox.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+  pills($("rq-frequency"), O.frequencies, true);
+  pills($("rq-duration"), O.durations, true);
+  pills($("rq-wish"), O.wishes, true);
+  pills($("rq-shift"), O.shift_options, true);
+  pills($("rq-skills-have"), O.skills, false);
+  pills($("rq-skills-learn"), O.skills, false);
+  $("rq-self-label").textContent = O.self_improve_yes;
+  $("rq-self").addEventListener("change", function () { $("rq-skills").classList.toggle("d-none", !this.checked); });
+  $("rq-save-task").addEventListener("click", async function () {
+    if (!conv) return;
+    var btn = this;
+    var body = {
+      name: conv.state.title || conv.title, state: conv.state, messages: conv.messages,
+      frequency: pillValue($("rq-frequency")), duration: pillValue($("rq-duration")), wish: pillValue($("rq-wish")),
+      self_improve: $("rq-self").checked, skills: pillValues($("rq-skills-have")), learn: pillValues($("rq-skills-learn")),
+      shift: pillValue($("rq-shift"))
+    };
+    var missing = false;
+    if (S.respondent && S.respondent.work_pattern === "交代勤務" && !body.shift) { fieldError("shift", "選んでください"); missing = true; }
+    if (!body.frequency) { fieldError("frequency", "選んでください"); missing = true; }
+    if (!body.duration) { fieldError("duration", "選んでください"); missing = true; }
+    if (!body.wish) { fieldError("wish", "選んでください"); missing = true; }
+    if (missing) return;
+    btn.disabled = true;
+    btn.textContent = "登録中…";
+    var j = await api("POST", CFG.api.tasks, body);
+    btn.disabled = false;
+    btn.innerHTML = '<i class="bi bi-plus-lg"></i> この業務を登録';
+    if (!j._ok) { Object.keys(j.errors || {}).forEach(function (k) { fieldError(k, j.errors[k]); }); toast(j.message || "登録できませんでした"); return; }
+    S.tasks = j.tasks || S.tasks;
+    S.suggested = j.suggested || [];
+    renderRegistered();
+    intakeBox.classList.add("d-none");
+    finalBox.classList.add("d-none");
+    $("rq-result-title").textContent = "「" + j.task.name + "」を登録しました（月 約 " + j.task.hours + " 時間）";
+    $("rq-impression").textContent = j.first_impression || "";
+    resultBox.classList.remove("d-none");
+    resultBox.scrollIntoView({ behavior: "smooth", block: "center" });
+    conv = null;
+  });
+  $("rq-another").addEventListener("click", backToPick);
+  $("rq-replay").addEventListener("click", async function () {
+    if (!conv || busy || !conv.frames.length) return;
+    var btn = this;
+    btn.disabled = true;
+    conv.shownSteps = 0;
+    conv.lastNodes = [];
+    await renderDef("");
+    await sleep(300);
+    await playFrames(conv.frames.slice(), conv.finalDef, conv.state);
+    btn.disabled = false;
+  });
 
   // ---------- 送信して完了 ----------
   $("rq-finish").addEventListener("click", async function () {
-    var btn = this; btn.disabled = true;
-    try {
-      if (!S.respondent || Object.keys(requiredErrors(personBox, O.person)).length) {
-        var ok = await savePerson(true);
-        if (!ok) { toast("「あなたのこと」を入力してください"); return; }
-      }
-      if (!S.tasks.length) {
-        toast("業務を1件以上登録してください");
-        $("sec-task").scrollIntoView({ behavior: "smooth", block: "start" });
-        return;
-      }
-      if (!(await saveC(true))) return;
-      var j = await api("POST", CFG.api.partD, getValues(dBox));
-      if (!j._ok) { toast(j.message || "送信できませんでした"); return; }
-      S.respondent = j.respondent || S.respondent; S.tasks = j.tasks || S.tasks;
-      var total = S.tasks.reduce(function (a, t) { return a + (t.monthly_minutes || 0); }, 0);
-      $("rq-done-sum").textContent = "ありがとうございました。登録した業務 " + S.tasks.length + " 件（月 約 " + (total / 60).toFixed(1) + " 時間）は改善案件として確認し、活動状況に載せます。";
-      var done = $("rq-done");
-      done.classList.remove("d-none");
-      done.scrollIntoView({ behavior: "smooth", block: "center" });
-      toast("送信しました");
-    } finally {
-      btn.disabled = false;
+    if (!S.respondent) {
+      var ok = await savePerson(true);
+      if (!ok) { toast("「あなたのこと」を入力してください"); return; }
     }
+    if (!S.tasks.length) {
+      toast("業務を1件以上登録してください");
+      $("sec-task").scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    }
+    var total = S.tasks.reduce(function (a, t) { return a + (t.monthly_minutes || 0); }, 0);
+    $("rq-done-sum").textContent = "ありがとうございました。登録した業務 " + S.tasks.length + " 件（月 約 " + (total / 60).toFixed(1) + " 時間）は改善案件として確認し、活動状況に載せます。";
+    var done = $("rq-done");
+    done.classList.remove("d-none");
+    done.scrollIntoView({ behavior: "smooth", block: "center" });
+    toast("送信しました");
   });
 
   // ---------- 初期表示 ----------
+  renderRegistered();
+  renderSuggest();
+  if (CFG.prefill) $("rq-title").value = CFG.prefill;
   if (S.respondent) {
     empInput.value = S.respondent.emp_id || "";
     found = { name: S.respondent.name, workplace: S.respondent.workplace, workplace_id: S.respondent.workplace_id };
-    fillFallback(S.respondent.name, S.respondent.workplace_id);
+    fillFallback(S.respondent.name, S.respondent.workplace_id, S.respondent.work_pattern);
     setIdentity("");
-    setValues(cBox, S.respondent);
-    setValues(dBox, S.respondent);
   } else if (CFG.emp && empInput) {
     empInput.value = CFG.emp;
     lookupEmp();
