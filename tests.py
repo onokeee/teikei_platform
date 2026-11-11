@@ -517,6 +517,14 @@ def smoke_login_monthly():
         check(r.status_code == 200 and has_q["options"] == ["ある", "ない"] and has_q["required"] and has_q["text"] == "今月、繰り返しのPC作業はありましたか", "基本設問は文面だけ変わり、選択肢と必須は固定のまま")
     r = client.post("/monthly/admin/save", json={"period": period, "questions": [q for q in qs if q["key"] != "stance"], "is_active": True})
     check(r.status_code == 400 and "基本設問は外せません" in r.get_json()["message"], "基本設問を外した保存は拒否")
+    swapped = list(qs)
+    i_t = next(i for i, q in enumerate(swapped) if q["key"] == "trend")
+    i_r = next(i for i, q in enumerate(swapped) if q["key"] == "decreased_reason")
+    swapped[i_t], swapped[i_r] = swapped[i_r], swapped[i_t]
+    r = client.post("/monthly/admin/save", json={"period": period, "questions": swapped, "is_active": True})
+    with app.app_context():
+        saved_keys = [q["key"] for q in MonthlySurvey.query.filter_by(period=period).first().questions]
+    check(r.status_code == 200 and saved_keys.index("trend") < saved_keys.index("decreased_reason"), "基本設問を並べ替えても、親（先月と比べて）は子（なぜ減ったのか）より前に保存される")
     code, html, r = get(f"/monthly/?period={period}&emp=E011")
     check("改善の勉強会に参加したいですか" in html and "参加したい" in html, "回答フォームに追加した設問が出る")
     r = client.post("/monthly/admin/save", json={"period": period, "questions": [{"key": "x", "type": "choice", "text": "一択", "options": ["a"]}]})
@@ -698,6 +706,16 @@ def smoke_login_monthly():
     ldap_auth.urllib.request.urlopen = _real_urlopen
     conf.override("LDAP_API_URL", "")
 
+    with app.app_context():
+        import app as app_module
+        for i, (has, trend) in enumerate((("ない", ""), ("ない", ""), ("ある", "減った"), ("ある", "減った"))):
+            db.session.add(MonthlyResponse(period="2001-01", emp_id=f"R{i}", name=f"率 {i}", workplace_id=1, answers_json=json.dumps({"has": has, "trend": trend}, ensure_ascii=False)))
+        db.session.commit()
+        row = next(x for x in app_module.monthly_summary() if x["period"] == "2001-01")
+        check(row["has_rate"] == 50.0 and row["decreased_rate"] == 100.0, f"月次の割合は、その設問に答えた人が分母（あり {row['has_rate']}%、減った {row['decreased_rate']}%）")
+        MonthlyResponse.query.filter_by(period="2001-01").delete()
+        db.session.commit()
+
     # ---- DX人財情報 ----
     client.post("/login", data={"emp_id": "admin", "password": "adminpass"})
     code, html, r = get("/people/")
@@ -706,9 +724,17 @@ def smoke_login_monthly():
     r = client.get("/people/", query_string={"wish": "positive"})
     html = r.data.decode("utf-8")
     check(r.status_code == 200 and "佐藤 花子" in html, "自分で改善したい人で絞り込み")
-    r = client.get("/people/", query_string={"wish": "今は考えていない"})
+    r = client.get("/people/", query_string={"wish": "スキルを身につけながら、一緒にやってみたい"})
     html = r.data.decode("utf-8")
-    check(r.status_code == 200 and "渡辺 由美" in html and "佐藤 花子" not in html, "意欲の選択肢で絞り込み")
+    with app.app_context():
+        import app as app_module
+        yes = [p["name"] for p in app_module.dx_people(wish="スキルを身につけながら、一緒にやってみたい")]
+        others = [p["name"] for p in app_module.dx_people() if p["name"] not in yes]
+    check(r.status_code == 200 and yes and others and all(n in html for n in yes) and not any(n in html for n in others), f"意欲（依頼で選んだもの）で絞り込み（一緒に {len(yes)} 人／それ以外 {len(others)} 人）")
+    r = client.post("/admin/employees/add", data={"emp_id": "N001", "name": "新規 社員", "department": "", "email": "", "workplace_id": "1", "work_pattern": "交代勤務"})
+    with app.app_context():
+        e = Employee.query.filter_by(emp_id="N001").first()
+        check(r.status_code == 302 and e is not None and e.work_pattern == "交代勤務", "社員の手動追加で勤務形態を登録できる")
     r = client.get("/people/", query_string={"workplace_id": 99})
     check(r.status_code == 200 and "該当する人はいません" in r.data.decode("utf-8"), "該当なしの表示")
 
@@ -829,6 +855,8 @@ def smoke_request():
         j = r.get_json()
         check(r.status_code == 200 and len(j["state"]["steps"]) == 3 and j["chips"] == ["課長", "生産管理課", "自分だけ", "分からない"] and "o3" in j["diagram"], "一気に書いた2行が手順2・3になり、選択肢（chips）が返る")
         check(len(j["frames"]) == 2 and "st2" in j["frames"][0] and "st3" not in j["frames"][0] and "st3" in j["frames"][1], "一気に2手順増えたら、1手順ずつのコマが2枚返る")
+        b3 = calls[-1]["body"]
+        check([x["name"] for x in b3["tools"]] == ["list_known_systems", "search_similar_tasks"] and "person_history" in j["state"]["checked"], "調べ済みの道具（本人の履歴・同じ名前の確認）は次のターンでは渡さない")
         msgs += [{"role": "ai", "text": j["reply"]}, {"role": "user", "text": "手順書（写真）を送りました。読み取ってください"}]
         image = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
         script.append(message({"reply": "写真から4つ目の手順を読み取りました。この流れで合っていますか？", "chips": [], "done": True, "remaining": 0, "state": state(steps=[step1, step2, step3, step4], sources=["生産管理システム"], outputs=["日次実績集計表"], recipients=["課長"], frequency="毎日", duration="15〜30分")}))
@@ -913,14 +941,19 @@ def smoke_request():
         check(code == 200 and '<span class="badge text-bg-dark">夜勤</span>' in html and '<span class="badge text-bg-dark">昼勤・夜勤の両方</span>' in html, "改善案件の一覧に夜勤・両方のバッジが出る")
         code, html, r = get("/people/")
         check(code == 200 and "<th>勤務形態</th>" in html and "交代勤務" in html, "DX人財情報に勤務形態の列が出る")
+        check("依頼: スキルを身につけながら、一緒にやってみたい" in html and "割ける時間" not in html and "発表・共有" not in html and "学びたい技術を挙げた人" in html, "DX人財情報の意欲は依頼の「一緒にやってみたい」から出し、集めなくなった列は出さない")
         code, html, r = get("/bizmap/")
         check(code == 200 and "日報の集計" in html, "業務マップに新しい案件が載る")
         code, html, r = get("/cases/?wish=まずは相談したい")
         check(code == 200 and "相談したい業務" in html, "改善案件の一覧を「まずは相談したい」で絞れる")
+        csv_text = client.get("/cases/export.csv").data.decode("utf-8-sig")
+        check("手順（聞き取り）" in csv_text and "生産管理システムから前日の実績をCSVで出す → " in csv_text and ",夜勤," in csv_text and "AI推定の項目" in csv_text, "改善案件の CSV に勤務・手順・AI推定の項目が出る")
+        check("勤務形態" in client.get("/monthly/export.csv").data.decode("utf-8-sig") and "勤務形態" in client.get("/admin/export/respondents.csv").data.decode("utf-8-sig"), "月次・回答者の CSV に勤務形態が出る")
         client.post("/logout")
         r = client.delete(f"/survey/api/tasks/{tid}")
         check(r.status_code == 200 and r.get_json()["success"] and "日報の集計" in r.get_json()["suggested"], "取り消すと候補に戻る")
         check(not script, "用意した応答をすべて使った")
+        check("確か<br/>" not in app_module.wrap("棚の在庫数を確かめて台帳に記入する") and "まと<br/>" not in app_module.wrap("集めた数字を資料にまとめて課長に渡す"), "流れ図の改行は語の途中（確か／める、まと／める）で切らない")
     finally:
         urllib.request.urlopen = real_urlopen
 
@@ -1195,13 +1228,21 @@ def smoke_ai():
             script.append(message("ok2"))
             text = app_module._call_ai("sys", "hello", tools=tools, handlers={"echo": lambda args: (_ for _ in ()).throw(ValueError("q を指定してください"))})
             check(text == "ok2" and "q を指定してください" in calls[-1]["body"]["input"][-1]["output"], "道具の失敗は理由つきの error として返す")
+            script.append(http_error(400, '{"error":{"message":"Unknown parameter: tools","param":"tools"}}'))
+            script.append(message("plain"))
+            text = app_module._call_ai("sys", "hello", tools=tools, handlers=handlers)
+            check(text == "plain" and "tools" in calls[-2]["body"] and "tools" not in calls[-1]["body"] and "tool_choice" not in calls[-1]["body"], "中継が tools を拒否したら、道具なしでやり直して答えを得る")
+            script.append(message("plain2"))
+            n0 = len(calls)
+            text = app_module._call_ai("sys", "hello", tools=tools, handlers=handlers)
+            check(text == "plain2" and len(calls) == n0 + 1 and "tools" not in calls[-1]["body"], "一度拒否されたら、以後は最初から道具なしで送る（1往復で済む）")
 
         script.append(message("OK"))
         script.append(tool_call_message("ping", {}, "p1"))
         script.append(message("OK"))
         r = client.post("/admin/ai/test", data=AI_FORM, follow_redirects=True)
         html = r.data.decode("utf-8")
-        check(r.status_code == 200 and "接続できました" in html and "道具の呼び出し（tool calling）も通りました" in html and calls[-2]["body"]["tool_choice"] == {"type": "function", "name": "ping"} and "temperature" not in calls[-1]["raw"], "接続テスト: 応答と、道具の呼び出しが通ることを確認する")
+        check(r.status_code == 200 and "接続できました" in html and "道具の呼び出し（tool calling）も通りました" in html and calls[-2]["body"]["tool_choice"] == "auto" and "tools" in calls[-2]["body"] and "temperature" not in calls[-1]["raw"], "接続テスト: 保存し直すと道具を試し直し、応答と道具の呼び出しが通ることを確認する")
         script.append(http_error(404, "not found"))
         r = client.post("/admin/ai/test", data=AI_FORM, follow_redirects=True)
         html = r.data.decode("utf-8")

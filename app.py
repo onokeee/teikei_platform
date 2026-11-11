@@ -66,6 +66,7 @@ SYSTEM_SOURCES = {"生産管理システム", "品質システム", "設備デ�
 SELF_IMPROVE_YES = "スキルを身につけながら、一緒にやってみたい"
 SELF_IMPROVE_NO = "改善チームに任せたい"
 SELF_IMPROVE = [SELF_IMPROVE_YES, SELF_IMPROVE_NO]
+DX_WISH_OPTIONS = [SELF_IMPROVE_YES, SELF_IMPROVE_NO]
 INTAKE_MAX_QUESTIONS = 6
 INTAKE_STEP_LIMIT = 12
 WORK_PATTERNS = ["普通勤務", "交代勤務"]
@@ -1065,8 +1066,12 @@ def dx_people(workplace_id=None, wish=None):
 
     for r in Respondent.query.all():
         p = blank(r.emp_id, r.name, r.workplace, r.workplace_id)
+        if any(t.self_improve in C.SELF_IMPROVE_POSITIVE for t in r.tasks):
+            own_wish = C.SELF_IMPROVE_YES
+        else:
+            own_wish = r.c1_wish or (C.SELF_IMPROVE_NO if r.tasks else "")
         p.update(
-            respondent=r, wish=r.c1_wish or "", skills=r.skills, learn=r.learn, hours=r.c4_hours or "", share=r.c6_share or "", work_pattern=r.work_pattern or "",
+            respondent=r, wish=own_wish, skills=r.skills, learn=r.learn, hours=r.c4_hours or "", share=r.c6_share or "", work_pattern=r.work_pattern or "",
             targets=r.c5_targets or "", target_tasks=[t for t in r.tasks if t.self_improve in C.SELF_IMPROVE_POSITIVE], task_count=len(r.tasks),
         )
         people[key_for(r.emp_id, r.name)] = p
@@ -1079,7 +1084,7 @@ def dx_people(workplace_id=None, wish=None):
         if not p["work_pattern"] and m.work_pattern:
             p["work_pattern"] = m.work_pattern
 
-    wish_rank = {opt: i for i, opt in enumerate(C.C1_OPTIONS)}
+    wish_rank = {opt: i for i, opt in enumerate(C.DX_WISH_OPTIONS + C.C1_OPTIONS)}
     stance_options = next((q["options"] for q in C.MONTHLY_CORE_QUESTIONS if q["key"] == "stance"), [])
     stance_rank = {opt: i for i, opt in enumerate(stance_options)}
     rows = []
@@ -1090,7 +1095,7 @@ def dx_people(workplace_id=None, wish=None):
         p["stance_latest"] = latest.answer("stance") if latest else ""
         p["self_positive_count"] = sum(1 for m in p["monthly"] if m.answer("stance") in C.MONTHLY_KPI["self_positive"])
         p["months"] = len(p["monthly"])
-        p["wish_positive"] = p["wish"] in C.C1_POSITIVE
+        p["wish_positive"] = p["wish"] in C.C1_POSITIVE or p["wish"] in C.SELF_IMPROVE_POSITIVE
         r = p["respondent"]
         p["positive"] = (r.wants_to_improve if r is not None else False) or p["stance_latest"] in C.MONTHLY_KPI["self_positive"]
         if workplace_id and p["workplace_id"] != workplace_id:
@@ -1218,7 +1223,8 @@ def monthly_summary():
         n = len(rs)
 
         def rate(key, positive):
-            return (len([r for r in rs if r.answer(key) in positive]) / n * 100.0) if n else 0.0
+            answered = [r for r in rs if r.answer(key)]
+            return (len([r for r in answered if r.answer(key) in positive]) / len(answered) * 100.0) if answered else 0.0
 
         hours_shift = sum(r.hours_shift for r in rs)
         hours_month = sum(r.hours_shift * C.shifts_per_month(r.work_pattern) for r in rs)
@@ -1428,8 +1434,14 @@ def esc(text):
         s = s.replace(a, b)
     return s
 
-_BREAK_AFTER = set("、。，．・：；）」』】をにでがはのともへやから ")
+_BREAK_AFTER = set("、。，．・：；）」』】を ")
+_BREAK_PARTICLES = set("にでがはのともへやら")
 _BREAK_BEFORE = set("（「『【")
+
+def _can_break(prev, nxt):
+    if nxt in _BREAK_BEFORE or prev in _BREAK_AFTER:
+        return True
+    return prev in _BREAK_PARTICLES and not ("\u3041" <= nxt <= "\u309f")
 
 def wrap(text, width=14, max_lines=3):
     raw = str(text or "").strip()
@@ -1442,7 +1454,7 @@ def wrap(text, width=14, max_lines=3):
             break
         cut = width
         for i in range(width, int(width * 0.55), -1):
-            if rest[i - 1] in _BREAK_AFTER or rest[i] in _BREAK_BEFORE:
+            if _can_break(rest[i - 1], rest[i]):
                 cut = i
                 break
         if 0 < len(rest) - cut <= 2 and len(rest) <= width + 2:
@@ -2105,6 +2117,7 @@ def ai_enabled():
     return bool(_api_url()) and bool(_api_key()) and bool(_model())
 
 _LAST_ERROR = {"text": ""}
+_NO_TOOLS = set()
 
 
 def ai_status_text():
@@ -2188,12 +2201,23 @@ def _parse_response(payload):
 
 
 def _ai_turn(system, items, max_tokens=None, tools=None, tool_choice="auto"):
+    key = (_api_url(), _model())
+    if tools and key in _NO_TOOLS:
+        tools = None
+    with_reasoning = True
     body = _ai_request_body(system, items, max_tokens, tools=tools, tool_choice=tool_choice)
     try:
         status, payload = _ai_post(body)
         if status == 400 and "reasoning" in body and "reasoning" in str(payload):
             log.warning("ChatGPT API: reasoning が拒否されたため外して再試行します")
+            with_reasoning = False
             status, payload = _ai_post(_ai_request_body(system, items, max_tokens, with_reasoning=False, tools=tools, tool_choice=tool_choice))
+        if status == 400 and tools:
+            log.warning("ChatGPT API: 道具（tools）つきの呼び出しが拒否されたため、道具なしで再試行します")
+            plain = [i for i in items if not (isinstance(i, dict) and i.get("type") in ("function_call", "function_call_output"))] if isinstance(items, list) else items
+            status, payload = _ai_post(_ai_request_body(system, plain, max_tokens, with_reasoning=with_reasoning))
+            if status == 200 and isinstance(payload, dict) and not payload.get("error"):
+                _NO_TOOLS.add(key)
     except OSError as e:
         log.warning("ChatGPT API: 接続できません: %s", e)
         _LAST_ERROR["text"] = f"接続できません（{e}）"
@@ -2348,6 +2372,7 @@ INTAKE_PROMPT = """あなたは製造部「PC定型業務ゼロ化プロジェ�
 - check_duplicate: 業務名が決まったら1回呼ぶ。本人が同じ名前を登録済みなら、そのことを伝えて「前の依頼を取り消して続けるか、別の業務として続けるか」を聞く。
 - search_similar_tasks: 手順が2つそろったら1回呼び、他の人が同じ成果物を作っていれば「同じ職場の〇〇さんも登録しています。同じ流れですか？」と確かめる。
 - 道具の結果は事実として使い、結果に無いことは言わない。同じ道具を同じ引数で2回呼ばない。道具を呼んだ往復でも、最後は必ず上の JSON だけで返す。
+- 道具の結果は次のターンでは見えない。分かったこと（例: 二重登録なし、職場の常用システムは生産管理システム、同じ成果物を田中さんも作成）は state.notes に短く残し、notes にあることは調べ直さない。渡されていない道具はもう調べ済み。
 - 手順を聞く「次に何をしますか？」は回数に数えない。それ以外の質問が全部で {max_q} 回まで。remaining は「手順以外であと何回聞くつもりか」。手順が2つ以上、できるものと渡す相手、頻度、時間がそろったら done を true にし、reply は「この流れで合っていますか？」と確認の一言にする（chips は空）。
 - 相手が「違う」「直したい」と言ったら、state を直して done は false のまま確認し直す。
 - 写真が読めないときは、そう伝えて文字で教えてほしいと頼む。
@@ -2365,7 +2390,8 @@ state は次の形（必ず全部のキーを返す。不明は "" か [] か nu
   "duration": "<1回の時間。上の選択肢の中の1つ。不明なら null>",
   "shift": "<交代勤務の人だけ: 昼勤／夜勤／昼勤・夜勤の両方。普通勤務の人は「普通勤務」。不明なら null>",
   "pains": ["<困っていること>"],
-  "unknowns": ["<相手が『分からない』と答えたこと>"]
+  "unknowns": ["<相手が『分からない』と答えたこと>"],
+  "notes": ["<道具で分かったこと・確認済みのことの短いメモ>"]
 }
 
 出力はこの JSON オブジェクトだけ（前後に説明を付けない）:
@@ -2426,7 +2452,7 @@ def _finalize_prompt():
 
 
 def _intake_state_default():
-    return {"title": "", "steps": [], "sources": [], "outputs": [], "recipients": [], "frequency": None, "duration": None, "shift": None, "pains": [], "unknowns": []}
+    return {"title": "", "steps": [], "sources": [], "outputs": [], "recipients": [], "frequency": None, "duration": None, "shift": None, "pains": [], "unknowns": [], "notes": [], "checked": []}
 
 
 def _clean_state(data):
@@ -2454,10 +2480,12 @@ def _clean_state(data):
     base["frequency"] = data.get("frequency") if data.get("frequency") in C.FREQUENCIES else None
     base["duration"] = data.get("duration") if data.get("duration") in C.DURATIONS else None
     base["shift"] = data.get("shift") if data.get("shift") in C.SHIFT_OPTIONS + ["普通勤務"] else None
+    base["notes"] = [str(v).strip()[:200] for v in (data.get("notes") or []) if str(v).strip()][-12:]
+    base["checked"] = [str(v)[:120] for v in (data.get("checked") or []) if str(v).strip()][:20]
     return base
 
 
-def ai_intake(messages, state, image=None, work_pattern="", handlers=None):
+def ai_intake(messages, state, image=None, work_pattern="", handlers=None, tools=None):
     recent = messages[-24:]
     items = []
     for i, m in enumerate(recent):
@@ -2478,7 +2506,7 @@ def ai_intake(messages, state, image=None, work_pattern="", handlers=None):
     else:
         pattern_note = ""
     system = _intake_prompt() + pattern_note + "\n\n## 現在の state\n" + json.dumps(state, ensure_ascii=False)
-    data = _extract_json(_call_ai(system, items, tools=INTAKE_TOOLS, handlers=handlers))
+    data = _extract_json(_call_ai(system, items, tools=INTAKE_TOOLS if tools is None else tools, handlers=handlers))
     if not isinstance(data, dict):
         return None
     try:
@@ -2578,7 +2606,8 @@ def _search_similar_tasks(args, exclude_id=None):
             "note": "同じ人（担当が同じ）の同じ業務名は二重登録。別の人が同じできるものを作っていれば統合候補として伝える。"}
 
 
-def intake_handlers(r):
+def intake_handlers(r, used=None):
+    used = used if used is not None else set()
     def person_history(args):
         latest = MonthlyResponse.query.filter_by(emp_id=r.emp_id).order_by(MonthlyResponse.period.desc()).first() if r.emp_id else None
         monthly = None
@@ -2612,10 +2641,31 @@ def intake_handlers(r):
         return {"二重登録": bool(own), "本人の登録済み": [_task_brief(t, steps=False) for t in own],
                 "他の人の同名の業務": [_task_brief(t, steps=False) for t in others][:C.AI_TOOL_ROWS]}
 
+    def record(name, fn):
+        def run(args):
+            result = fn(args)
+            used.add(name if name != "check_duplicate" else "check_duplicate:" + normalize_text(args.get("name") or ""))
+            return result
+        return run
+
     return {
-        "person_history": person_history, "list_known_systems": list_known_systems,
-        "search_similar_tasks": lambda args: _search_similar_tasks(args), "check_duplicate": check_duplicate,
+        "person_history": record("person_history", person_history), "list_known_systems": list_known_systems,
+        "search_similar_tasks": lambda args: _search_similar_tasks(args), "check_duplicate": record("check_duplicate", check_duplicate),
     }
+
+
+def intake_tools_for(state):
+    checked = set(state.get("checked") or [])
+    title_key = "check_duplicate:" + normalize_text(state.get("title") or "")
+    out = []
+    for t in INTAKE_TOOLS:
+        name = t["function"]["name"]
+        if name == "person_history" and name in checked:
+            continue
+        if name == "check_duplicate" and title_key in checked:
+            continue
+        out.append(t)
+    return out
 
 
 def finalize_handlers(task):
@@ -2961,6 +3011,17 @@ _PREVIOUS_TEXTS = {
 }
 
 
+def _core_in_order(qs):
+    core_order = [q["key"] for q in C.MONTHLY_CORE_QUESTIONS]
+    slots = [i for i, q in enumerate(qs) if q.get("key") in core_order]
+    core_sorted = sorted((qs[i] for i in slots), key=lambda q: core_order.index(q["key"]))
+    if [qs[i]["key"] for i in slots] == [q["key"] for q in core_sorted]:
+        return qs, False
+    qs = list(qs)
+    for i, q in zip(slots, core_sorted):
+        qs[i] = q
+    return qs, True
+
 def _migrate_monthly_questions():
     core = {q["key"]: q for q in C.MONTHLY_CORE_QUESTIONS}
     stance_q = core["stance"]
@@ -3005,13 +3066,8 @@ def _migrate_monthly_questions():
             new_qs.insert(pos, item)
             present.add(cq["key"])
             touched = True
-        core_order = [q["key"] for q in C.MONTHLY_CORE_QUESTIONS]
-        slots = [i for i, q in enumerate(new_qs) if q.get("key") in core]
-        core_sorted = sorted((new_qs[i] for i in slots), key=lambda q: core_order.index(q["key"]))
-        if [new_qs[i]["key"] for i in slots] != [q["key"] for q in core_sorted]:
-            for i, q in zip(slots, core_sorted):
-                new_qs[i] = q
-            touched = True
+        new_qs, reordered = _core_in_order(new_qs)
+        touched = touched or reordered
         if touched:
             survey.set_questions(new_qs)
             changed = True
@@ -3772,9 +3828,11 @@ def api_intake():
         return jsonify({"success": False, "message": "写真は PNG・JPEG・WebP・GIF で、4MB までにしてください"}), 400
     if not ai_enabled():
         return jsonify({"success": False, "message": "AI連携が設定されていません。管理画面の「AI連携」で URL・API キー・モデル名を設定してください"}), 400
-    result = ai_intake(messages, state, image, r.work_pattern or "", handlers=intake_handlers(r))
+    used = set()
+    result = ai_intake(messages, state, image, r.work_pattern or "", handlers=intake_handlers(r, used), tools=intake_tools_for(state))
     if result is None:
         return jsonify({"success": False, "message": "AI から応答がありませんでした。もう一度送ってください（" + (_LAST_ERROR["text"] or "原因不明") + "）"}), 502
+    result["state"]["checked"] = sorted(set(state["checked"]) | used)[:20]
     steps = result["state"]["steps"]
     try:
         shown = max(0, min(int(data.get("shown") or 0), len(steps)))
@@ -4129,7 +4187,7 @@ def export_csv():
             "前の業務", "後の業務", "関わる人・部署", "情報の受取元",
             "頻度", "1回あたり時間", "担当人数", "月間時間(分)", "使用ツール", "作業の性質", "困りごと", "困りごと補足",
             "改善の希望", "自分で改善", "補足", "ステータス", "進捗段階", "段階更新日", "活動状況のひとこと", "改善方針", "担当区分", "担当者", "手順完了", "改善後月間時間(分)", "削減(分/月)",
-            "担当者確認", "AI領域", "AI優先度", "AIフラグ", "AI要約", "登録日",
+            "担当者確認", "AI領域", "AI優先度", "AIフラグ", "AI要約", "登録日", "勤務", "手順（聞き取り）", "AI推定の項目",
         ]
     )
     for t in Task.query.order_by(Task.id).all():
@@ -4146,6 +4204,7 @@ def export_csv():
                 "" if t.after_minutes is None else t.after_minutes, t.saved_minutes, "済" if t.verified else "",
                 t.ai_domain or "", t.ai_priority or "", "・".join(t.ai_flags_list), t.ai_summary or "",
                 t.created_at.strftime("%Y-%m-%d %H:%M") if t.created_at else "",
+                t.shift or "", " → ".join(x.get("action", "") for x in t.steps), "・".join(t.ai_fields_list),
             ]
         )
     data = buf.getvalue().encode("utf-8-sig")
@@ -4403,16 +4462,19 @@ def index():
         "positive": len([p for p in everyone if p["positive"]]),
         "self_now": len([p for p in everyone if latest_period and p["latest_period"] == latest_period and p["stance_latest"] in C.MONTHLY_KPI["self_positive"]]),
         "period_label": period_label(latest_period) if latest_period else "月次の回答はまだありません",
-        "share": len([p for p in everyone if p["share"] == "できる"]),
+        "learners": len([p for p in everyone if p["learn"]]),
     }
     positive_counts = Counter((p["work_pattern"] or "未設定") for p in everyone if p["positive"])
     summary["positive_by_pattern"] = {k: positive_counts[k] for k in list(C.WORK_PATTERNS) + ["未設定"] if positive_counts.get(k)}
-    c1_counts = [(opt, len([p for p in everyone if p["wish"] == opt])) for opt in C.C1_OPTIONS]
+    latest_stances = Counter(p["stance_latest"] for p in everyone if latest_period and p["latest_period"] == latest_period and p["stance_latest"])
+    stance_options = next((q["options"] for q in C.MONTHLY_CORE_QUESTIONS if q["key"] == "stance"), [])
+    wish_counts = [("依頼: " + opt, len([p for p in everyone if p["wish"] == opt])) for opt in C.DX_WISH_OPTIONS]
+    wish_counts += [("月次: " + opt, latest_stances.get(opt, 0)) for opt in stance_options]
     return render_template(
         "people/index.html",
         people=people,
         summary=summary,
-        c1_counts=c1_counts,
+        wish_counts=wish_counts,
         have=have.most_common(),
         learn=learn.most_common(),
         workplaces=Workplace.query.order_by(Workplace.sort, Workplace.id).all(),
@@ -4453,6 +4515,7 @@ def _save_ai_form():
         Setting.set(key, (request.form.get(key) or "").strip())
     db.session.commit()
     _LAST_ERROR["text"] = ""
+    _NO_TOOLS.clear()
 
 
 @bp_admin.post("/ai")
@@ -4478,7 +4541,7 @@ def test_ai_settings():
     called = []
     ping = [{"type": "function", "function": {"name": "ping", "description": "接続確認用。呼ぶと pong を返す", "parameters": {"type": "object", "properties": {}}}}]
     text2 = _call_ai("接続確認です。道具 ping を1回呼び、その結果を見てから「OK」とだけ返してください。", "ping を呼んでください。",
-                     tools=ping, handlers={"ping": lambda args: called.append(1) or {"pong": True}}, tool_choice={"type": "function", "name": "ping"})
+                     tools=ping, handlers={"ping": lambda args: called.append(1) or {"pong": True}})
     if called and text2:
         flash("接続できました。応答: " + " ".join(text.split())[:60] + "／道具の呼び出し（tool calling）も通りました", "success")
     else:
@@ -4595,7 +4658,7 @@ def add_employee():
         return redirect(url_for("admin.employees"))
     created = _upsert_employee(
         emp_id, name, (request.form.get("department") or "").strip(), (request.form.get("email") or "").strip(),
-        request.form.get("workplace_id", type=int), "manual",
+        request.form.get("workplace_id", type=int), "manual", (request.form.get("work_pattern") or "").strip() or None,
     )
     db.session.commit()
     flash("社員を追加しました。" if created else "社員情報を更新しました。", "success")
@@ -4703,11 +4766,11 @@ def remove_demo():
 def export_respondents():
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["ID", "社員ID", "氏名", "職場", "登録業務数", "月間時間(分)", "C1 改善意欲", "C2 使える技術", "C3 学びたい技術", "C4 割ける時間", "C5 取り組みたい業務", "C6 発表協力", "D1 他部署とのやりとり", "D2 重複入力", "D3 目的不明の帳票", "D4 自由記述", "登録日"])
+    w.writerow(["ID", "社員ID", "氏名", "職場", "勤務形態", "登録業務数", "月間時間(分)", "C1 改善意欲", "C2 使える技術", "C3 学びたい技術", "C4 割ける時間", "C5 取り組みたい業務", "C6 発表協力", "D1 他部署とのやりとり", "D2 重複入力", "D3 目的不明の帳票", "D4 自由記述", "登録日"])
     for r in Respondent.query.order_by(Respondent.id).all():
         w.writerow(
             [
-                r.id, r.emp_id or "", r.name, r.workplace.name if r.workplace else "", len(r.tasks), r.total_minutes,
+                r.id, r.emp_id or "", r.name, r.workplace.name if r.workplace else "", r.work_pattern or "", len(r.tasks), r.total_minutes,
                 r.c1_wish or "", "・".join(r.skills), "・".join(r.learn), r.c4_hours or "", r.c5_targets, r.c6_share or "",
                 r.d1, r.d2, r.d3, r.d4, r.created_at.strftime("%Y-%m-%d %H:%M") if r.created_at else "",
             ]
@@ -4966,11 +5029,11 @@ def export_csv():
                 texts[q["key"]] = q["text"]
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["月度", "社員ID", "氏名", "職場"] + [texts[k] for k in keys] + ["コメント", "回答日時"])
+    w.writerow(["月度", "社員ID", "氏名", "職場", "勤務形態"] + [texts[k] for k in keys] + ["コメント", "回答日時"])
     for r in MonthlyResponse.query.order_by(MonthlyResponse.period, MonthlyResponse.workplace_id, MonthlyResponse.name).all():
         a = r.answers
         w.writerow(
-            [r.period, r.emp_id, r.name, r.workplace.name if r.workplace else ""]
+            [r.period, r.emp_id, r.name, r.workplace.name if r.workplace else "", r.work_pattern or ""]
             + [a.get(k, "") for k in keys]
             + [r.comment or "", r.created_at.strftime("%Y-%m-%d %H:%M") if r.created_at else ""]
         )
@@ -5055,6 +5118,7 @@ def _clean_questions(items):
     missing = [q["text"] for q in C.MONTHLY_CORE_QUESTIONS if q["key"] not in seen]
     if missing:
         return None, "基本設問は外せません: " + "、".join(missing)
+    cleaned, _ = _core_in_order(cleaned)
     return cleaned, None
 
 @bp_monthly.post("/admin/save")
@@ -5169,6 +5233,8 @@ TEMPLATES = {
     <div class="col-6 col-md-2"><label class="form-label small mb-0">所属</label><input type="text" name="department" class="form-control form-control-sm"></div>
     <div class="col-6 col-md-2"><label class="form-label small mb-0">職場</label>
       <select name="workplace_id" class="form-select form-select-sm"><option value="">（所属から推定）</option>{% for w in workplaces %}<option value="{{ w.id }}">{{ w.name }}</option>{% endfor %}</select></div>
+    <div class="col-6 col-md-2"><label class="form-label small mb-0">勤務形態</label>
+      <select name="work_pattern" class="form-select form-select-sm"><option value="">（本人が初回に選ぶ）</option>{% for w in C.WORK_PATTERNS %}<option value="{{ w }}">{{ w }}</option>{% endfor %}</select></div>
     <div class="col-8 col-md-3"><label class="form-label small mb-0">メール</label><input type="email" name="email" class="form-control form-control-sm"></div>
     <div class="col-4 col-md-1"><button class="btn btn-sm btn-primary w-100">追加</button></div>
   </form>
@@ -7096,7 +7162,7 @@ document.getElementById("test-btn").addEventListener("click", async function () 
         </tbody>
       </table>
       </div>
-      <p class="small text-muted mt-2 mb-0">回答率の分母は社員マスタの有効人数（未登録なら管理画面の対象者数）。推計月間時間 ＝ 1シフトあたり時間の換算値 × {{ C.SHIFTS_PER_MONTH }}（1か月の出勤日数の目安）。</p>
+      <p class="small text-muted mt-2 mb-0">減った・増えた・自動化したいは ① で「ある」と答えた人のうちの割合、依頼したい・自分でやりたいは「なくしたい業務がある」と答えた人のうちの割合です（その設問に答えた人が分母）。回答率の分母は社員マスタの有効人数（未登録なら管理画面の対象者数）。推計月間時間 ＝ 1シフトあたり時間の換算値 × {{ C.SHIFTS_PER_MONTH }}（1か月の出勤日数の目安）。</p>
     </div></div>
   </div>
 </div>
@@ -7294,7 +7360,7 @@ document.getElementById("test-btn").addEventListener("click", async function () 
 {% block title %}DX人財情報{% endblock %}
 {% block content %}
 <h2 class="mb-1">DX人財情報</h2>
-<p class="text-muted">自動化依頼の「改善への関わり方」と月次アンケートの回答から、一人ひとりの意欲・使える技術・学びたいことをまとめます。</p>
+<p class="text-muted">自動化依頼で選んだ「スキルを身につけながら、一緒にやってみたい」と使える技術・学びたい技術、月次アンケートの改善の進め方から、一人ひとりの意欲をまとめます。</p>
 
 <div class="row g-3 mb-3">
   <div class="col-6 col-lg-3"><div class="card kpi-card h-100"><div class="card-body py-2">
@@ -7305,7 +7371,7 @@ document.getElementById("test-btn").addEventListener("click", async function () 
   <div class="col-6 col-lg-3"><div class="card kpi-card h-100"><div class="card-body py-2">
     <div class="kpi-label">自分で改善したい</div>
     <div class="kpi-value fs-3">{{ summary.positive }}<span class="fs-6 text-muted"> 人</span></div>
-    <div class="kpi-sub">関わり方・業務ごとの回答・月次のいずれかで「自分で取り組みたい」</div>
+    <div class="kpi-sub">依頼で「一緒にやってみたい」、または月次で「自分で取り組みたい」</div>
     {% if summary.positive_by_pattern %}<div class="kpi-sub">{% for k, v in summary.positive_by_pattern.items() %}{{ k }} {{ v }}人{% if not loop.last %}／{% endif %}{% endfor %}</div>{% endif %}
   </div></div></div>
   <div class="col-6 col-lg-3"><div class="card kpi-card h-100"><div class="card-body py-2">
@@ -7314,9 +7380,9 @@ document.getElementById("test-btn").addEventListener("click", async function () 
     <div class="kpi-sub">{{ summary.period_label }}</div>
   </div></div></div>
   <div class="col-6 col-lg-3"><div class="card kpi-card h-100"><div class="card-body py-2">
-    <div class="kpi-label">事例の発表・共有ができる</div>
-    <div class="kpi-value fs-3">{{ summary.share }}<span class="fs-6 text-muted"> 人</span></div>
-    <div class="kpi-sub">関わり方の「発表・共有」で「できる」</div>
+    <div class="kpi-label">学びたい技術を挙げた人</div>
+    <div class="kpi-value fs-3">{{ summary.learners }}<span class="fs-6 text-muted"> 人</span></div>
+    <div class="kpi-sub">勉強会・伴走の対象（下の「学びたい技術」）</div>
   </div></div></div>
 </div>
 
@@ -7333,7 +7399,7 @@ document.getElementById("test-btn").addEventListener("click", async function () 
     <select name="wish" id="dx-wish" class="form-select form-select-sm">
       <option value="">すべて</option>
       <option value="positive" {% if args.wish == 'positive' %}selected{% endif %}>自分で改善したい人</option>
-      {% for opt in C.C1_OPTIONS %}<option value="{{ opt }}" {% if args.wish == opt %}selected{% endif %}>{{ opt }}</option>{% endfor %}
+      {% for opt in C.DX_WISH_OPTIONS %}<option value="{{ opt }}" {% if args.wish == opt %}selected{% endif %}>{{ opt }}</option>{% endfor %}
     </select>
   </div>
   <button class="btn btn-sm btn-primary">表示</button>
@@ -7346,7 +7412,7 @@ document.getElementById("test-btn").addEventListener("click", async function () 
   <table class="table table-sm align-middle mb-0 dx-table">
     <thead><tr>
       <th>氏名</th><th>職場</th><th>勤務形態</th><th>意欲（自動化依頼）</th><th>月次：改善の進め方</th>
-      <th>使える技術</th><th>学びたい技術</th><th>割ける時間</th><th>発表・共有</th><th>業務</th>
+      <th>使える技術</th><th>学びたい技術</th><th>業務</th>
     </tr></thead>
     <tbody>
     {% for p in people %}
@@ -7365,8 +7431,6 @@ document.getElementById("test-btn").addEventListener("click", async function () 
       </td>
       <td class="small dx-wide">{{ p.skills|join('・') or '－' }}</td>
       <td class="small dx-wide">{{ p.learn|join('・') or '－' }}</td>
-      <td class="small text-nowrap">{{ p.hours or '－' }}</td>
-      <td class="small text-nowrap">{{ p.share or '－' }}</td>
       <td class="small dx-tasks">
         {% if p.task_count %}<div>{{ p.task_count }} 件</div>{% endif %}
         {% for t in p.target_tasks %}<div><a href="{{ url_for('cases.detail', task_id=t.id) }}">{{ t.name }}</a> <span class="text-muted">自分で</span></div>{% endfor %}
@@ -7375,7 +7439,7 @@ document.getElementById("test-btn").addEventListener("click", async function () 
       </td>
     </tr>
     {% else %}
-    <tr><td colspan="10" class="text-muted">該当する人はいません</td></tr>
+    <tr><td colspan="8" class="text-muted">該当する人はいません</td></tr>
     {% endfor %}
     </tbody>
   </table>
@@ -7385,11 +7449,11 @@ document.getElementById("test-btn").addEventListener("click", async function () 
 <div class="row g-3">
   <div class="col-lg-4">
     <div class="card h-100"><div class="card-body">
-      <h5 class="card-title">意欲（改善への関わり方）</h5>
-      {% set maxc = (c1_counts|map(attribute=1)|max) if c1_counts else 1 %}
-      {% for opt, n in c1_counts %}
+      <h5 class="card-title">意欲（依頼と直近の月次）</h5>
+      {% set maxc = (wish_counts|map(attribute=1)|max) if wish_counts else 1 %}
+      {% for opt, n in wish_counts %}
       <div class="d-flex align-items-center small mb-1">
-        <div style="width: 11rem">{{ opt }}</div>
+        <div style="width: 15rem">{{ opt }}</div>
         <div class="progress flex-grow-1" style="height: 14px"><div class="progress-bar" style="width: {{ (n / (maxc or 1) * 100)|round }}%"></div></div>
         <div style="width: 3rem" class="text-end">{{ n }} 人</div>
       </div>
@@ -9689,7 +9753,7 @@ html { scroll-behavior: smooth; }
       if (dupTask) { showDupNote(dupTask); return; }
     }
     $("rq-dup-note").classList.add("d-none");
-    conv = { title: title, messages: [], state: { title: title, steps: [], sources: [], outputs: [], recipients: [], frequency: null, duration: null, shift: null, pains: [], unknowns: [] }, done: false, lastNodes: [], shownSteps: 0, frames: [], finalDef: "" };
+    conv = { title: title, messages: [], state: { title: title, steps: [], sources: [], outputs: [], recipients: [], frequency: null, duration: null, shift: null, pains: [], unknowns: [] }, done: false, lastNodes: [], shownSteps: 0, frames: [], finalDef: "", allowDup: skipDup ? normName(title) : "" };
     $("rq-replay").classList.add("d-none");
     msgBox.innerHTML = "";
     stepsBox.innerHTML = "";
@@ -9777,6 +9841,7 @@ html { scroll-behavior: smooth; }
     var body = {
       name: conv.state.title || conv.title, state: conv.state, messages: conv.messages,
       frequency: pillValue($("rq-frequency")), duration: pillValue($("rq-duration")), wish: pillValue($("rq-wish")),
+      force: !!(conv.allowDup && normName(conv.state.title || conv.title) === conv.allowDup),
       self_improve: $("rq-self").checked, skills: pillValues($("rq-skills-have")), learn: pillValues($("rq-skills-learn")),
       shift: pillValue($("rq-shift"))
     };
