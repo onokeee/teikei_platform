@@ -2221,6 +2221,8 @@ INTAKE_PROMPT = """あなたは製造部「PC定型業務ゼロ化プロジェ�
 - すでに state に入っていることは聞き直さない。相手がまとめて書いたり、手順書や画面の写真を送ったりしたら、読み取れることをすべて state に入れ、足りないことだけ聞く。
 - 手順を聞いている間は、毎回「次に何をしますか？」と聞き、chips に「ここまで（手順はこれで全部）」を入れる。相手が「ここまで」「以上」「終わり」「最後」などと答えたら手順は確定とし、それまでは別のことを聞かない。
 - 特定の手順について聞くときは、必ず番号と手順名を添える（例:「①の『装置のトラブル状況を確認する』は、何を見て確認しますか？」）。「確認には何を使いますか？」のように、どの手順の話か分からない聞き方はしない。
+- 手順は「何を（対象）」「どこから・何で（システム・ファイル・紙・人）」「どうする」が分かる粒度で集める。「情報を集める」「資料を作る」「確認する」のように対象や手段が分からない答えには、次の手順に進む前に1つだけ掘り下げて聞く（例:「どんな情報を、どこから集めますか？」）。答えが返ったら、その手順の action を具体的に書き直す（例:「生産管理システムから前日の実績を集める」）。この掘り下げは手順の途中でもよい。
+- 初めて「次に何をしますか？」と聞くときは「全部なら『ここまで』を押してください」と添える。
 - 相手が「意味が分からない」「おかしい」と言ったら、謝らずに言い換えて、同じことを聞き直す。
 - 手順を聞く「次に何をしますか？」は回数に数えない。それ以外の質問が全部で {max_q} 回まで。remaining は「手順以外であと何回聞くつもりか」。手順が2つ以上、できるものと渡す相手、頻度、時間がそろったら done を true にし、reply は「この流れで合っていますか？」と確認の一言にする（chips は空）。
 - 相手が「違う」「直したい」と言ったら、state を直して done は false のまま確認し直す。
@@ -8988,8 +8990,11 @@ html { scroll-behavior: smooth; }
 .rq-typing span { width: 7px; height: 7px; border-radius: 50%; background: var(--ui-text-3); animation: rq-dot 1.2s infinite; }
 .rq-typing span:nth-child(2) { animation-delay: 0.2s; }
 .rq-typing span:nth-child(3) { animation-delay: 0.4s; }
-.rq-chips { display: flex; flex-wrap: wrap; gap: 0.4rem; }
-.rq-chip { animation: rq-slide 0.3s ease-out; }
+.rq-chips { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
+.rq-chips-label { width: 100%; font-size: 0.75rem; color: var(--ui-text-3); }
+.rq-chip { animation: rq-slide 0.3s ease-out; background: var(--ui-surface); border-color: var(--ui-accent); color: var(--ui-accent-text); font-weight: 600; }
+.rq-chip:hover { background: var(--ui-accent-soft); }
+.rq-chip .bi { font-size: 0.85em; margin-right: 0.25rem; }
 .rq-inputrow { display: flex; gap: 0.4rem; }
 .rq-tools { display: flex; gap: 0.4rem; flex-wrap: wrap; }
 .rq-confirm { background: var(--ui-green-soft); border-radius: var(--ui-radius-sm); padding: 0.75rem; animation: rq-slide 0.4s ease-out; }
@@ -9263,9 +9268,13 @@ html { scroll-behavior: smooth; }
   }
   function renderChips(chips) {
     chipBox.innerHTML = "";
-    (chips || []).forEach(function (c) {
-      var b = el("button", "rq-pill rq-chip", (O.frequency_hints && O.frequency_hints[c]) || c);
+    if (!(chips || []).length) return;
+    chipBox.appendChild(el("div", "rq-chips-label", "選択肢をタップするか、自由に入力してください"));
+    chips.forEach(function (c) {
+      var b = el("button", "rq-pill rq-chip");
       b.type = "button";
+      b.appendChild(el("i", "bi bi-hand-index-thumb"));
+      b.appendChild(document.createTextNode((O.frequency_hints && O.frequency_hints[c]) || c));
       b.addEventListener("click", function () { send(c); });
       chipBox.appendChild(b);
     });
