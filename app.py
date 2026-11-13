@@ -1459,6 +1459,278 @@ def board_data(tasks, done_limit=8):
         "saved_annual_hours": saved * 12 / 60.0,
     }
 
+# ===== 業務マップの区分（作業のだれ・情報の媒体・情報の流れの方法・仕事の流れの引き継ぎ方。管理画面で変えられる） =====
+MAP_VOCAB_KEY = "map_vocab"
+VOCAB_GROUPS = ("actors", "media", "methods")
+SHAPE_CHOICES = OrderedDict([("doc", "書類（下が波）"), ("cyl", "円柱"), ("stadium", "丸い端")])
+DIRECTION_CHOICES = OrderedDict([("push", "前が伝えに行く"), ("pull", "後ろが取りに行く"), ("", "決めない")])
+METHOD_KIND_CHOICES = OrderedDict([("channel", "渡し方"), ("place", "置き場")])
+USER_CHOICES = OrderedDict([("職場内", "職場内"), ("上司", "上司"), ("他部署", "他部署"), ("顧客・社外", "顧客・社外"), ("分からない", "分からない"), ("", "なし")])
+ICON_CHOICES = [
+    "bi-file-earmark-excel-fill", "bi-file-earmark-word-fill", "bi-file-earmark-ppt-fill", "bi-file-earmark-pdf-fill", "bi-filetype-csv",
+    "bi-file-earmark-text-fill", "bi-file-earmark", "bi-file-earmark-image-fill", "bi-database-fill", "bi-globe2", "bi-envelope-fill",
+    "bi-chat-dots-fill", "bi-chat-quote-fill", "bi-easel-fill", "bi-telephone-fill", "bi-person-fill", "bi-person-badge-fill",
+    "bi-people-fill", "bi-building", "bi-briefcase-fill", "bi-truck", "bi-cpu-fill", "bi-question-circle-fill", "bi-question-square",
+    "bi-folder-fill", "bi-printer-fill", "bi-clipboard-check-fill", "bi-camera-fill", "bi-usb-drive-fill", "bi-shop",
+]
+DEFAULT_MAP_VOCAB = {
+    "actors": [
+        {"key": "external", "label": "社外・顧客", "words": "顧客、社外、取引先、お客、仕入先、協力会社、外注、業者、メーカー、外部", "exclude": "作業者", "icon": "bi-briefcase-fill", "user": "顧客・社外"},
+        {"key": "dept", "label": "他部署", "words": "他部署、部署、倉庫、購買、営業、総務、経理、人事、品証、品質保証、～課、～係、～センター、～グループ", "exclude": "", "icon": "bi-building", "user": "他部署"},
+        {"key": "boss", "label": "上司・役職", "words": "上司、課長、係長、部長、班長、職長、組長、工場長、リーダー、主任、次長、副課長", "exclude": "", "icon": "bi-person-badge-fill", "user": "上司"},
+        {"key": "team", "label": "職場内", "words": "職場、チーム、メンバー、全員、みんな、本人、自分、担当、作業者、検査員、オペレーター、オペレータ、課内、班内、同僚、先輩、後輩", "exclude": "", "icon": "bi-people-fill", "user": "職場内"},
+        {"key": "system", "label": "システム（自動）", "words": "自動、RPA、マクロ、バッチ", "exclude": "", "icon": "bi-cpu-fill", "user": ""},
+        {"key": "unknown", "label": "不明", "words": "不明、分からない、わからない", "exclude": "", "icon": "bi-question-circle-fill", "user": "分からない"},
+    ],
+    "media": [
+        {"key": "excel", "label": "Excel", "words": "Excel、エクセル、xlsx、xlsm、xls、スプレッドシート、表計算", "exclude": "", "icon": "bi-file-earmark-excel-fill", "shape": "doc"},
+        {"key": "word", "label": "Word", "words": "Word、ワード、docx", "exclude": "パスワード、キーワード", "icon": "bi-file-earmark-word-fill", "shape": "doc"},
+        {"key": "ppt", "label": "PowerPoint", "words": "PowerPoint、パワーポイント、パワポ、ppt、pptx、スライド", "exclude": "", "icon": "bi-file-earmark-ppt-fill", "shape": "doc"},
+        {"key": "pdf", "label": "PDF", "words": "PDF", "exclude": "", "icon": "bi-file-earmark-pdf-fill", "shape": "doc"},
+        {"key": "csv", "label": "CSV", "words": "CSV", "exclude": "", "icon": "bi-filetype-csv", "shape": "doc"},
+        {"key": "paper", "label": "紙・帳票", "words": "紙、帳票、伝票、用紙、手書き、印刷、プリント、チェックシート、チェック表、記録表", "exclude": "", "icon": "bi-file-earmark-text-fill", "shape": "doc"},
+        {"key": "photo", "label": "写真・画像", "words": "写真、画像、スクリーンショット、スクショ", "exclude": "", "icon": "bi-file-earmark-image-fill", "shape": "doc"},
+        {"key": "system", "label": "システムのデータ", "words": "システム、DB、データベース、SAP、基幹、MES、ERP、Access、サーバ、データ", "exclude": "ファイルサーバ", "icon": "bi-database-fill", "shape": "cyl"},
+        {"key": "web", "label": "Web・画面", "words": "Web、ウェブ、ホームページ、サイト、ブラウザ、ポータル、イントラ、URL、画面", "exclude": "", "icon": "bi-globe2", "shape": "stadium"},
+        {"key": "mail", "label": "メール本文", "words": "メール本文、～メール", "exclude": "", "icon": "bi-envelope-fill", "shape": "stadium"},
+        {"key": "chat", "label": "チャット", "words": "チャット、Teams、Slack", "exclude": "", "icon": "bi-chat-dots-fill", "shape": "stadium"},
+        {"key": "verbal", "label": "口頭", "words": "口頭、伝言、聞いた内容、言われたこと、指示", "exclude": "指示書", "icon": "bi-chat-quote-fill", "shape": "stadium"},
+        {"key": "board", "label": "掲示・ホワイトボード", "words": "ホワイトボード、掲示物、掲示板、アンドン", "exclude": "", "icon": "bi-easel-fill", "shape": "stadium"},
+        {"key": "doc", "label": "その他の書類", "words": "日報、週報、月報、年報、報告書、集計表、一覧表、管理表、台帳、記録、帳簿、計画書、指示書、手順書、資料、リスト、～表、～書、～票、～簿", "exclude": "", "icon": "bi-file-earmark", "shape": "doc"},
+        {"key": "unknown", "label": "不明", "words": "", "exclude": "", "icon": "bi-question-square", "shape": "doc"},
+    ],
+    "methods": [
+        {"key": "phs", "label": "PHS", "words": "PHS、ピッチ", "exclude": "", "kind": "channel", "direction": "", "medium": "verbal"},
+        {"key": "phone", "label": "電話", "words": "電話、TEL、内線、携帯", "exclude": "", "kind": "channel", "direction": "", "medium": "verbal"},
+        {"key": "mail", "label": "メール", "words": "メール、mail、Outlook", "exclude": "", "kind": "channel", "direction": "push", "medium": "mail"},
+        {"key": "chat", "label": "チャット（Teams）", "words": "Teams、チャット、Slack", "exclude": "", "kind": "channel", "direction": "push", "medium": "chat"},
+        {"key": "fax", "label": "FAX", "words": "FAX、ファックス、ファクス", "exclude": "", "kind": "channel", "direction": "push", "medium": "paper"},
+        {"key": "meeting", "label": "会議・朝礼", "words": "会議、朝礼、朝会、ミーティング、打ち合わせ、打合せ、MTG", "exclude": "", "kind": "channel", "direction": "", "medium": "verbal"},
+        {"key": "board", "label": "掲示", "words": "掲示、ホワイトボード、貼り出、アンドン", "exclude": "", "kind": "channel", "direction": "pull", "medium": "board"},
+        {"key": "hand", "label": "手渡し", "words": "手渡し、手で渡、持っていく、持参、回覧、社内便、郵送", "exclude": "", "kind": "channel", "direction": "push", "medium": "paper"},
+        {"key": "folder", "label": "共有フォルダ", "words": "共有フォルダ、フォルダ、ファイルサーバ、共有ドライブ、SharePoint、OneDrive、NAS", "exclude": "", "kind": "place", "direction": "pull", "medium": "doc"},
+        {"key": "system", "label": "システム（登録・参照）", "words": "システム、DB、データベース、SAP、基幹、MES、ERP", "exclude": "", "kind": "place", "direction": "pull", "medium": "system"},
+        {"key": "verbal", "label": "口頭", "words": "口頭、対面、声をかけ、直接伝え", "exclude": "", "kind": "channel", "direction": "", "medium": "verbal"},
+        {"key": "other", "label": "その他", "words": "その他", "exclude": "", "kind": "channel", "direction": "", "medium": "unknown"},
+    ],
+    "handoff": {
+        "push": {"label": "前が伝えに行く", "words": "渡す、渡し、送る、送付、届ける、配る、配布、提出、報告、連絡、知らせる、伝える、共有する、掲示する、回覧する"},
+        "pull": {"label": "後ろが取りに行く", "words": "集める、回収、取りに、取ってくる、見に行く、聞く、聞き、問い合わせ、確認しに、参照、開く、ダウンロード、抽出、引き出"},
+    },
+}
+BUILTIN_VOCAB_KEYS = {g: {r["key"] for r in DEFAULT_MAP_VOCAB[g]} for g in VOCAB_GROUPS}
+_VOCAB_CACHE = {"raw": None, "value": None}
+_TILDES = str.maketrans({"〜": "~", "～": "~", "∼": "~"})
+_SUFFIX_AFTER = r"(?=$|[\s　（()）「」『』【】、。・,.:：/／!?！？]|[ぁ-ゟ])"
+
+
+def vnorm(text):
+    return unicodedata.normalize("NFKC", str(text or "")).translate(_TILDES)
+
+def _split_words(value):
+    return [w.strip() for w in re.split(r"[、,，\n]+", vnorm(value)) if w.strip() and w.strip() != "~"]
+
+def _word_pattern(word):
+    suffix = word.startswith("~")
+    w = word[1:].strip() if suffix else word
+    if not w:
+        return None
+    p = re.escape(w)
+    if re.fullmatch(r"[A-Za-z0-9 ._-]+", w):
+        p = r"(?<![A-Za-z0-9])" + p + r"(?![A-Za-z])"
+    if suffix:
+        p = r"(?<=.)" + p + _SUFFIX_AFTER
+    return p
+
+def _row_pattern(row):
+    return "|".join(p for p in (_word_pattern(w) for w in _split_words(row.get("words"))) if p)
+
+def _default_vocab():
+    return json.loads(json.dumps(DEFAULT_MAP_VOCAB))
+
+def _clean_vocab(data):
+    base = _default_vocab()
+    if not isinstance(data, dict):
+        return base
+    out = {}
+    for group in VOCAB_GROUPS:
+        rows = data.get(group) if isinstance(data.get(group), list) else []
+        defaults = {r["key"]: r for r in base[group]}
+        seen, clean, n = set(), [], 0
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            key = re.sub(r"[^a-z0-9_]", "", str(r.get("key") or "").lower())[:20]
+            if key in seen or (key and key not in defaults and not key.startswith("u")):
+                key = ""
+            if not key:
+                n += 1
+                key = f"u{n}"
+                while key in seen or key in defaults:
+                    n += 1
+                    key = f"u{n}"
+            label = str(r.get("label") or "").strip()[:30] or (defaults[key]["label"] if key in defaults else "")
+            if not label:
+                continue
+            seen.add(key)
+            row = {"key": key, "label": label, "words": "、".join(_split_words(r.get("words")))[:600], "exclude": "、".join(_split_words(r.get("exclude")))[:300]}
+            if group != "methods":
+                row["icon"] = r.get("icon") if r.get("icon") in ICON_CHOICES else (defaults[key]["icon"] if key in defaults else "bi-question-square")
+            if group == "actors":
+                row["user"] = r.get("user") if r.get("user") in USER_CHOICES else (defaults[key]["user"] if key in defaults else "")
+            if group == "media":
+                row["shape"] = r.get("shape") if r.get("shape") in SHAPE_CHOICES else "doc"
+            if group == "methods":
+                row["kind"] = r.get("kind") if r.get("kind") in METHOD_KIND_CHOICES else "channel"
+                row["direction"] = r.get("direction") if r.get("direction") in DIRECTION_CHOICES else ""
+                row["medium"] = str(r.get("medium") or "unknown")[:20]
+            clean.append(row)
+        for key, d in defaults.items():
+            if key not in seen:
+                clean.append(d)
+        out[group] = clean
+    media_keys = {r["key"] for r in out["media"]}
+    for r in out["methods"]:
+        if r["medium"] not in media_keys:
+            r["medium"] = "unknown"
+    hand = data.get("handoff") if isinstance(data.get("handoff"), dict) else {}
+    out["handoff"] = {}
+    for k, d in base["handoff"].items():
+        h = hand.get(k) if isinstance(hand.get(k), dict) else {}
+        out["handoff"][k] = {"label": str(h.get("label") or "").strip()[:20] or d["label"], "words": "、".join(_split_words(h.get("words") if "words" in h else d["words"]))[:600]}
+    return out
+
+def _compile_vocab(vocab):
+    for group in VOCAB_GROUPS:
+        for row in vocab[group]:
+            pat = _row_pattern(row)
+            row["_rx"] = re.compile(pat, re.I) if pat else None
+            row["_ex"] = _split_words(row.get("exclude"))
+    for row in vocab["handoff"].values():
+        pat = "|".join(p for p in (_word_pattern(w) for w in _split_words(row["words"])) if p)
+        row["_rx"] = re.compile(pat, re.I) if pat else None
+    return vocab
+
+def map_vocab():
+    try:
+        raw = Setting.get(MAP_VOCAB_KEY, "")
+    except Exception:
+        raw = ""
+    if _VOCAB_CACHE["raw"] != raw or _VOCAB_CACHE["value"] is None:
+        try:
+            data = json.loads(raw) if raw else None
+        except ValueError:
+            data = None
+        _VOCAB_CACHE.update(raw=raw, value=_compile_vocab(_clean_vocab(data)))
+    return _VOCAB_CACHE["value"]
+
+def vocab_public(vocab=None):
+    vocab = vocab or map_vocab()
+    out = {"handoff": {k: {"label": v["label"], "words": v["words"]} for k, v in vocab["handoff"].items()}}
+    for group in VOCAB_GROUPS:
+        out[group] = [dict({k: v for k, v in r.items() if not k.startswith("_")}, builtin=r["key"] in BUILTIN_VOCAB_KEYS[group]) for r in vocab[group]]
+    return out
+
+def _masked(text, row):
+    t = vnorm(text)
+    for ex in row["_ex"]:
+        t = t.replace(ex, " " * len(ex))
+    return t
+
+def vocab_match(group, text, vocab=None):
+    if not str(text or "").strip():
+        return None
+    for row in (vocab or map_vocab())[group]:
+        if row["_rx"] and row["_rx"].search(_masked(text, row)):
+            return row["key"]
+    return None
+
+def vocab_row(group, key, vocab=None):
+    return next((r for r in (vocab or map_vocab())[group] if r["key"] == key), None)
+
+def vocab_label(group, key):
+    if group == "handoff":
+        row = map_vocab()["handoff"].get(key)
+        return row["label"] if row else ""
+    row = vocab_row(group, key)
+    return row["label"] if row else ""
+
+def medium_of(name, hint=None, vocab=None):
+    return vocab_match("media", name, vocab) or (hint if hint and vocab_row("media", hint, vocab) else None) or "unknown"
+
+def method_of(text, vocab=None):
+    return vocab_match("methods", text, vocab) or ""
+
+def field_role(text, vocab=None):
+    """手順の system・渡し方の欄を、線の方法（line）・箱と方法（both）・箱だけ（box）のどれにするか"""
+    m = method_of(text, vocab)
+    if not m:
+        return "box", ""
+    return ("both" if vocab_row("methods", m, vocab)["kind"] == "place" else "line"), m
+
+def handoff_of(*texts, side="", method="", vocab=None):
+    vocab = vocab or map_vocab()
+    hits = set()
+    for t in texts:
+        t = vnorm(t)
+        for key, row in vocab["handoff"].items():
+            if t and row["_rx"] and row["_rx"].search(t):
+                hits.add(key)
+    if len(hits) == 1:
+        return hits.pop()
+    if side in ("push", "pull"):
+        return side
+    row = vocab_row("methods", method, vocab) if method else None
+    return row["direction"] if row else ""
+
+_HONORIFIC_RX = re.compile(r"(さん|様|さま|氏|くん|君|ちゃん)$")
+_WP_CACHE = {"at": None, "names": []}
+
+
+def _workplace_names():
+    try:
+        names = sorted({w.name for w in Workplace.query.all() if w.name}, key=len, reverse=True)
+    except Exception:
+        names = []
+    return names
+
+def _role_only(text, vocab=None):
+    row = vocab_row("actors", "boss", vocab)
+    return bool(row) and vnorm(text).strip() in set(_split_words(row.get("words")))
+
+def who_of(name, own_wp="", vocab=None):
+    """作業のだれ {actor, label, state}。職場マスタ → 区分の語 → 未確認 の順。氏名は担当者に置き換える"""
+    vocab = vocab or map_vocab()
+    raw = str(name or "").strip()
+    if not raw:
+        return {"actor": "", "label": "", "state": "unconfirmed"}
+    for w in _workplace_names():
+        if w in raw:
+            rest = raw.replace(w, " ").strip(" 　の・（）()")
+            if rest and _role_only(_HONORIFIC_RX.sub("", rest), vocab):
+                return {"actor": "boss" if w == own_wp else "dept", "label": f"{w} {_HONORIFIC_RX.sub('', rest)}", "state": "ok"}
+            if w == own_wp:
+                return {"actor": "team", "label": f"{w}の人" if not rest or vocab_match("actors", rest, vocab) == "team" else raw, "state": "ok"}
+            return {"actor": "dept", "label": raw, "state": "ok"}
+    bare = _HONORIFIC_RX.sub("", raw).strip()
+    if _role_only(bare, vocab):
+        return {"actor": "boss", "label": f"{own_wp} {bare}".strip() if own_wp else bare, "state": "ok"}
+    if _HONORIFIC_RX.search(raw) and bare and bare != raw:
+        return {"actor": "team", "label": f"{own_wp or '職場'}の担当者", "state": "ok"}
+    key = vocab_match("actors", raw, vocab)
+    if key == "unknown":
+        return {"actor": "unknown", "label": "利用者不明", "state": "unknown"}
+    if key == "team" and own_wp and normalize_text(raw) in ("職場内", "職場", "本人", "自分", "全員", "みんな", "課内", "班内"):
+        return {"actor": "team", "label": f"{own_wp}の人", "state": "ok"}
+    if key:
+        return {"actor": key, "label": raw, "state": "ok"}
+    return {"actor": "", "label": raw, "state": "unconfirmed"}
+
+def actor_user(actor, vocab=None):
+    row = vocab_row("actors", actor, vocab) if actor else None
+    return row.get("user", "") if row else ""
+
+
 # ===== 業務マップ（1枚の流れ図: グラフ生成、Mermaid 変換、手修正のマージ、つながりの表） =====
 _ESCAPES = [
     ('"', "”"), ("#", "＃"), ("<", "＜"), (">", "＞"), ("&", "＆"), ("`", "'"), ("|", "｜"),
@@ -1468,171 +1740,45 @@ _ESCAPES = [
 
 SHAPES = {
     "rect": ('["', '"]'),
-    "round": ('("', '")'),
     "stadium": ('(["', '"])'),
     "cyl": ('[("', '")]'),
-    "para": ('[/"', '"/]'),
-    "hex": ('{{"', '"}}'),
 }
-
-NODE_KINDS = OrderedDict([
-    ("task", ("業務", "", "rect")),
-    ("done", ("完了した業務", "bi-check-circle-fill", "rect")),
-    ("system", ("システム・データ", "bi-database-fill", "cyl")),
-    ("folder", ("共有フォルダ", "bi-folder-fill", "cyl")),
-    ("excel", ("Excel", "bi-file-earmark-excel-fill", "doc")),
-    ("word", ("Word", "bi-file-earmark-word-fill", "doc")),
-    ("ppt", ("PowerPoint", "bi-file-earmark-ppt-fill", "doc")),
-    ("pdf", ("PDF", "bi-file-earmark-pdf-fill", "doc")),
-    ("csv", ("CSV", "bi-filetype-csv", "doc")),
-    ("paper", ("紙・帳票", "bi-file-earmark-text-fill", "doc")),
-    ("doc", ("書類・データ", "bi-file-earmark", "doc")),
-    ("mail", ("メール", "bi-envelope-fill", "round")),
-    ("chat", ("チャット・Teams", "bi-chat-dots-fill", "round")),
-    ("phone", ("電話", "bi-telephone-fill", "round")),
-    ("web", ("Web・画面", "bi-globe2", "round")),
-    ("person", ("ヒト", "bi-person-fill", "stadium")),
-    ("team", ("職場・チーム", "bi-people-fill", "stadium")),
-    ("org", ("他部署・社外", "bi-building", "stadium")),
-    ("unknown", ("利用者不明", "bi-question-circle-fill", "stadium")),
-    ("note", ("前後の業務", "", "round")),
-    ("goods", ("モノ", "bi-box-seam-fill", "hex")),
-    ("place", ("場所", "bi-geo-alt-fill", "stadium")),
-    ("pending", ("未登録の業務（月次アンケート）", "bi-hourglass-split", "rect")),
+CLS_LABELS = OrderedDict([
+    ("task", "登録済みの業務"), ("done", "完了した業務"), ("work", "他の人・部署の作業"), ("pending", "未登録の業務（月次）"), ("warn", "使う人が分からない"),
+    ("source", "取り出し元の情報"), ("output", "できるもの"), ("dupout", "同じできるもの（統合候補）"),
 ])
-_PERSON_RX = r"人から|聞く|聞き|聞いて|口頭|担当者|上司|課長|係長|班長|職長|組長|部長|工場長|リーダー|作業者|オペレータ|さん|先輩|同僚|本人"
-_TEAM_RX = r"職場|チーム|メンバー|全員|みんな|会議|打ち合わせ|打合せ|朝礼|ミーティング"
-_ORG_RX = r"他部署|部署|社外|顧客|取引先|お客|仕入先|協力会社|業者|メーカー|購買|営業|総務|経理|人事|品証|品質保証|\S(課|部|係|室|センター|グループ)$"
-KIND_RULES = [
-    ("excel", 0, r"Excel|エクセル|xlsx|xlsm|(?<![A-Za-z])xls(?![A-Za-z])|スプレッドシート|表計算"),
-    ("word", 0, r"(?<![A-Za-z])Word(?![A-Za-z])|(?<![スー])ワード|docx"),
-    ("ppt", 0, r"PowerPoint|パワーポイント|パワポ|(?<![A-Za-z])pptx?(?![A-Za-z])|スライド"),
-    ("pdf", 0, r"PDF"),
-    ("csv", 0, r"CSV"),
-    ("paper", 0, r"紙|帳票|伝票|用紙|手書き|印刷|プリント|FAX|ファックス|ファクス|チェックシート|チェック表|記録表"),
-    ("system", 0, r"システム|(?<![A-Za-z])DB(?![A-Za-z])|データベース|(?<![A-Za-z])(SAP|MES|ERP)(?![A-Za-z])|基幹|Access|(?<!ファイル)サーバ"),
-    ("mail", 1, r"メール|(?<![A-Za-z])e?-?mail(?![A-Za-z])|Outlook|アウトルック"),
-    ("chat", 1, r"Teams|チームズ|チャット|Slack|(?<![A-Za-z])LINE(?![A-Za-z])"),
-    ("phone", 1, r"電話|(?<![A-Za-z])TEL(?![A-Za-z])|内線|携帯"),
-    ("web", 1, r"(?<![A-Za-z])Web(?![A-Za-z])|ウェブ|ホームページ|サイト|ブラウザ|ポータル|イントラ|(?<![A-Za-z])URL(?![A-Za-z])"),
-    ("folder", 2, r"フォルダ|ファイルサーバ|共有ドライブ|SharePoint|シェアポイント|OneDrive|(?<![A-Za-z])NAS(?![A-Za-z])"),
-    ("system", 2, r"データ"),
-    ("web", 2, r"画面"),
-    ("person", 2, _PERSON_RX),
-    ("team", 2, _TEAM_RX),
-    ("org", 2, _ORG_RX),
-    ("doc", 2, r"日報|週報|月報|年報|報告書|集計表|一覧表|管理表|台帳|記録|帳簿|計画書|指示書|手順書|資料|リスト|表$|書$|票$"),
-]
-WHO_RULES = [("person", 0, _PERSON_RX), ("team", 0, _TEAM_RX), ("org", 0, _ORG_RX)]
-FIXED_KIND = {"task": "task", "done": "done", "note": "note", "goods": "goods", "place": "place", "warn": "unknown", "system": "system", "pending": "pending"}
-WHO_DEFAULT = {"wp": "team", "ext": "org", "person": "person"}
-_KIND_RX = [(k, t, re.compile(p, re.I)) for k, t, p in KIND_RULES]
-_WHO_RX = [(k, t, re.compile(p, re.I)) for k, t, p in WHO_RULES]
-
-
-def _match_kind(text, rules, max_tier=9):
-    best = None
-    for i, (kind, tier, rx) in enumerate(rules):
-        if tier > max_tier:
-            continue
-        for m in rx.finditer(text):
-            key = (tier, -m.start(), i)
-            if best is None or key < best[0]:
-                best = (key, kind)
-    return best[1] if best else None
-
-def node_kind(cls, text, hint=None):
-    text = str(text or "")
-    if cls in FIXED_KIND:
-        return FIXED_KIND[cls]
-    if cls in WHO_DEFAULT:
-        return _match_kind(text, _WHO_RX) or _match_kind(text, _KIND_RX, max_tier=1) or WHO_DEFAULT[cls]
-    kind = _match_kind(text, _KIND_RX)
-    if kind in (None, "doc") and hint in NODE_KINDS:
-        return hint
-    return kind or ("task" if cls == "manual" else "doc")
-
-def kind_icon_html(cls, text, hint=None):
-    kind = node_kind(cls, text, hint)
-    icon = NODE_KINDS[kind][1]
-    return f'<i class="bi {icon} fi fi-{kind}"></i>' if icon else ""
-
-_SHAPE_GLYPHS = {
-    "rect": '<rect x="1" y="1.5" width="16" height="11" rx="1.5"/>',
-    "round": '<rect x="1" y="1.5" width="16" height="11" rx="4"/>',
-    "stadium": '<rect x="1" y="1.5" width="16" height="11" rx="5.5"/>',
-    "cyl": '<path d="M1 4C1 1.4 17 1.4 17 4V10C17 12.6 1 12.6 1 10Z M1 4C1 6.6 17 6.6 17 4"/>',
-    "doc": '<path d="M1 1.5H17V10.6C13.5 8.4 10.5 13.6 6.2 11.8C4.2 11 2.6 10.8 1 11.4Z"/>',
-    "hex": '<path d="M4.5 1.5H13.5L17 7L13.5 12.5H4.5L1 7Z"/>',
-    "para": '<path d="M4 1.5H17L14 12.5H1Z"/>',
-}
-LEGEND_SKIP = {"task", "done", "pending"}
-
-
-def shape_glyph(shape):
-    return f'<svg class="ks" viewBox="0 0 18 14" aria-hidden="true">{_SHAPE_GLYPHS.get(shape, _SHAPE_GLYPHS["rect"])}</svg>'
-
-def kind_legend_html(kinds):
-    chips = []
-    for k in kinds:
-        if k in LEGEND_SKIP or k not in NODE_KINDS:
-            continue
-        label, icon, shape = NODE_KINDS[k]
-        ic = f'<i class="bi {icon} fi fi-{k}"></i>' if icon else ""
-        chips.append(f'<span class="kind-chip">{shape_glyph(shape)}{ic}{label}</span>')
-    if not chips:
-        return ""
-    return '<div class="kind-legend"><span class="legend-title">形・アイコン</span>' + "".join(chips) + "</div>"
-
-def kind_config():
-    return {
-        "kinds": {k: list(v) for k, v in NODE_KINDS.items()},
-        "rules": [list(r) for r in KIND_RULES],
-        "who": [list(r) for r in WHO_RULES],
-        "fixed": FIXED_KIND,
-        "who_default": WHO_DEFAULT,
-        "glyphs": _SHAPE_GLYPHS,
-        "skip": sorted(LEGEND_SKIP),
-    }
-
-def flow_view(d):
-    if d is None or d.empty:
-        return "", ""
-    return d.render(), kind_legend_html(d.kinds_used())
-CLS_LABELS = {
-    "task": "業務", "done": "業務（完了）", "source": "情報源（帳票・人・メール）", "system": "システム", "output": "アウトプット", "dupout": "同じアウトプット（統合候補）",
-    "wp": "職場", "ext": "他部署・社外", "person": "ヒト", "warn": "要確認", "note": "メモ", "manual": "追加ノード", "pending": "未登録の業務（月次）",
-}
-
+CLS_TYPE = {"task": "work", "done": "work", "work": "work", "pending": "work", "warn": "work", "source": "info", "output": "info", "dupout": "info"}
 CLASS_DEFS = [
     "classDef task fill:#e7f1ff,stroke:#0d6efd,color:#052c65",
     "classDef done fill:#d1e7dd,stroke:#198754,color:#0f5132",
-    "classDef source fill:#fff3cd,stroke:#ffc107,color:#664d03",
-    "classDef system fill:#f8f9fa,stroke:#6c757d,color:#343a40",
-    "classDef output fill:#ffffff,stroke:#0d6efd,color:#052c65,stroke-dasharray:4 2",
-    "classDef dupout fill:#fff3cd,stroke:#fd7e14,color:#664d03,stroke-width:2px,stroke-dasharray:4 2",
-    "classDef person fill:#fde2e4,stroke:#dc3545,color:#842029",
-    "classDef wp fill:#e7f1ff,stroke:#0d6efd,color:#052c65",
-    "classDef ext fill:#fff3cd,stroke:#fd7e14,color:#664d03",
-    "classDef goods fill:#e2f0d9,stroke:#198754,color:#0f5132",
-    "classDef place fill:#f1f3f5,stroke:#adb5bd,color:#343a40",
-    "classDef warn fill:#f8d7da,stroke:#dc3545,color:#842029",
-    "classDef note fill:#ffffff,stroke:#adb5bd,color:#6c757d,stroke-dasharray:2 2",
-    "classDef manual fill:#e9d5ff,stroke:#6f42c1,color:#3b0764",
+    "classDef work fill:#ffffff,stroke:#6c757d,color:#343a40",
     "classDef pending fill:#f8f9fa,stroke:#adb5bd,color:#6c757d,stroke-dasharray:4 3",
+    "classDef warn fill:#f8d7da,stroke:#dc3545,color:#842029",
+    "classDef source fill:#fff3cd,stroke:#e0a800,color:#664d03",
+    "classDef output fill:#ffffff,stroke:#0d6efd,color:#052c65",
+    "classDef dupout fill:#ffe5d0,stroke:#fd7e14,color:#7a3a00,stroke-width:2px",
 ]
-
-ARROWS = {"solid": "-->", "dotted": "-.->", "thick": "==>", "line": "---"}
-STYLE_KIND = {"solid": "info", "thick": "goods", "dotted": "seq", "line": "relation"}
-KIND_STYLE = {"info": "solid", "goods": "thick", "seq": "dotted", "relation": "line", "manual": "solid"}
-
+INPUT_SOURCE_MAP = {
+    "紙の帳票": ("paper", "", "紙の帳票"), "他のExcel": ("excel", "", "他のExcel"), "メール": ("mail", "mail", "メールで届く内容"),
+    "人から聞く": ("verbal", "verbal", "人から聞く内容"), "その他": ("unknown", "", "その他の情報"),
+}
+LEGACY_CLS = {
+    "task": ("work", "task"), "done": ("work", "done"), "pending": ("work", "pending"), "warn": ("work", "warn"), "work": ("work", "work"),
+    "wp": ("work", "work"), "ext": ("work", "work"), "person": ("work", "work"), "note": ("work", "work"), "place": ("work", "work"), "goods": ("work", "work"),
+    "source": ("info", "source"), "system": ("info", "source"), "output": ("info", "output"), "dupout": ("info", "dupout"),
+}
+_SHAPE_GLYPHS = {
+    "rect": '<rect x="1" y="1.5" width="16" height="11" rx="0.5"/>',
+    "stadium": '<rect x="1" y="1.5" width="16" height="11" rx="5.5"/>',
+    "cyl": '<path d="M1 4C1 1.4 17 1.4 17 4V10C17 12.6 1 12.6 1 10Z M1 4C1 6.6 17 6.6 17 4"/>',
+    "doc": '<path d="M1 1.5H17V10.6C13.5 8.4 10.5 13.6 6.2 11.8C4.2 11 2.6 10.8 1 11.4Z"/>',
+}
 
 def esc(text):
     s = str(text or "").strip()
     for a, b in _ESCAPES:
         s = s.replace(a, b)
     return s
-
 _BREAK_AFTER = set("、。，．・：；）」』】を ")
 _BREAK_PARTICLES = set("にでがはのともへやら")
 _BREAK_BEFORE = set("（「『【")
@@ -1670,6 +1816,59 @@ def nid(prefix, text):
 def scope_key(workplace_id=None, domain_id=None):
     return f"wp:{workplace_id or 0}|dom:{domain_id or 0}"
 
+def shape_glyph(shape):
+    return f'<svg class="ks" viewBox="0 0 18 14" aria-hidden="true">{_SHAPE_GLYPHS.get(shape, _SHAPE_GLYPHS["rect"])}</svg>'
+
+def info_shape(medium):
+    row = vocab_row("media", medium or "unknown")
+    shape = row["shape"] if row else "doc"
+    return shape if shape in ("doc", "cyl", "stadium") else "doc"
+
+def node_icon(n):
+    """箱のアイコン（クラス, 色の印）。情報は媒体、作業はだれ、登録済みの業務は付けない（完了は ✓）"""
+    if n.get("type") == "info":
+        medium = n.get("medium") or "unknown"
+        row = vocab_row("media", medium) or vocab_row("media", "unknown")
+        return (row["icon"] if row else "bi-question-square"), f"m-{medium}"
+    cls = n.get("cls")
+    if cls == "done":
+        return "bi-check-circle-fill", "done"
+    if cls == "task":
+        return "", ""
+    if cls == "pending":
+        return "bi-hourglass-split", "pending"
+    if n.get("who_state") == "unconfirmed" or not n.get("actor"):
+        return "bi-question-circle", "who-unconfirmed"
+    row = vocab_row("actors", n["actor"])
+    return (row["icon"] if row else "bi-person-fill"), f"a-{n['actor']}"
+
+def show_who(n):
+    who = (n.get("who") or "").strip()
+    return n.get("type") == "work" and n.get("cls") in ("work", "warn") and n.get("who_state") in ("ok", "unknown") and who and normalize_text(who) != normalize_text(n.get("text"))
+
+def node_label(n):
+    icon, mark = node_icon(n)
+    head = f"<i class='bi {icon} fi {mark}'></i> " if icon else ""
+    body = wrap(n["text"], n.get("width") or 14)
+    if show_who(n):
+        return head + "<b>" + esc(n["who"]) + "</b><br/>" + body
+    return head + body
+
+def edge_label(e):
+    if (e.get("label") or "").strip():
+        return e["label"].strip()
+    if e.get("type") == "work":
+        return vocab_label("handoff", e.get("handoff")) if e.get("handoff") in ("push", "pull") else ""
+    if e.get("show_method") and e.get("method"):
+        return vocab_label("methods", e["method"])
+    return ""
+
+def show_method_for(method, medium):
+    """媒体から分かる方法（システムのデータをシステムで見る、メール本文をメールで受け取る）はラベルに書かない"""
+    row = vocab_row("methods", method) if method else None
+    return bool(row) and row.get("medium") != (medium or "unknown")
+
+
 class Diagram:
     def __init__(self, direction="LR"):
         self.direction = direction
@@ -1678,13 +1877,17 @@ class Diagram:
         self.edges = OrderedDict()
         self.clicks = OrderedDict()
 
-    def node(self, node_id, text, cls="task", subgraph=None, width=14, hint=None):
+    def node(self, node_id, text, cls="task", subgraph=None, width=14, hint=None, medium=None, who=None):
         if node_id not in self.nodes:
-            kind = node_kind(cls, text, hint)
-            self.nodes[node_id] = {
-                "text": str(text or "").strip(), "cls": cls, "kind": kind, "shape": NODE_KINDS[kind][2], "hint": hint,
-                "width": width, "group": None, "group_title": None,
-            }
+            ntype = CLS_TYPE.get(cls, "work")
+            n = {"text": str(text or "").strip(), "cls": cls, "type": ntype, "hint": hint, "width": width, "group": None, "group_title": None,
+                 "medium": "", "actor": "", "who": "", "who_state": ""}
+            if ntype == "info":
+                n["medium"] = medium or medium_of(n["text"], hint)
+            else:
+                w = who or {"actor": "", "label": "", "state": "unconfirmed"}
+                n.update(actor=w.get("actor") or "", who=w.get("label") or "", who_state=w.get("state") or "unconfirmed")
+            self.nodes[node_id] = n
         if subgraph is not None:
             key, title = subgraph
             self.subgraphs.setdefault(key, title)
@@ -1692,19 +1895,28 @@ class Diagram:
             self.nodes[node_id]["group_title"] = title
         return node_id
 
-    def edge(self, a, b, label="", style="solid"):
+    def edge(self, a, b, kind="info", label="", method="", handoff="", show_method=False, inferred=False):
         if not a or not b or a == b:
             return
-        key = (a, b)
-        if key in self.edges:
-            old = self.edges[key]
-            if old["style"] != "solid" and style == "solid":
-                self.edges[key] = {"label": label or old["label"], "style": style}
-            return
-        self.edges[key] = {"label": label, "style": style}
+        new = {"type": kind, "label": label, "method": method or "", "handoff": handoff or "", "show_method": bool(show_method), "inferred": bool(inferred)}
+        old = self.edges.get((a, b))
+        if old is None:
+            self.edges[(a, b)] = new
+        elif old["inferred"] and not new["inferred"]:
+            self.edges[(a, b)] = dict(new, method=new["method"] or old["method"], show_method=new["show_method"] or old["show_method"])
+        elif not old["method"] and new["method"]:
+            old.update(method=new["method"], show_method=new["show_method"])
 
     def click(self, node_id, url, tooltip=""):
         self.clicks[node_id] = (url, tooltip)
+
+    def derive_roles(self):
+        """情報の箱の色を線の向きから決める（登録済みの業務が作る＝できるもの、それ以外＝取り出し元）"""
+        made = {b for (a, b), e in self.edges.items() if e["type"] == "info" and self.nodes.get(a, {}).get("cls") in ("task", "done")}
+        for i, n in self.nodes.items():
+            if n["type"] == "info" and n["cls"] in ("source", "output"):
+                n["cls"] = "output" if i in made else "source"
+        return self
 
     @property
     def empty(self):
@@ -1715,18 +1927,17 @@ class Diagram:
         return len(self.nodes)
 
     def kinds_used(self):
-        used = {n["kind"] for n in self.nodes.values()}
-        return [k for k in NODE_KINDS if k in used]
+        return sorted({n["medium"] for n in self.nodes.values() if n["type"] == "info"})
 
     # ---- Mermaid ----
     def _node_line(self, node_id):
         n = self.nodes[node_id]
-        icon = NODE_KINDS[n["kind"]][1]
-        label = (f"<i class='bi {icon} fi fi-{n['kind']}'></i> " if icon else "") + wrap(n["text"], n.get("width") or 14)
-        if n["shape"] in SHAPES:
-            open_, close = SHAPES[n["shape"]]
-            return f"{node_id}{open_}{label}{close}:::{n['cls']}"
-        return f'{node_id}:::{n["cls"]}@{{ shape: {n["shape"]}, label: "{label}" }}'
+        label = node_label(n)
+        shape = info_shape(n["medium"]) if n["type"] == "info" else "rect"
+        if shape == "doc":
+            return f'{node_id}:::{n["cls"]}@{{ shape: doc, label: "{label}" }}'
+        open_, close = SHAPES[shape]
+        return f"{node_id}{open_}{label}{close}:::{n['cls']}"
 
     def render(self):
         lines = [f"flowchart {self.direction}"]
@@ -1743,20 +1954,21 @@ class Diagram:
         for i, n in self.nodes.items():
             if not n.get("group"):
                 lines.append("  " + self._node_line(i))
-        for (a, b), e in self.edges.items():
-            label, style = e["label"], e["style"]
-            if label:
-                lab = esc(label)
-                if style == "dotted":
-                    lines.append(f'  {a} -. "{lab}" .-> {b}')
-                elif style == "thick":
-                    lines.append(f'  {a} == "{lab}" ==> {b}')
-                elif style == "line":
-                    lines.append(f'  {a} -- "{lab}" --- {b}')
-                else:
-                    lines.append(f'  {a} -- "{lab}" --> {b}')
+        work_links = []
+        for idx, ((a, b), e) in enumerate(self.edges.items()):
+            lab = esc(edge_label(e))
+            if e.get("inferred"):
+                lines.append(f'  {a} -. "{lab}" .-> {b}' if lab else f"  {a} -.-> {b}")
+            elif e["type"] == "work":
+                lines.append(f'  {a} == "{lab}" ==> {b}' if lab else f"  {a} ==> {b}")
             else:
-                lines.append(f"  {a} {ARROWS.get(style, '-->')} {b}")
+                lines.append(f'  {a} -- "{lab}" --> {b}' if lab else f"  {a} --> {b}")
+            if e["type"] == "work":
+                work_links.append(str(idx))
+        if self.edges:
+            lines.append("  linkStyle default stroke:#5b8def,stroke-width:1.4px")
+        if work_links:
+            lines.append(f"  linkStyle {','.join(work_links)} stroke:#495057,stroke-width:2.6px")
         for i, (url, tip) in self.clicks.items():
             lines.append(f'  click {i} "{url}" "{esc(tip)}"')
         return "\n".join(lines)
@@ -1767,8 +1979,8 @@ class Diagram:
         for i, n in self.nodes.items():
             nodes.append(
                 {
-                    "id": i, "text": n["text"], "cls": n["cls"], "kind": n["kind"], "shape": n["shape"], "hint": n.get("hint"),
-                    "group": n.get("group"), "group_title": n.get("group_title"),
+                    "id": i, "text": n["text"], "cls": n["cls"], "type": n["type"], "medium": n["medium"], "actor": n["actor"], "who": n["who"],
+                    "who_state": n["who_state"], "hint": n.get("hint"), "group": n.get("group"), "group_title": n.get("group_title"),
                     "url": self.clicks[i][0] if i in self.clicks else None,
                     "source": "auto", "x": None, "y": None, "color": None, "text_edited": False,
                 }
@@ -1777,29 +1989,89 @@ class Diagram:
         for (a, b), e in self.edges.items():
             edges.append(
                 {
-                    "id": f"{a}->{b}", "from": a, "to": b, "label": e["label"], "style": e["style"],
-                    "kind": STYLE_KIND.get(e["style"], "info"), "source": "auto", "reversed": False, "label_edited": False,
+                    "id": f"{a}->{b}", "from": a, "to": b, "type": e["type"], "method": e["method"], "handoff": e["handoff"],
+                    "show_method": e["show_method"], "inferred": e["inferred"], "label": e["label"], "source": "auto", "reversed": False, "label_edited": False,
                 }
             )
-        return {"nodes": nodes, "edges": edges, "suppressed_nodes": [], "suppressed_edges": [], "view": None}
+        return {"schema": 2, "nodes": nodes, "edges": edges, "suppressed_nodes": [], "suppressed_edges": [], "view": None}
 
 def graph_to_diagram(graph, direction="LR"):
     d = Diagram(direction)
     for n in graph.get("nodes", []):
-        cls = n.get("cls") or "manual"
+        ntype = n.get("type") if n.get("type") in ("work", "info") else CLS_TYPE.get(n.get("cls"), "work")
+        cls = n.get("cls") if CLS_TYPE.get(n.get("cls")) == ntype else ("source" if ntype == "info" else "work")
         sub = (n["group"], n.get("group_title") or n["group"]) if n.get("group") else None
-        d.node(n["id"], n.get("text") or "", cls, subgraph=sub, hint=n.get("hint"))
+        who = None if ntype == "info" else {"actor": n.get("actor") or "", "label": n.get("who") or "", "state": n.get("who_state") or ("ok" if n.get("actor") else "unconfirmed")}
+        d.node(n["id"], n.get("text") or "", cls, subgraph=sub, hint=n.get("hint"), medium=n.get("medium") or None, who=who)
         if n.get("url"):
             d.click(n["id"], n["url"], "案件詳細を開く")
+    types = {i: x["type"] for i, x in d.nodes.items()}
     for e in graph.get("edges", []):
         a, b = (e["to"], e["from"]) if e.get("reversed") else (e["from"], e["to"])
-        style = e.get("style") or KIND_STYLE.get(e.get("kind") or "info", "solid")
-        d.edge(a, b, e.get("label") or "", style)
-    return d
+        if a not in types or b not in types:
+            continue
+        kind = e.get("type") if e.get("type") in ("work", "info") else ("work" if types[a] == "work" and types[b] == "work" else "info")
+        d.edge(a, b, kind, e.get("label") or "", e.get("method") or "", e.get("handoff") or "", bool(e.get("show_method")), bool(e.get("inferred")) or (types[a] == "info" and types[b] == "info"))
+    return d.derive_roles()
+
+def upgrade_graph(saved):
+    """保存済みの手修正を新しい形（作業・情報・2種類の線）に読み替える。ID は変えない"""
+    if not isinstance(saved, dict) or saved.get("schema") == 2:
+        return saved
+    out = dict(saved)
+    nodes, types = [], {}
+    for n in saved.get("nodes") or []:
+        if not isinstance(n, dict) or not n.get("id"):
+            continue
+        m = dict(n)
+        old = m.get("cls") or "manual"
+        if old in LEGACY_CLS:
+            m["type"], m["cls"] = LEGACY_CLS[old]
+        else:
+            m["type"] = "info" if medium_of(m.get("text")) != "unknown" else "work"
+            m["cls"] = "source" if m["type"] == "info" else "work"
+        if old in ("wp", "ext", "person", "warn") and m.get("text_edited"):
+            m["who"], m["who_edited"] = m.get("text"), True
+        if old == "system":
+            m["medium"] = "system"
+        types[m["id"]] = m["type"]
+        nodes.append(m)
+    edges = []
+    for e in saved.get("edges") or []:
+        if not isinstance(e, dict) or not e.get("from") or not e.get("to"):
+            continue
+        m = dict(e)
+        kind = m.get("kind")
+        a, b = m["from"], m["to"]
+        if kind in ("seq", "relation", "goods"):
+            m["type"] = "work"
+        elif kind == "info":
+            m["type"] = "info"
+        else:
+            m["type"] = "work" if types.get(a) == "work" and types.get(b) == "work" else "info"
+        label = (m.get("label") or "").strip()
+        if label in ("次の業務", "前の業務", "関与"):
+            m["label"] = ""
+        elif label and m["type"] == "info" and method_of(label):
+            m.update(method=method_of(label), show_method=True, method_edited=True, label="")
+        if m["type"] == "info" and types.get(a) == "info" and types.get(b) == "info":
+            m["inferred"] = True
+        if m["type"] == "info" and types.get(a) == "work" and types.get(b) == "work":
+            m["type"] = "work"
+        edges.append(m)
+    out.update(nodes=nodes, edges=edges, schema=2)
+    return out
+
+def _same_box(a, b):
+    if a.get("type") != b.get("type"):
+        return False
+    if a.get("type") == "info":
+        return normalize_text(a.get("text")) == normalize_text(b.get("text"))
+    return normalize_text(a.get("text")) == normalize_text(b.get("text")) and normalize_text(a.get("who")) == normalize_text(b.get("who"))
 
 def merge_graph(auto, saved):
     result = {
-        "nodes": [], "edges": [], "suppressed_nodes": [], "suppressed_edges": [], "view": None,
+        "schema": 2, "nodes": [], "edges": [], "suppressed_nodes": [], "suppressed_edges": [], "view": None,
         "new_node_ids": [], "needs_layout": True,
     }
     if not saved:
@@ -1807,6 +2079,7 @@ def merge_graph(auto, saved):
         result["edges"] = [dict(e) for e in auto["edges"]]
         return result
 
+    saved = upgrade_graph(saved)
     s_nodes = {n["id"]: n for n in saved.get("nodes", []) if n.get("id")}
     s_edges = {e["id"]: e for e in saved.get("edges", []) if e.get("id")}
     sup_n = set(saved.get("suppressed_nodes") or [])
@@ -1822,27 +2095,47 @@ def merge_graph(auto, saved):
             if sn.get("text_edited") and sn.get("text"):
                 m["text"] = sn["text"]
                 m["text_edited"] = True
+            if sn.get("medium_edited") and m["type"] == "info" and vocab_row("media", sn.get("medium")):
+                m["medium"], m["medium_edited"] = sn["medium"], True
+            if sn.get("who_edited") and m["type"] == "work":
+                m["who"], m["who_edited"] = sn.get("who") or "", True
+                if vocab_row("actors", sn.get("actor")):
+                    m["actor"], m["who_state"] = sn["actor"], "unknown" if sn["actor"] == "unknown" else "ok"
+                else:
+                    w = who_of(m["who"])
+                    m["actor"], m["who_state"] = w["actor"], w["state"]
         else:
             result["new_node_ids"].append(n["id"])
         nodes.append(m)
-    auto_ids = {n["id"] for n in nodes}
+    by_id = {n["id"]: n for n in nodes}
+    redirect = {}
     for sn in saved.get("nodes", []):
-        if sn.get("source") == "manual" and sn.get("id") and sn["id"] not in auto_ids:
+        if sn.get("source") == "manual" and sn.get("id") and sn["id"] not in by_id:
+            twin = next((x for x in nodes if x.get("source") == "auto" and _same_box(x, sn)), None)
+            if twin is not None:
+                redirect[sn["id"]] = twin["id"]
+                continue
             m = dict(sn)
-            m.setdefault("cls", "manual")
-            m["kind"] = node_kind(m["cls"], m.get("text"), m.get("hint"))
+            m.setdefault("type", "work")
+            m["cls"] = m.get("cls") if CLS_TYPE.get(m.get("cls")) == m["type"] else ("source" if m["type"] == "info" else "work")
+            if m["type"] == "info":
+                m["medium"] = m.get("medium") if m.get("medium_edited") and vocab_row("media", m.get("medium")) else medium_of(m.get("text"), m.get("hint"))
+            elif not m.get("who_edited"):
+                m["who"], m["actor"], m["who_state"] = "", "", "unconfirmed"
             nodes.append(m)
-    present = {n["id"] for n in nodes}
+            by_id[m["id"]] = m
     manual_ends = {x for se in saved.get("edges", []) if se.get("source") == "manual" for x in (se.get("from"), se.get("to"))}
     for sn in saved.get("nodes", []):
         sid = sn.get("id")
-        if sid in manual_ends and sid not in present and sid not in sup_n and not re.match(r"^[to]\d+$", sid):
+        if sid in manual_ends and sid not in by_id and sid not in redirect and sid not in sup_n and not re.match(r"^[to]\d+$", sid):
             m = dict(sn)
-            m["cls"] = m.get("cls") or "manual"
-            m["kind"] = node_kind(m["cls"], m.get("text"), m.get("hint"))
+            m.setdefault("type", "work")
+            m["cls"] = m.get("cls") if CLS_TYPE.get(m.get("cls")) == m["type"] else ("source" if m["type"] == "info" else "work")
+            if m["type"] == "info":
+                m["medium"] = m.get("medium") or medium_of(m.get("text"), m.get("hint"))
             nodes.append(m)
-            present.add(sid)
-    node_ids = {n["id"] for n in nodes}
+            by_id[sid] = m
+    node_ids = set(by_id)
 
     edges = []
     seen = set()
@@ -1856,21 +2149,41 @@ def merge_graph(auto, saved):
             if se.get("label_edited"):
                 m["label"] = se.get("label") or ""
                 m["label_edited"] = True
+            if se.get("method_edited"):
+                m["method"] = se.get("method") if vocab_row("methods", se.get("method")) else ""
+                m["show_method"], m["method_edited"] = bool(m["method"]), True
+            if se.get("handoff_edited") and se.get("handoff") in ("push", "pull", "none", ""):
+                m["handoff"], m["handoff_edited"] = se.get("handoff"), True
         edges.append(m)
         seen.add(e["id"])
+    pairs = {(e["from"], e["to"]) for e in edges}
     for se in saved.get("edges", []):
-        if se.get("source") == "manual" and se.get("id") not in seen and se.get("from") in node_ids and se.get("to") in node_ids:
-            m = dict(se)
-            m.setdefault("kind", "manual")
-            m.setdefault("style", KIND_STYLE.get(m["kind"], "solid"))
-            edges.append(m)
-            seen.add(m["id"])
+        if se.get("source") != "manual" or se.get("id") in seen:
+            continue
+        a, b = redirect.get(se.get("from"), se.get("from")), redirect.get(se.get("to"), se.get("to"))
+        if a not in node_ids or b not in node_ids or a == b or (a, b) in pairs:
+            continue
+        m = dict(se, id=f"{a}->{b}", **{"from": a, "to": b})
+        ta, tb = by_id[a].get("type"), by_id[b].get("type")
+        m["type"] = m.get("type") if m.get("type") in ("work", "info") else ("work" if ta == "work" and tb == "work" else "info")
+        if m["type"] == "info" and ta == "work" and tb == "work":
+            m["type"] = "work"
+        edges.append(m)
+        seen.add(m["id"])
+        pairs.add((a, b))
 
     result.update(
         nodes=nodes, edges=edges, suppressed_nodes=sorted(sup_n), suppressed_edges=sorted(sup_e),
         view=saved.get("view"), needs_layout=False,
     )
     return result
+
+_KEY_RX = re.compile(r"^[a-z0-9_]{0,20}$")
+
+
+def _key(v):
+    v = str(v or "")
+    return v if _KEY_RX.match(v) else ""
 
 def sanitize_graph(data):
     if not isinstance(data, dict):
@@ -1879,13 +2192,17 @@ def sanitize_graph(data):
     for n in (data.get("nodes") or [])[:2000]:
         if not isinstance(n, dict) or not n.get("id"):
             continue
+        ntype = n.get("type") if n.get("type") in ("work", "info") else CLS_TYPE.get(n.get("cls"), "work")
         nodes.append(
             {
-                "id": str(n["id"])[:80], "text": str(n.get("text") or "")[:200], "cls": str(n.get("cls") or "manual")[:20],
-                "shape": str(n.get("shape") or "")[:20] or None, "hint": str(n.get("hint"))[:20] if n.get("hint") else None, "group": n.get("group"), "group_title": n.get("group_title"),
+                "id": str(n["id"])[:80], "text": str(n.get("text") or "")[:200], "type": ntype,
+                "cls": n.get("cls") if CLS_TYPE.get(n.get("cls")) == ntype else ("source" if ntype == "info" else "work"),
+                "medium": _key(n.get("medium")), "actor": _key(n.get("actor")), "who": str(n.get("who") or "")[:100],
+                "who_state": n.get("who_state") if n.get("who_state") in ("ok", "unconfirmed", "unknown") else "",
+                "hint": _key(n.get("hint")) or None, "group": n.get("group"), "group_title": n.get("group_title"),
                 "url": n.get("url"), "source": "manual" if n.get("source") == "manual" else "auto",
                 "x": _num(n.get("x")), "y": _num(n.get("y")), "color": (str(n.get("color"))[:20] if n.get("color") else None),
-                "text_edited": bool(n.get("text_edited")),
+                "text_edited": bool(n.get("text_edited")), "medium_edited": bool(n.get("medium_edited")), "who_edited": bool(n.get("who_edited")),
             }
         )
     for e in (data.get("edges") or [])[:4000]:
@@ -1894,14 +2211,16 @@ def sanitize_graph(data):
         edges.append(
             {
                 "id": str(e.get("id") or f"{e['from']}->{e['to']}")[:170], "from": str(e["from"])[:80], "to": str(e["to"])[:80],
-                "label": str(e.get("label") or "")[:120], "style": str(e.get("style") or "")[:10] or None,
-                "kind": str(e.get("kind") or "manual")[:10], "source": "manual" if e.get("source") == "manual" else "auto",
+                "type": e.get("type") if e.get("type") in ("work", "info") else "info", "method": _key(e.get("method")),
+                "handoff": e.get("handoff") if e.get("handoff") in ("push", "pull", "none") else "", "show_method": bool(e.get("show_method")),
+                "inferred": bool(e.get("inferred")), "label": str(e.get("label") or "")[:120], "source": "manual" if e.get("source") == "manual" else "auto",
                 "reversed": bool(e.get("reversed")), "label_edited": bool(e.get("label_edited")),
+                "method_edited": bool(e.get("method_edited")), "handoff_edited": bool(e.get("handoff_edited")),
             }
         )
     view = data.get("view") if isinstance(data.get("view"), dict) else None
     return {
-        "nodes": nodes, "edges": edges,
+        "schema": 2, "nodes": nodes, "edges": edges,
         "suppressed_nodes": [str(x)[:80] for x in (data.get("suppressed_nodes") or [])][:2000],
         "suppressed_edges": [str(x)[:170] for x in (data.get("suppressed_edges") or [])][:4000],
         "view": {"x": _num(view.get("x")) or 0, "y": _num(view.get("y")) or 0, "zoom": _num(view.get("zoom")) or 1} if view else None,
@@ -1949,17 +2268,18 @@ def writeback_candidates(saved, tasks_by_id):
     cands = []
     if not saved:
         return cands
+    saved = upgrade_graph(saved)
     nodes = {n["id"]: n for n in saved.get("nodes", []) if n.get("id")}
 
     def task_of(node_id):
         tid = _task_id_of(node_id)
         return tasks_by_id.get(tid) if tid else None
 
-    def text_of(node_id):
-        return (nodes.get(node_id) or {}).get("text") or ""
+    def node_of(node_id):
+        return nodes.get(node_id) or {}
 
-    def cls_of(node_id):
-        return (nodes.get(node_id) or {}).get("cls") or ""
+    def text_of(node_id):
+        return (node_of(node_id).get("text") or "").strip()
 
     for n in saved.get("nodes", []):
         if n.get("text_edited") and str(n.get("id", "")).startswith("t"):
@@ -1977,8 +2297,7 @@ def writeback_candidates(saved, tasks_by_id):
             continue
         a, b = (e["to"], e["from"]) if e.get("reversed") else (e["from"], e["to"])
         ta, tb = task_of(a), task_of(b)
-        ca, cb = cls_of(a), cls_of(b)
-        label = (e.get("label") or "").strip()
+        na, nb = node_of(a), node_of(b)
         if ta and tb and ta.id != tb.id and a.startswith("t") and b.startswith("t"):
             cands.append(
                 {
@@ -1994,27 +2313,28 @@ def writeback_candidates(saved, tasks_by_id):
             src = text_of(a)
             if not src:
                 continue
-            if ca == "system" and src in C.SYSTEM_SOURCES:
-                cands.append({"id": f"input:{tb.id}:{a}", "task_id": tb.id, "text": f"「{tb.name}」の入力情報に「{src}」を追加",
-                              "ops": [{"task_id": tb.id, "field": "inputs", "action": "add_list", "value": src}]})
-            elif ca in ("source", "system", "note", "manual", "output"):
-                cands.append({"id": f"info_from:{tb.id}:{a}", "task_id": tb.id, "text": f"「{tb.name}」の情報の受け取り元に「{src}」を追加",
-                              "ops": [{"task_id": tb.id, "field": "info_from", "action": "append", "value": src}]})
-            elif ca in ("wp", "ext", "person", "warn"):
-                cands.append({"id": f"actor:{tb.id}:{a}", "task_id": tb.id, "text": f"「{tb.name}」の関わる人・部署に「{src}」を追加",
-                              "ops": [{"task_id": tb.id, "field": "actors", "action": "append", "value": src}]})
-        elif ta and not tb and (a.startswith("t") or a.startswith("o")):
-            dst = text_of(b)
-            if not dst:
-                continue
-            if cb in ("wp", "ext", "person", "warn"):
-                ops = [{"task_id": ta.id, "field": "output_users_note", "action": "append", "value": dst}]
-                if cb == "ext":
-                    ops.append({"task_id": ta.id, "field": "output_users", "action": "add_list", "value": "他部署"})
-                cands.append({"id": f"user:{ta.id}:{b}", "task_id": ta.id, "text": f"「{ta.name}」のアウトプットの利用者に「{dst}」を追加", "ops": ops})
-            elif cb in ("note", "manual"):
-                cands.append({"id": f"next:{ta.id}:{b}", "task_id": ta.id, "text": f"「{ta.name}」の後の業務に「{dst}」を追加",
-                              "ops": [{"task_id": ta.id, "field": "next_task", "action": "append", "value": dst}]})
+            if na.get("type") == "info":
+                if src in C.SYSTEM_SOURCES:
+                    cands.append({"id": f"input:{tb.id}:{a}", "task_id": tb.id, "text": f"「{tb.name}」の入力情報に「{src}」を追加",
+                                  "ops": [{"task_id": tb.id, "field": "inputs", "action": "add_list", "value": src}]})
+                else:
+                    cands.append({"id": f"info_from:{tb.id}:{a}", "task_id": tb.id, "text": f"「{tb.name}」の情報の受け取り元に「{src}」を追加",
+                                  "ops": [{"task_id": tb.id, "field": "info_from", "action": "append", "value": src}]})
+            else:
+                cands.append({"id": f"prev:{tb.id}:{a}", "task_id": tb.id, "text": f"「{tb.name}」の前の業務に「{src}」を追加",
+                              "ops": [{"task_id": tb.id, "field": "prev_task", "action": "append", "value": src}]})
+        elif ta and not tb and (a.startswith("t") or a.startswith("o")) and nb.get("type") == "work":
+            who = (nb.get("who") or "").strip()
+            content = text_of(b)
+            if who and nb.get("who_state") != "unconfirmed":
+                user = actor_user(nb.get("actor")) or actor_user(who_of(who, _wp_name(ta))["actor"])
+                ops = [{"task_id": ta.id, "field": "output_users_note", "action": "append", "value": who}]
+                if user and user != "分からない":
+                    ops.append({"task_id": ta.id, "field": "output_users", "action": "add_list", "value": user})
+                cands.append({"id": f"user:{ta.id}:{b}", "task_id": ta.id, "text": f"「{ta.name}」のアウトプットの利用者に「{who}」を追加", "ops": ops})
+            elif content and content not in ("使いみち未確認", "新しい作業"):
+                cands.append({"id": f"next:{ta.id}:{b}", "task_id": ta.id, "text": f"「{ta.name}」の後の業務に「{content}」を追加",
+                              "ops": [{"task_id": ta.id, "field": "next_task", "action": "append", "value": content}]})
 
     for eid in saved.get("suppressed_edges", []):
         if "->" not in str(eid):
@@ -2088,9 +2408,13 @@ def _wp_name(t):
 def _wp_key(t):
     return f"wp{t.workplace_id or 0}"
 
+def _own_wp(t):
+    return t.workplace.name if t is not None and t.workplace else ""
+
 def _task_node(d, t, width=14):
     tid = f"t{t.id}"
-    d.node(tid, t.name, "done" if t.status == "完了" else "task", subgraph=(_wp_key(t), _wp_name(t)), width=width)
+    d.node(tid, t.name, "done" if t.status == "完了" else "task", subgraph=(_wp_key(t), _wp_name(t)), width=width,
+           who={"actor": "team", "label": _own_wp(t), "state": "ok"})
     d.click(tid, url_for("cases.detail", task_id=t.id), "案件詳細を開く")
     return tid
 
@@ -2109,10 +2433,6 @@ def _match_tasks(text, tasks, exclude=None, limit=3):
     return [t for _, t in hits[:limit]]
 
 _SPLIT_NAMES_RX = re.compile(r"[、,，／/\n]+")
-_ROLE_RX = re.compile(r"^(上司|課長|係長|部長|班長|職長|組長|工場長|リーダー|主任|次長|副課長)(さん)?$")
-_BOSS_RX = re.compile(r"上司|課長|係長|部長|班長|職長|組長|工場長|リーダー|主任|次長")
-_EXTERNAL_RX = re.compile(r"顧客|社外|取引先|お客|仕入先|協力会社|業者|メーカー")
-_CHANNEL_KINDS = ("mail", "chat", "phone")
 MAX_PENDING = 40
 
 
@@ -2152,24 +2472,27 @@ def _is_destination(system, action):
             return True
     return False
 
-def _is_channel(system, to):
-    return bool(system and to) and node_kind("source", system) in _CHANNEL_KINDS
-
-def _source_cls(name):
-    return "system" if node_kind("source", name) == "system" else "source"
-
 def _short(text, n=16):
     text = str(text or "").strip()
     return text if len(text) <= n else text[: n - 1] + "…"
 
+def _purpose(t):
+    p = (t.purpose or "").strip() if t is not None else ""
+    return "" if p in ("", "不明") else p
+
 def task_sources(t):
-    """業務の取り出し元 [(名前, cls, hint)]。聞き取りの手順 → 具体名 → 受け取り元 → 区分の順に見て、同じものは1つにまとめる"""
+    """業務の取り出し元 [{name, hint, method, shared}]。手順 → 具体名 → 受け取り元 → 区分の順に見て、同じものは1つにまとめる"""
     items = []
 
-    def add(name, cls="source", hint=None):
+    def add(name, hint=None, method="", shared=True):
         name = (name or "").strip()
-        if name and not any(same_name(name, x[0], 2) for x in items):
-            items.append((name, cls, hint))
+        if not name:
+            return
+        for it in items:
+            if same_name(name, it["name"], 2):
+                it["method"] = it["method"] or method
+                return
+        items.append({"name": name, "hint": hint, "method": method or "", "shared": shared})
 
     steps = t.steps
     made = [m for m in [x.get("output") or "" for x in steps] + [t.output or ""] if m.strip()]
@@ -2178,146 +2501,179 @@ def task_sources(t):
         return any(same_thing(v, m) for m in made)
 
     for x in steps:
-        system, inp = (x.get("system") or "").strip(), (x.get("input") or "").strip()
-        if system and not _is_channel(system, x.get("to")) and not internal(system) and not _is_destination(system, x.get("action")):
-            add(system, _source_cls(system))
-        elif inp and not internal(inp):
-            add(inp, _source_cls(inp))
+        system, inp, action, to = [(x.get(k) or "").strip() for k in ("system", "input", "action", "to")]
+        recv = method_of(x.get("how_from") or "")
+        role, m = field_role(system) if system else ("box", "")
+        if system and role == "line":
+            if not to and inp and not internal(inp):
+                add(inp, hint=vocab_row("methods", m)["medium"], method=m)
+            continue
+        if system and not internal(system) and not _is_destination(system, action):
+            add(system, method=m or recv)
+        elif inp and not internal(inp) and not to:
+            add(inp, method=recv)
     if not items:
         for v in _names(t.inputs_note):
-            add(v, _source_cls(v))
+            add(v, method=method_of(v))
     named = bool(items)
     cats = t.inputs_list
     specific = (t.info_from or "").strip()
-    hint = next((node_kind("source", c) for c in cats if c not in C.SYSTEM_SOURCES and c != "その他"), None)
+    cat_hint = next((INPUT_SOURCE_MAP[c][0] for c in cats if c in INPUT_SOURCE_MAP and c != "その他"), None)
+    cat_method = next((INPUT_SOURCE_MAP[c][1] for c in cats if c in INPUT_SOURCE_MAP and INPUT_SOURCE_MAP[c][1]), "")
 
     def kinds():
-        return {node_kind(cls, n, h) for n, cls, h in items}
+        return {medium_of(it["name"], it["hint"]) for it in items}
 
-    if specific and (not named or node_kind("source", specific, hint) not in kinds()):
-        add(specific, _source_cls(specific), hint)
+    for v in _names(specific):
+        if not named or medium_of(v, cat_hint) not in kinds():
+            add(v, hint=cat_hint, method=cat_method or method_of(v))
     for c in cats:
         if c in C.SYSTEM_SOURCES:
-            add(c, "system")
-        elif c == "その他":
-            if not items:
-                add(c)
-        elif not specific and node_kind("source", c) not in kinds():
-            add(c)
+            add(c, method="system")
+        elif c in INPUT_SOURCE_MAP and not specific:
+            medium, method, label = INPUT_SOURCE_MAP[c]
+            if c == "その他" and items:
+                continue
+            if medium not in kinds():
+                add(f"{label}（名前未確認）", hint=medium, method=method, shared=False)
     return items
 
 def task_destinations(t):
-    """手順で入力・登録しているシステム（業務 → システム）"""
+    """手順で入力・登録している置き場（業務 → 情報）"""
     made = [m for m in [x.get("output") or "" for x in t.steps] + [t.output or ""] if m.strip()]
     out = []
     for x in t.steps:
         system = (x.get("system") or "").strip()
-        if (system and _is_destination(system, x.get("action")) and not any(same_thing(system, m) for m in made)
-                and not any(same_name(system, v, 2) for v in out)):
-            out.append(system)
+        if not system or not _is_destination(system, x.get("action")):
+            continue
+        role, m = field_role(system)
+        if role == "line" or any(same_thing(system, v) for v in made) or any(same_name(system, v["name"], 2) for v in out):
+            continue
+        out.append({"name": system, "method": m})
     return out
 
 def task_recipients(t):
-    """渡す相手 [(名前, 渡し方)]。手順の to と利用者の具体名を、1人・1部署ずつ"""
+    """渡す相手 [{name, how, use}]。手順の to と利用者の具体名を、1人・1部署ずつ"""
     out = []
 
-    def add(name, how=""):
-        if name and not any(same_name(name, n, 2) for n, _ in out):
-            out.append((name, how))
+    def add(name, how="", use=""):
+        name = (name or "").strip()
+        if not name:
+            return
+        for r in out:
+            if same_name(name, r["name"], 2):
+                r["how"], r["use"] = r["how"] or how, r["use"] or use
+                return
+        out.append({"name": name, "how": how or "", "use": use or ""})
 
     for x in t.steps:
         to, system = (x.get("to") or "").strip(), (x.get("system") or "").strip()
+        if not to:
+            continue
+        line = field_role(system) if system else ("box", "")
+        how = method_of(x.get("how") or "") or (line[1] if line[0] == "line" else "")
         for n in _names(to):
-            add(n, system if _is_channel(system, to) else "")
+            add(n, how, (x.get("use") or "").strip())
     for n in _names(t.output_users_note):
         add(n)
     return out
 
-def _covered_users(named):
-    covered = set()
-    for n, _ in named:
-        k = node_kind("wp", n)
-        if k == "team":
-            covered.add("職場内")
-        elif k == "person" and _BOSS_RX.search(n):
-            covered.add("上司")
-        elif k == "org":
-            covered.add("顧客・社外" if _EXTERNAL_RX.search(n) else "他部署")
-    if named:
-        covered.add("分からない")
-    return covered
-
-def users_from_names(names):
+def users_from_names(names, own_wp=""):
     """渡す相手の名前から、利用者の区分（職場内・上司・他部署・顧客・社外）を決める"""
     cats = []
     for n in names:
-        k = node_kind("wp", n)
-        if k == "system":
+        w = who_of(n, own_wp)
+        if w["state"] == "unconfirmed" and medium_of(n) == "system":
             continue
-        if k == "org":
-            c = "顧客・社外" if _EXTERNAL_RX.search(n) else "他部署"
-        elif k == "person" and _BOSS_RX.search(n):
-            c = "上司"
-        else:
-            c = "職場内"
-        if c not in cats:
+        c = actor_user(w["actor"]) if w["actor"] else "職場内"
+        if c and c not in cats:
             cats.append(c)
     return cats
 
-def _recipient_label(name, t):
-    return f"{_wp_name(t)} {name}" if _ROLE_RX.match(name.strip()) else name
-
-def _recipient_node(d, name, t):
-    kind = node_kind("wp", name)
-    if kind == "team":
-        return _user_node(d, "職場内", t)
-    if kind == "system":
-        return d.node(nid("s", name), name, "system")
-    if kind == "person" and _ROLE_RX.match(name.strip()):
-        return d.node(nid("p", _wp_name(t) + name), _recipient_label(name, t), "wp")
-    return d.node(nid("p", name), name, "ext" if kind == "org" else "wp")
-
-def task_user_nodes(d, t):
-    """利用者の箱 [(node_id, 渡し方)]。具体名を優先し、区分は具体名で表せないものだけ"""
-    named = task_recipients(t)
-    covered = _covered_users(named)
-    nodes = [(_recipient_node(d, n, t), how) for n, how in named]
-    for u in t.output_users_list:
-        if u == "自分" or u in covered:
-            continue
-        uid = _user_node(d, u, t)
-        if uid:
-            nodes.append((uid, ""))
-    return nodes
-
-def _user_node(d, u, t):
-    wp = _wp_name(t)
+def category_who(u, own_wp=""):
     if u == "職場内":
-        return d.node(nid("p", wp + "職場内"), f"{wp}（職場内）", "wp")
+        return {"actor": "team", "label": f"{own_wp}の人" if own_wp else "職場内", "state": "ok"}
     if u == "上司":
-        return d.node(nid("p", wp + "上司"), f"{wp} 上司", "wp")
+        return {"actor": "boss", "label": f"{own_wp} 上司".strip(), "state": "ok"}
     if u == "他部署":
-        return d.node("p_other", "他部署", "ext")
+        return {"actor": "dept", "label": "他部署", "state": "ok"}
     if u == "顧客・社外":
-        return d.node("p_customer", "顧客・社外", "ext")
+        return {"actor": "external", "label": "顧客・社外", "state": "ok"}
     if u == "分からない":
-        return d.node("p_unknown", "利用者不明", "warn")
+        return {"actor": "unknown", "label": "", "state": "unknown"}
     return None
 
-def _add_info_edges(d, t, tid, dup_outputs=None):
-    for name, cls, hint in task_sources(t):
-        d.edge(d.node(nid("s", name), name, cls, hint=hint), tid)
-    for name in task_destinations(t):
-        d.edge(tid, d.node(nid("s", name), name, _source_cls(name)))
-    target = tid
+def recipient_node(d, name, own_wp="", use="", frame=None, who=None):
+    """渡す相手の箱。システムなら書き込み先の情報、それ以外は相手の作業（だれ＋使いみち）。(node_id, 'work'|'info')"""
+    w = who or who_of(name, own_wp)
+    if w["state"] == "unconfirmed" and medium_of(name) == "system":
+        return d.node(nid("s", name), name, "source", medium="system"), "info"
+    if w["state"] == "unknown":
+        return d.node("p_unknown", "使う人が分からない", "warn", who=dict(w, label="")), "work"
+    content = use or "使いみち未確認"
+    inside = frame if frame and own_wp and w["actor"] in ("team", "boss") and w["label"].startswith(own_wp) else None
+    return d.node(nid("p", f"{w['label']}|{content}"), content, "work", subgraph=inside, who=w), "work"
+
+def task_user_nodes(d, t, frame=None):
+    """利用者の箱 [{id, type, how}]。具体名を優先し、区分（職場内・上司・他部署・社外・分からない）は具体名で表せないものだけ"""
+    own, purpose = _own_wp(t), _purpose(t)
+    named = task_recipients(t)
+    cats = [u for u in t.output_users_list if u != "自分"]
+    out, covered = [], set()
+    for r in named:
+        node, typ = recipient_node(d, r["name"], own, r["use"] or (purpose if len(named) == 1 else ""), frame)
+        out.append({"id": node, "type": typ, "how": r["how"]})
+        if typ == "work":
+            covered.add(actor_user(d.nodes[node]["actor"]))
+    if named:
+        covered.add("分からない")
+    for u in cats:
+        if u in covered:
+            continue
+        w = category_who(u, own)
+        if not w:
+            continue
+        node, typ = recipient_node(d, w["label"], own, purpose if not named and len(cats) == 1 else "", frame, who=w)
+        out.append({"id": node, "type": typ, "how": ""})
+    return out
+
+def _add_task_info(d, t, tid, outs=None, dups=None, frame=None):
+    """1つの業務の取り出し元・書き込む置き場・できるもの・渡す相手を描く。outs があれば、別の業務のできるものとの一致をつなぐ"""
+    for s in task_sources(t):
+        prev = None
+        if outs and s["shared"] and medium_of(s["name"], s["hint"]) != "system":
+            prev = next((oid for o, oid in outs if o is not t and same_name(s["name"], o.output)), None)
+        if prev:
+            d.edge(prev, tid, "info", method=s["method"], show_method=show_method_for(s["method"], d.nodes[prev]["medium"]), inferred=True)
+            continue
+        sid = nid("s", s["name"]) if s["shared"] else nid("s", f"{t.id}:{s['name']}")
+        node = d.node(sid, s["name"], "source", hint=s["hint"])
+        d.edge(node, tid, "info", method=s["method"], show_method=show_method_for(s["method"], d.nodes[node]["medium"]))
+    for dst in task_destinations(t):
+        node = d.node(nid("s", dst["name"]), dst["name"], "source")
+        d.edge(tid, node, "info", method=dst["method"], show_method=show_method_for(dst["method"], d.nodes[node]["medium"]))
+    target = None
     if (t.output or "").strip():
-        oid = f"o{t.id}"
-        d.node(oid, t.output, "dupout" if dup_outputs and normalize_text(t.output) in dup_outputs else "output")
-        d.edge(tid, oid)
-        target = oid
-    for uid, how in task_user_nodes(d, t):
-        d.edge(target, uid, how)
-    return target
+        target = f"o{t.id}"
+        d.node(target, t.output, "dupout" if dups and normalize_text(t.output) in dups else "output")
+        d.edge(tid, target, "info")
+    for u in task_user_nodes(d, t, frame):
+        if u["type"] == "info":
+            d.edge(tid, u["id"], "info", method="system")
+            continue
+        if target is None:
+            target = d.node(f"o{t.id}", "（渡すもの未確認）", "output", medium="unknown")
+            d.edge(tid, target, "info")
+        d.edge(target, u["id"], "info", method=u["how"], show_method=bool(u["how"]))
+    return target or tid
+
+def _task_handoff(a, b, d):
+    if a.respondent_id and a.respondent_id == b.respondent_id:
+        return "none"
+    e = d.edges.get((f"o{a.id}", f"t{b.id}"))
+    last = (a.steps[-1].get("action") if a.steps else "") or ""
+    first = (b.steps[0].get("action") if b.steps else "") or ""
+    return handoff_of(last, first, method=e["method"] if e else "")
 
 # ----- 情報の流れ -----
 def build_info_flow(tasks):
@@ -2329,31 +2685,20 @@ def build_info_flow(tasks):
         if (t.output or "").strip():
             oid = f"o{t.id}"
             d.node(oid, t.output, "dupout" if normalize_text(t.output) in dups else "output")
-            d.edge(tid, oid)
+            d.edge(tid, oid, "info")
             outs.append((t, oid))
     for t in tasks:
-        tid = f"t{t.id}"
-        for name, cls, hint in task_sources(t):
-            prev = None if cls == "system" else next((oid for o, oid in outs if o is not t and same_name(name, o.output)), None)
-            if prev:
-                d.edge(prev, tid, "", "dotted")
-            else:
-                d.edge(d.node(nid("s", name), name, cls, hint=hint), tid)
-        for name in task_destinations(t):
-            d.edge(tid, d.node(nid("s", name), name, _source_cls(name)))
-        target = f"o{t.id}" if (t.output or "").strip() else tid
-        for uid, how in task_user_nodes(d, t):
-            d.edge(target, uid, how)
+        _add_task_info(d, t, f"t{t.id}", outs, dups, frame=(_wp_key(t), _wp_name(t)))
     for t in tasks:
         tid = f"t{t.id}"
         for other in _match_tasks(t.next_task, tasks, exclude=t):
-            d.edge(tid, f"t{other.id}", "次の業務", "dotted")
+            d.edge(tid, f"t{other.id}", "work", handoff=_task_handoff(t, other, d), inferred=True)
         for other in _match_tasks(t.prev_task, tasks, exclude=t):
-            d.edge(f"t{other.id}", tid, "前の業務", "dotted")
+            d.edge(f"t{other.id}", tid, "work", handoff=_task_handoff(other, t, d), inferred=True)
         if (t.output or "").strip():
             for other in tasks:
                 if other is not t and same_name(t.output, other.prev_task):
-                    d.edge(f"o{t.id}", f"t{other.id}", "", "dotted")
+                    d.edge(f"o{t.id}", f"t{other.id}", "info", inferred=True)
     return d
 
 def pending_task_names(workplace_id=None):
@@ -2375,12 +2720,20 @@ def pending_task_names(workplace_id=None):
             row["people"].add(key)
     return list(found.values())[:MAX_PENDING]
 
-def add_pending_tasks(d, workplace_id=None):
+def add_pending_tasks(d, workplace_id=None, tasks=()):
     names = {w.id: w.name for w in Workplace.query.all()}
     for p in pending_task_names(workplace_id):
         n = len(p["people"])
-        d.node(nid("u", f"{p['workplace_id']}:{p['name']}"), p["name"] + (f"（{n}人）" if n >= 2 else ""), "pending",
-               subgraph=(f"wp{p['workplace_id'] or 0}", names.get(p["workplace_id"], "職場未設定")))
+        wp = names.get(p["workplace_id"], "職場未設定")
+        node = d.node(nid("u", f"{p['workplace_id']}:{p['name']}"), p["name"] + (f"（{n}人）" if n >= 2 else ""), "pending",
+                      subgraph=(f"wp{p['workplace_id'] or 0}", wp), who={"actor": "team", "label": wp, "state": "ok"})
+        for t in tasks:
+            if t.workplace_id != p["workplace_id"]:
+                continue
+            if similar_name(p["name"], t.next_task):
+                d.edge(f"t{t.id}", node, "work", inferred=True)
+            if similar_name(p["name"], t.prev_task):
+                d.edge(node, f"t{t.id}", "work", inferred=True)
     return d
 
 # ----- 図に添える表: 職場・部署の間の受け渡し、システム・情報源ごとの業務 -----
@@ -2391,18 +2744,22 @@ def handoff_rows(tasks, workplace_names):
         return any(w and w in name for w in workplace_names)
 
     for t in tasks:
-        wp = _wp_name(t)
+        wp, own = _wp_name(t), _own_wp(t)
         inputs = t.inputs_list
         if (t.info_from or "").strip():
             agg[(t.info_from.strip(), wp)]["info"] += 1
         elif "人から聞く" in inputs:
             agg[("口頭での聞き取り", wp)]["info"] += 1
         named = task_recipients(t)
-        for n, _ in named:
-            if node_kind("wp", n) in ("team", "system"):
+        covered = set()
+        for r in named:
+            w = who_of(r["name"], own)
+            covered.add(actor_user(w["actor"]))
+            if w["actor"] in ("team", "system") or w["state"] == "unconfirmed":
                 continue
-            agg[(wp, _recipient_label(n, t))]["info"] += 1
-        covered = _covered_users(named)
+            agg[(wp, w["label"] or "利用者不明")]["info"] += 1
+        if named:
+            covered.add("分からない")
         for u in t.output_users_list:
             if u in ("自分", "職場内") or u in covered:
                 continue
@@ -2422,8 +2779,9 @@ def handoff_rows(tasks, workplace_names):
 def source_rows(tasks):
     by = OrderedDict()
     for t in tasks:
-        for name, cls, hint in task_sources(t):
-            row = by.setdefault(normalize_text(name), {"name": name, "cls": cls, "hint": hint, "tasks": [], "minutes": 0.0})
+        for s in task_sources(t):
+            medium = medium_of(s["name"], s["hint"])
+            row = by.setdefault(normalize_text(s["name"]), {"name": s["name"], "cls": "system" if medium == "system" else "source", "hint": s["hint"], "tasks": [], "minutes": 0.0})
             if t not in row["tasks"]:
                 row["tasks"].append(t)
                 row["minutes"] += t.monthly_minutes or 0
@@ -2431,80 +2789,149 @@ def source_rows(tasks):
     rows.sort(key=lambda r: (r["cls"] != "system", -len(r["tasks"]), r["name"]))
     return rows
 
-# ----- 1業務の流れ（案件詳細用・聞き取り中） -----
+# ----- 1業務の流れ（案件詳細・聞き取り中） -----
 _CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
 
 def _circled(n):
     return _CIRCLED[n - 1] if 1 <= n <= len(_CIRCLED) else f"({n})"
 
-def build_steps_flow(steps):
+def build_steps_flow(steps, own_wp="", purpose=""):
     d = Diagram("LR")
-    prev = None
-    seen = []
+    me = {"actor": "team", "label": own_wp or "本人", "state": "ok"}
+    purpose = "" if (purpose or "").strip() in ("", "不明") else purpose.strip()
+    total = sum(len(_names(x.get("to"))) for x in steps)
+    seen, latest, prev = [], None, None
 
     def find(v):
-        return next((node for text, node in reversed(seen) if same_name(v, text, 2)), None)
+        return next((nd for text, nd in reversed(seen) if same_name(v, text, 2)), None) if v else None
+
+    def info(name, hint=None, key=None, cls="source"):
+        node = d.node(key or nid("s", name), name, cls, hint=hint)
+        if all(nd != node for _, nd in seen):
+            seen.append((name, node))
+        return node
 
     for x in steps:
         sid = f"st{x['no']}"
         action = x.get("action") or ""
-        d.node(sid, f"{_circled(x['no'])} {action}", "task", width=14)
-        system, inp, to = [(x.get(k) or "").strip() for k in ("system", "input", "to")]
-        src = find(inp) if inp else None
-        channel = _is_channel(system, to)
-        sys_node = None
-        label_used = False
-        if system and not channel:
-            sys_node = d.node(nid("s", system), system, _source_cls(system))
-            if sys_node not in [n for _, n in seen]:
-                seen.append((system, sys_node))
-            if _is_destination(system, action):
-                d.edge(sid, sys_node)
+        d.node(sid, f"{_circled(x['no'])} {action}", "task", width=14, who=me)
+        system, inp, to, how = [(x.get(k) or "").strip() for k in ("system", "input", "to", "how")]
+        recv = method_of(x.get("how_from") or "")
+        role, m = field_role(system) if system else ("box", "")
+        src = find(inp)
+        if system and role == "line" and not to:
+            if src:
+                d.edge(src, sid, "info", method=m, show_method=True)
             else:
-                label = _short(inp) if inp and not src and not same_name(inp, system, 2) else ""
-                d.edge(sys_node, sid, label)
-                label_used = bool(label) or same_name(inp, system, 2)
-        if src and src != sys_node:
-            d.edge(src, sid)
-        elif inp and not src and not label_used:
-            inode = d.node(nid("s", inp), inp, _source_cls(inp))
-            seen.append((inp, inode))
-            d.edge(inode, sid)
+                node = info(inp, hint=vocab_row("methods", m)["medium"]) if inp else info(f"{vocab_label('methods', m)}で受け取る内容", hint=vocab_row("methods", m)["medium"], key=nid("s", f"{x['no']}:{m}"))
+                d.edge(node, sid, "info", method=m, show_method=show_method_for(m, d.nodes[node]["medium"]))
+        else:
+            sys_node = None
+            if system and role != "line":
+                if _is_destination(system, action):
+                    sys_node = info(system)
+                    d.edge(sid, sys_node, "info", method=m, show_method=show_method_for(m, d.nodes[sys_node]["medium"]))
+                else:
+                    sys_node = find(system) or info(system)
+                    d.edge(sys_node, sid, "info", method=m or recv, show_method=show_method_for(m or recv, d.nodes[sys_node]["medium"]))
+            if src and src != sys_node:
+                d.edge(src, sid, "info", method=recv, show_method=show_method_for(recv, d.nodes[src]["medium"]))
+            elif inp and not src and not to and not system:
+                node = info(inp)
+                d.edge(node, sid, "info", method=recv, show_method=show_method_for(recv, d.nodes[node]["medium"]))
         if prev:
-            d.edge(prev, sid)
-        target = sid
+            d.edge(prev, sid, "work", handoff="none")
         out = (x.get("output") or "").strip()
         if out:
             oid = f"o{x['no']}"
             d.node(oid, out, "output")
-            d.edge(sid, oid)
             seen.append((out, oid))
-            target = oid
-        for n in _names(to):
-            d.edge(target, d.node(nid("p", n), n, "ext" if node_kind("wp", n) == "org" else "wp"), system if channel else "")
+            d.edge(sid, oid, "info")
+            latest = oid
+        if to:
+            deliver = (f"o{x['no']}" if out else None) or src or latest
+            if not deliver and inp:
+                deliver = info(inp)
+                d.edge(deliver, sid, "info")
+            if not deliver:
+                deliver = d.node(f"o{x['no']}", "（渡すもの未確認）", "output", medium="unknown")
+                d.edge(sid, deliver, "info")
+            meth = method_of(how) or (m if role == "line" else "")
+            for name in _names(to):
+                target, typ = recipient_node(d, name, own_wp, (x.get("use") or "").strip() or (purpose if total == 1 else ""))
+                if typ == "info":
+                    d.edge(sid, target, "info", method=meth or "system")
+                    continue
+                d.edge(deliver, target, "info", method=meth, show_method=bool(meth))
+                d.edge(sid, target, "work", handoff=handoff_of(action, how, side="push", method=meth))
         prev = sid
     return d
 
 def build_task_flow(t):
+    own = _own_wp(t)
     steps = t.steps
     if steps:
-        d = build_steps_flow(steps)
-        if (t.prev_task or "").strip():
-            d.edge(d.node("prev_task", t.prev_task, "note"), "st1", "前の業務", "dotted")
-        if (t.next_task or "").strip():
-            d.edge(f"st{steps[-1]['no']}", d.node("next_task", t.next_task, "note"), "次の業務", "dotted")
-        return d
-    d = Diagram("LR")
-    tid = f"t{t.id}"
-    d.node(tid, t.name, "done" if t.status == "完了" else "task", width=16)
-    _add_info_edges(d, t, tid)
-    for a in t.actors_list:
-        d.edge(d.node(nid("a", a), a, "person"), tid, "関与", "line")
+        d = build_steps_flow(steps, own, t.purpose or "")
+        first, last = "st1", f"st{steps[-1]['no']}"
+    else:
+        d = Diagram("LR")
+        first = last = f"t{t.id}"
+        d.node(first, t.name, "done" if t.status == "完了" else "task", width=16, who={"actor": "team", "label": own, "state": "ok"})
+        _add_task_info(d, t, first)
     if (t.prev_task or "").strip():
-        d.edge(d.node("prev_task", t.prev_task, "note"), tid, "前の業務", "dotted")
+        node = d.node("prev_task", t.prev_task, "work", who=who_of(t.prev_task, own))
+        d.edge(node, first, "work", handoff=handoff_of(t.prev_task, steps[0].get("action") if steps else ""))
     if (t.next_task or "").strip():
-        d.edge(tid, d.node("next_task", t.next_task, "note"), "次の業務", "dotted")
+        node = d.node("next_task", t.next_task, "work", who=who_of(t.next_task, own))
+        d.edge(last, node, "work", handoff=handoff_of(steps[-1].get("action") if steps else "", t.next_task))
     return d
+
+# ----- 凡例・閲覧と編集画面に渡すもの -----
+def map_legend_html(d):
+    vocab = map_vocab()
+    nodes = list(d.nodes.values())
+    edges = list(d.edges.values())
+    parts = ['<div class="map-legend">', '<div class="legend-row lg-grammar"><span class="legend-title">箱と線</span>',
+             '<span class="lg-item">' + shape_glyph("rect") + '作業</span>', '<span class="lg-item">' + shape_glyph("doc") + '情報</span>']
+    if any(e["type"] == "work" for e in edges):
+        parts.append('<span class="lg-item"><i class="lg-line lg-line-work"></i>仕事の流れ</span>')
+    if any(e["type"] == "info" for e in edges):
+        parts.append('<span class="lg-item"><i class="lg-line lg-line-info"></i>情報の流れ</span>')
+    if any(e.get("inferred") for e in edges):
+        parts.append('<span class="lg-item"><i class="lg-line lg-line-guess"></i>名前から推定したつながり</span>')
+    parts.append("</div>")
+    roles = [c for c in CLS_LABELS if any(n["cls"] == c for n in nodes)]
+    if roles:
+        parts.append('<div class="legend-row"><span class="legend-title">色</span>' + "".join(f'<span class="legend-chip lg-{c}">{CLS_LABELS[c]}</span>' for c in roles) + "</div>")
+    media = [r for r in vocab["media"] if any(n["type"] == "info" and n["medium"] == r["key"] for n in nodes)]
+    if media:
+        parts.append('<div class="kind-legend"><span class="legend-title">媒体</span>' + "".join(
+            f'<span class="kind-chip">{shape_glyph(r["shape"])}<i class="bi {r["icon"]} fi m-{r["key"]}"></i>{esc(r["label"])}</span>' for r in media) + "</div>")
+    actors = [r for r in vocab["actors"] if any(n["type"] == "work" and n["cls"] in ("work", "warn") and n["actor"] == r["key"] and n["who_state"] != "unconfirmed" for n in nodes)]
+    unconfirmed = any(n["type"] == "work" and n["cls"] == "work" and n["who_state"] == "unconfirmed" for n in nodes)
+    if actors or unconfirmed:
+        chips = "".join(f'<span class="kind-chip"><i class="bi {r["icon"]} fi a-{r["key"]}"></i>{esc(r["label"])}</span>' for r in actors)
+        if unconfirmed:
+            chips += '<span class="kind-chip"><i class="bi bi-question-circle fi who-unconfirmed"></i>だれ未確認</span>'
+        parts.append('<div class="kind-legend"><span class="legend-title">だれ</span>' + chips + "</div>")
+    parts.append("</div>")
+    return "".join(parts)
+
+def flow_view(d):
+    if d is None or d.empty:
+        return "", ""
+    return d.render(), map_legend_html(d)
+
+def editor_config():
+    return {
+        "vocab": vocab_public(), "cls_labels": CLS_LABELS, "cls_type": CLS_TYPE, "glyphs": _SHAPE_GLYPHS,
+        "classify_url": url_for("bizmap.api_classify"),
+    }
+
+def kind_icon_html(cls, text, hint=None):
+    medium = medium_of(text, hint)
+    row = vocab_row("media", medium)
+    return f'<i class="bi {row["icon"]} fi m-{medium}"></i>' if row else ""
 
 # ===== AI連携（社内 Azure OpenAI の ChatGPT API を Responses API で呼ぶ。なければルールベース） =====
 log = logging.getLogger(__name__)
@@ -2792,7 +3219,7 @@ INTAKE_PROMPT = """あなたは製造部「PC定型業務ゼロ化プロジェ�
 進め方:
 - 1回の返事で質問は1つだけ。60字以内。やさしい言葉で、相手の答えに一言だけ反応してから聞く（例:「なるほど、まず実績を出すんですね。次に何をしますか？」）。
 - 答えが選択で済むときは chips に2〜6個の選択肢を入れる（「分からない」「特にない」も入れる）。自由に書いてほしいときは chips を空にする。
-- 聞く順番: ①最初に何をするか → ②次に何をするか（相手が「ここまで」と言うか、手順が {step_limit} 個になるまで繰り返す）→（交代勤務の人だけ）この業務をいつやるか（昼勤／夜勤／昼勤・夜勤の両方）→ ③情報の取り出し元（システム・ファイル・紙・人）→ ④できるものと、それを誰が何に使うか（渡す相手と使いみちを1つの質問で聞く。例:「できた『日次実績集計表』は、誰が何に使いますか？」）→ ⑤頻度 → ⑥1回にかかる時間。困っていることは、余裕があれば最後に1問だけ。
+- 聞く順番: ①最初に何をするか → ②次に何をするか（相手が「ここまで」と言うか、手順が {step_limit} 個になるまで繰り返す）→（交代勤務の人だけ）この業務をいつやるか（昼勤／夜勤／昼勤・夜勤の両方）→ ③情報の取り出し元（システム・ファイル・紙・人）と受け取り方（chips に「システムで見る／共有フォルダ／メールで届く／紙で届く／人に聞く」を入れてよい）→ ④できるものと、それを誰にどうやって渡し、何に使われるか（渡す相手・渡し方・使いみちを1つの質問で聞く。例:「できた『日次実績集計表』は、誰にどうやって渡し、何に使われますか？」。chips に渡し方（{methods}）を入れてよい）→ ⑤頻度 → ⑥1回にかかる時間。困っていることは、余裕があれば最後に1問だけ。
 - 頻度を聞くときの chips は必ず次のとおり: {frequencies}
 - 時間を聞くときの chips は必ず次のとおり: {durations}
 - すでに state に入っていることは聞き直さない。相手がまとめて書いたり、手順書や画面の写真を送ったりしたら、読み取れることをすべて state に入れ、足りないことだけ聞く。
@@ -2806,19 +3233,21 @@ INTAKE_PROMPT = """あなたは製造部「PC定型業務ゼロ化プロジェ�
 - person_history: 聞き取りの最初に1回だけ呼び、本人の登録済み業務・月次アンケートの答え・勤務形態を見てから質問を始める。
 - list_known_systems: 手順にシステム・ファイル・帳票・できるものの名前が出たら1回呼び、既存の呼び方があればそれにそろえる（名寄せ）。できるもの（outputs と steps の output）も、同じものが登録済みならその呼び方にそろえる。
 - check_duplicate: 業務名が決まったら1回呼ぶ。本人が同じ名前を登録済みなら、そのことを伝えて「前の登録を取り消して続けるか、別の業務として続けるか」を聞く。
-- search_similar_tasks: 手順が2つそろったら1回呼び、他の人が同じ成果物を作っていれば「同じ職場の〇〇さんも登録しています。同じ流れですか？」と確かめる。
+- search_similar_tasks: 手順が2つそろったら1回呼び、他の人が同じ成果物を作っていれば「同じ職場で同じものを作っている人がいます。同じ流れですか？」と確かめる。
 - 道具の結果は事実として使い、結果に無いことは言わない。同じ道具を同じ引数で2回呼ばない。道具を呼んだ往復でも、最後は必ず上の JSON だけで返す。
-- 道具の結果は次のターンでは見えない。分かったこと（例: 二重登録なし、職場の常用システムは生産管理システム、同じ成果物を田中さんも作成）は state.notes に短く残し、notes にあることは調べ直さない。渡されていない道具はもう調べ済み。
+- 道具の結果は次のターンでは見えない。分かったこと（例: 二重登録なし、職場の常用システムは生産管理システム、同じ成果物を同じ職場の別の人も作成）は state.notes に短く残し、notes にあることは調べ直さない。渡されていない道具はもう調べ済み。
 - 手順を聞く「次に何をしますか？」は回数に数えない。それ以外の質問が全部で {max_q} 回まで。remaining は「手順以外であと何回聞くつもりか」。手順が2つ以上、できるものと渡す相手（使いみち）、頻度、時間がそろったら done を true にし、reply は「この流れで合っていますか？」と確認の一言にする（chips は空）。使いみちを相手が分からないと答えたら unknowns に入れて先へ進む。
 - 相手が「違う」「直したい」と言ったら、state を直して done は false のまま確認し直す。
 - 写真が読めないときは、そう伝えて文字で教えてほしいと頼む。
 - 推測で手順を作らない。相手が言ったことだけを入れる。
+- 人の名前（氏名・〇〇さん）は state にも返事にも書かない。職場・役職・部署で書く（例: 製造1課の担当者、品質保証課 課長）。
+- 渡す手順（送る・渡す・提出する）の output には、渡したものの名前を入れる。
 - 引き継ぎの話が出たら、前の勤務からの引き継ぎは情報の取り出し元（sources と steps の input）、次の勤務への引き継ぎは渡す相手（recipients と steps の to）として扱う。
 
 state は次の形（必ず全部のキーを返す。不明は "" か [] か null）:
 {
   "title": "<業務名。『〜を〜する』で短く>",
-  "steps": [{"no": 1, "action": "<その手順でやること>", "system": "<使うシステム・ファイル・ツール名。なければ空>", "input": "<元になる情報。なければ空>", "output": "<その手順でできるもの。なければ空>", "to": "<渡す相手（人・部署）。なければ空>"}],
+  "steps": [{"no": 1, "action": "<その手順でやること>", "system": "<使うシステム・ファイル・ツール名。なければ空>", "input": "<元になる情報。なければ空>", "output": "<その手順でできるもの。なければ空>", "to": "<渡す相手（職場・役職・部署。氏名は書かない）。なければ空>", "how": "<to がある手順の渡し方（メール・手渡し・共有フォルダなど）。なければ空>", "use": "<渡す相手がそれを何に使うか。分からなければ空>", "how_from": "<この手順で情報を受け取る方法（メールで届く・PHSで聞く・システムで見るなど）。なければ空>"}],
   "sources": ["<情報の取り出し元（システム名・帳票名・人）>"],
   "outputs": ["<最終的にできるもの>"],
   "recipients": ["<最終的に渡す相手。人・部署を1つずつ>"],
@@ -2880,7 +3309,9 @@ FINALIZE_PROMPT = """あなたは製造部「PC定型業務ゼロ化プロジェ
 
 
 def _intake_prompt():
-    return INTAKE_PROMPT.replace("{frequencies}", "／".join(C.FREQUENCIES)).replace("{durations}", "／".join(C.DURATIONS)).replace("{max_q}", str(C.INTAKE_MAX_QUESTIONS)).replace("{step_limit}", str(C.INTAKE_STEP_LIMIT))
+    methods = "／".join(r["label"] for r in map_vocab()["methods"] if r["kind"] == "channel" and r["key"] != "other")
+    return (INTAKE_PROMPT.replace("{frequencies}", "／".join(C.FREQUENCIES)).replace("{durations}", "／".join(C.DURATIONS))
+            .replace("{max_q}", str(C.INTAKE_MAX_QUESTIONS)).replace("{step_limit}", str(C.INTAKE_STEP_LIMIT)).replace("{methods}", methods))
 
 
 def _finalize_prompt():
@@ -2891,6 +3322,17 @@ def _finalize_prompt():
 def _intake_state_default():
     return {"title": "", "steps": [], "sources": [], "outputs": [], "recipients": [], "purpose": "", "frequency": None, "duration": None, "shift": None, "pains": [], "unknowns": [], "notes": [], "checked": []}
 
+
+def mask_person_names(text):
+    """「〇〇さん」などの氏名を「担当者」に置き換える（役職の「課長さん」はそのまま役職にする）"""
+    parts = re.split(r"([、,，／/\n])", str(text or ""))
+    out = []
+    for p in parts:
+        bare = _HONORIFIC_RX.sub("", p.strip())
+        if p.strip() and bare != p.strip():
+            p = bare if _role_only(bare) else "担当者"
+        out.append(p)
+    return "".join(out)
 
 def _clean_state(data):
     base = _intake_state_default()
@@ -2907,13 +3349,16 @@ def _clean_state(data):
         steps.append({
             "no": len(steps) + 1, "action": action[:200],
             "system": str(x.get("system") or "").strip()[:100], "input": str(x.get("input") or "").strip()[:200],
-            "output": str(x.get("output") or "").strip()[:200], "to": str(x.get("to") or "").strip()[:100],
+            "output": str(x.get("output") or "").strip()[:200], "to": mask_person_names(str(x.get("to") or "").strip())[:100],
+            "how": str(x.get("how") or "").strip()[:60], "use": str(x.get("use") or "").strip()[:120], "how_from": str(x.get("how_from") or "").strip()[:60],
         })
         if len(steps) >= C.INTAKE_STEP_LIMIT:
             break
     base["steps"] = steps
     for key in ("sources", "outputs", "recipients", "pains", "unknowns"):
         base[key] = [str(v).strip()[:100] for v in (data.get(key) or []) if str(v).strip()][:10]
+    base["recipients"] = [mask_person_names(v) for v in base["recipients"]]
+    base["sources"] = [mask_person_names(v) for v in base["sources"]]
     base["purpose"] = str(data.get("purpose") or "").strip()[:300]
     base["frequency"] = data.get("frequency") if data.get("frequency") in C.FREQUENCIES else None
     base["duration"] = data.get("duration") if data.get("duration") in C.DURATIONS else None
@@ -3009,7 +3454,7 @@ FINALIZE_TOOLS = [
 
 def _task_brief(t, steps=True):
     row = {
-        "id": t.id, "業務名": t.name, "職場": t.workplace.name if t.workplace else "", "担当": t.respondent.name if t.respondent else "",
+        "id": t.id, "業務名": t.name, "職場": t.workplace.name if t.workplace else "",
         "できるもの": t.output or "", "情報のもと": t.inputs_note or "・".join(t.inputs_list), "頻度": t.frequency or "",
         "月間時間": round((t.monthly_minutes or 0) / 60, 1), "希望": t.wish or "",
     }
@@ -3055,7 +3500,7 @@ def intake_handlers(r, used=None):
         if latest is not None:
             monthly = {"月度": latest.period, "行っている業務": latest.answer("task_names"), "なくしたい業務": latest.answer("wants_tasks"),
                        "先月比": latest.answer("trend"), "減った理由": latest.answer("decreased_reason"), "増えた業務": latest.answer("new_tasks")}
-        return {"氏名": r.name, "職場": r.workplace.name if r.workplace else "", "勤務形態": r.work_pattern or "",
+        return {"職場": r.workplace.name if r.workplace else "", "勤務形態": r.work_pattern or "",
                 "登録済みの業務": [_task_brief(t, steps=False) for t in r.tasks][:C.AI_TOOL_ROWS], "月次アンケート": monthly}
 
     def list_known_systems(args):
@@ -4329,8 +4774,10 @@ def api_intake():
         shown = max(0, min(int(data.get("shown") or 0), len(steps)))
     except (TypeError, ValueError):
         shown = 0
-    result["frames"] = [build_steps_flow(steps[:i]).render() for i in range(shown + 1, len(steps) + 1)]
-    result["diagram"] = build_steps_flow(steps).render() if steps else ""
+    own = r.workplace.name if r.workplace else ""
+    purpose = result["state"].get("purpose") or ""
+    result["frames"] = [build_steps_flow(steps[:i], own, purpose).render() for i in range(shown + 1, len(steps) + 1)]
+    result["diagram"] = build_steps_flow(steps, own, purpose).render() if steps else ""
     return jsonify({"success": True, **result})
 
 
@@ -4354,7 +4801,7 @@ def _fill_from_state(task, state, only_missing=False):
         task.inputs = C.join_list(list(dict.fromkeys(_guess(v, _SOURCE_WORDS, "その他") for v in (state["sources"] + systems))) or ["その他"])
     if not task.output_users:
         names = list(state["recipients"]) + [n for x in state["steps"] for n in _names(x.get("to"))]
-        task.output_users = C.join_list(users_from_names(names) or ["分からない"])
+        task.output_users = C.join_list(users_from_names(names, task.workplace.name if task.workplace else "") or ["分からない"])
     if not task.tools:
         task.tools = C.join_list(list(dict.fromkeys(_guess(v, _TOOL_WORDS, "その他") for v in systems)) or ["その他"])
     if not task.nature:
@@ -4372,7 +4819,7 @@ def _finalize_task(task, state, messages):
         result = rule_analyze(task, domains, cands)
         result["source"] = "rules"
         task.apply_ai_result(result)
-        task.ai_extra = json.dumps({"first_impression": "受け付けました。改善チームが内容を確認して連絡します"}, ensure_ascii=False)
+        task.ai_extra = json.dumps({"first_impression": "受け付けました。改善チームが内容を確認して連絡します", "unknowns": state.get("unknowns") or []}, ensure_ascii=False)
         return
     ai_fields = []
     for key in ("purpose", "output", "output_users_note", "inputs_note", "info_from", "actors", "prev_task", "next_task", "pains_note"):
@@ -4420,6 +4867,7 @@ def _finalize_task(task, state, messages):
         "saving_minutes_per_month": int(saving) if isinstance(saving, (int, float)) and saving > 0 else None,
         "first_impression": str(data.get("first_impression") or "").strip()[:120],
         "hearing_questions": [str(q).strip()[:200] for q in (data.get("hearing_questions") or []) if str(q).strip()][:5],
+        "unknowns": state.get("unknowns") or [],
     }, ensure_ascii=False)
 
 
@@ -4729,7 +5177,7 @@ def _filtered_tasks(domain_id, workplace_id):
 
 def _build(kind, tasks, workplace_id=None, domain_id=None):
     d = build_info_flow(tasks)
-    return d if domain_id else add_pending_tasks(d, workplace_id)
+    return d if domain_id else add_pending_tasks(d, workplace_id, tasks)
 
 def _scope_label(workplace_id, domain_id):
     parts = []
@@ -4822,12 +5270,27 @@ def edit():
         domain_id=domain_id,
         scope_label=_scope_label(workplace_id, domain_id),
         cls_labels=CLS_LABELS,
-        kinds_json=json.dumps(kind_config(), ensure_ascii=False).replace("</", "<\\/"),
+        kinds_json=json.dumps(editor_config(), ensure_ascii=False).replace("</", "<\\/"),
         workplaces=Workplace.query.order_by(Workplace.sort, Workplace.id).all(),
         domains=Domain.query.filter_by(parent_id=None).order_by(Domain.sort, Domain.id).all(),
     )
 
 # ----- グラフ API（エディタ用） -----
+@bp_bizmap.post("/api/classify")
+def api_classify():
+    data = request.get_json(silent=True) or {}
+    out = []
+    for it in (data.get("items") or [])[:300]:
+        if not isinstance(it, dict):
+            continue
+        if it.get("type") == "info":
+            out.append({"id": it.get("id"), "medium": medium_of(str(it.get("text") or "")[:200])})
+        else:
+            w = who_of(str(it.get("who") or "")[:100], str(it.get("workplace") or "")[:100])
+            out.append({"id": it.get("id"), "actor": w["actor"], "who": w["label"], "who_state": w["state"]})
+    return jsonify({"items": out})
+
+
 @bp_bizmap.route("/api/graph", methods=["GET"])
 def api_graph_get():
     kind = request.args.get("kind") or "info"
@@ -5263,6 +5726,41 @@ def export_employees():
     for e in Employee.query.order_by(Employee.workplace_id, Employee.emp_id).all():
         w.writerow([e.emp_id, e.name, e.department, e.workplace.name if e.workplace else "", e.work_pattern or "", e.email, "1" if e.active else "0", e.source])
     return Response(buf.getvalue().encode("utf-8-sig"), mimetype="text/csv", headers={"Content-Disposition": "attachment; filename=employees.csv"})
+
+# ----- 業務マップの区分 -----
+@bp_admin.route("/map-vocab")
+def map_vocab_page():
+    return render_template(
+        "admin/map_vocab.html", vocab_json=json.dumps(vocab_public(), ensure_ascii=False).replace("</", "<\\/"),
+        choices_json=json.dumps({"icons": ICON_CHOICES, "shapes": SHAPE_CHOICES, "directions": DIRECTION_CHOICES, "kinds": METHOD_KIND_CHOICES, "users": USER_CHOICES}, ensure_ascii=False),
+    )
+
+@bp_admin.post("/map-vocab")
+def map_vocab_save():
+    data = request.get_json(silent=True) or {}
+    if data.get("reset"):
+        Setting.set(MAP_VOCAB_KEY, "")
+    else:
+        Setting.set(MAP_VOCAB_KEY, json.dumps(_clean_vocab(data.get("vocab")), ensure_ascii=False))
+    db.session.commit()
+    return jsonify({"success": True, "vocab": vocab_public()})
+
+@bp_admin.post("/map-vocab/try")
+def map_vocab_try():
+    data = request.get_json(silent=True) or {}
+    vocab = _compile_vocab(_clean_vocab(data.get("vocab"))) if isinstance(data.get("vocab"), dict) else map_vocab()
+    text = str(data.get("text") or "")[:200]
+    medium = medium_of(text, vocab=vocab)
+    who = who_of(text, str(data.get("workplace") or ""), vocab)
+    role, method = field_role(text, vocab)
+    handoff = handoff_of(text, vocab=vocab)
+    name = lambda g, k: next((r["label"] for r in vocab[g] if r["key"] == k), "")
+    return jsonify({
+        "medium": name("media", medium), "who": (name("actors", who["actor"]) or "未確認") + (f"（{who['label']}）" if who["label"] else ""),
+        "method": name("methods", method) or "（当てはまらない）",
+        "role": {"line": "線の方法にする", "both": "情報の箱にして、線の方法にもする", "box": "情報の箱にする"}[role],
+        "handoff": vocab["handoff"][handoff]["label"] if handoff in vocab["handoff"] else "（決まらない）",
+    })
 
 # ----- デモデータ・エクスポート -----
 @bp_admin.post("/demo/load")
@@ -5824,6 +6322,186 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
 </script>
 {% endblock %}
 ''',
+    'admin/map_vocab.html': r'''{% extends "base.html" %}
+{% block title %}業務マップの区分{% endblock %}
+{% block content %}
+<nav aria-label="breadcrumb"><ol class="breadcrumb small mb-2">
+  <li class="breadcrumb-item"><a href="{{ url_for('admin.index') }}">管理</a></li>
+  <li class="breadcrumb-item active">業務マップの区分</li>
+</ol></nav>
+<h2 class="mb-1">業務マップの区分</h2>
+<p class="text-muted">業務マップは「作業」「情報」の箱と、「仕事の流れ」「情報の流れ」の線だけで描きます。ここでは、作業のだれ・情報の媒体・情報の流れの方法・仕事の流れの引き継ぎ方の区分と、名前から見分けるための語を決めます。業務マップ・案件の流れ図・聞き取り中の図・編集画面の判定がそろって変わります（編集画面で手で選んだものは残ります）。</p>
+<div class="alert alert-light border small">
+  判定に使う語は「、」で区切ります。英字の語は単語として見分け、全角の英数字は半角とみなします。「～課」のように「～」で始めると語尾だけで見分けます（後ろが文末・かっこ・ひらがなのとき）。「除く語」の部分は判定に使いません（例: Word の除く語に「パスワード」）。上から順に見て、最初に当てはまった区分になります（▲▼で順番を変えられます）。<span class="badge text-bg-light border">組み込み</span> の行は判定と書き戻しに使うため消せませんが、名前や語は変えられます。
+</div>
+<div id="mv-app">
+  <div class="card mb-3 mv-card"><div class="card-body">
+    <h5 class="card-title">作業のだれ（担い手）</h5>
+    <p class="small text-muted mb-2">作業の箱に付く「だれがやるか」。渡す相手・前後の作業の担い手を名前から見分けます。氏名は出さず、職場・役職・部署で表します。先に職場マスタの職場名で判定し、当たらなければここの語で判定します。「利用者の区分」は、業務データへ反映するときの利用者（職場内・上司・他部署・顧客・社外）です。</p>
+    <div class="table-responsive"><table class="table table-sm align-middle mv-table" data-group="actors"><thead><tr><th></th><th>名前</th><th>判定に使う語</th><th>除く語</th><th>アイコン</th><th>利用者の区分</th><th></th></tr></thead><tbody></tbody></table></div>
+    <button type="button" class="btn btn-sm btn-outline-primary mv-add" data-group="actors"><i class="bi bi-plus-lg"></i> 区分を追加</button>
+  </div></div>
+  <div class="card mb-3 mv-card"><div class="card-body">
+    <h5 class="card-title">情報の媒体</h5>
+    <p class="small text-muted mb-2">情報の箱の形とアイコンになる「どんな形の情報か」。どれにも当たらないものは「不明」になります。</p>
+    <div class="table-responsive"><table class="table table-sm align-middle mv-table" data-group="media"><thead><tr><th></th><th>名前</th><th>判定に使う語</th><th>除く語</th><th>アイコン</th><th>形</th><th></th></tr></thead><tbody></tbody></table></div>
+    <button type="button" class="btn btn-sm btn-outline-primary mv-add" data-group="media"><i class="bi bi-plus-lg"></i> 媒体を追加</button>
+  </div></div>
+  <div class="card mb-3 mv-card"><div class="card-body">
+    <h5 class="card-title">情報の流れの方法</h5>
+    <p class="small text-muted mb-2">情報の線のラベルになる「どうやって渡すか」。「渡し方」は線だけ、「置き場」（システム・共有フォルダ）は情報の箱を置いたうえで線の方法にもなります。既定の向きは仕事の流れの引き継ぎ方を決めるのに、箱がないときの媒体は口頭のやりとりなどで置く情報の箱に使います。</p>
+    <div class="table-responsive"><table class="table table-sm align-middle mv-table" data-group="methods"><thead><tr><th></th><th>名前</th><th>判定に使う語</th><th>除く語</th><th>種類</th><th>既定の向き</th><th>箱がないときの媒体</th><th></th></tr></thead><tbody></tbody></table></div>
+    <button type="button" class="btn btn-sm btn-outline-primary mv-add" data-group="methods"><i class="bi bi-plus-lg"></i> 方法を追加</button>
+  </div></div>
+  <div class="card mb-3 mv-card"><div class="card-body">
+    <h5 class="card-title">仕事の流れの引き継ぎ方</h5>
+    <p class="small text-muted mb-2">作業から次の作業へ仕事が移るときの2つのパターン。手順の文や渡し方にここの語（動詞）があれば、その引き継ぎ方になります。同じ人が続けて行う作業の間は「引き継ぎなし」です。</p>
+    <div class="row g-2">
+      <div class="col-md-6"><label class="form-label small mb-0">前の作業から伝えに行く</label><input type="text" class="form-control form-control-sm mb-1" id="mv-push-label" maxlength="20"><input type="text" class="form-control form-control-sm" id="mv-push-words" placeholder="判定に使う語（例: 渡す、送る）"></div>
+      <div class="col-md-6"><label class="form-label small mb-0">後ろの作業が取りに行く</label><input type="text" class="form-control form-control-sm mb-1" id="mv-pull-label" maxlength="20"><input type="text" class="form-control form-control-sm" id="mv-pull-words" placeholder="判定に使う語（例: 集める、取りに）"></div>
+    </div>
+  </div></div>
+  <div class="card mb-3 mv-card"><div class="card-body">
+    <h5 class="card-title">判定のお試し</h5>
+    <p class="small text-muted mb-2">名前や文を入れると、いま画面にある設定（保存前でも）でどう見分けるかを出します。</p>
+    <div class="d-flex gap-2 flex-wrap"><input type="text" class="form-control form-control-sm" style="max-width: 28rem" id="mv-try" placeholder="例: 残業予定表（Excel）をメール送付、品質保証課 課長"><button type="button" class="btn btn-sm btn-outline-secondary text-nowrap" id="mv-try-btn">見分ける</button></div>
+    <dl class="row small mt-2 mb-0 mv-try-out" id="mv-try-out"></dl>
+  </div></div>
+  <div class="mv-savebar">
+    <button type="button" class="btn btn-primary" id="mv-save"><i class="bi bi-check2"></i> 保存</button>
+    <button type="button" class="btn btn-outline-danger" id="mv-reset">既定に戻す</button>
+    <span class="small" id="mv-msg" role="status"></span>
+  </div>
+</div>
+<script type="application/json" id="mv-data">{{ vocab_json|safe }}</script>
+<script type="application/json" id="mv-choices">{{ choices_json|safe }}</script>
+{% endblock %}
+{% block scripts %}
+<script>
+(function () {
+  var V = JSON.parse(document.getElementById("mv-data").textContent);
+  var CH = JSON.parse(document.getElementById("mv-choices").textContent);
+  var msg = document.getElementById("mv-msg");
+  var dirty = false;
+  function touch() { dirty = true; msg.className = "small text-muted"; msg.textContent = "未保存の変更があります"; }
+  function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; }
+  function select(map, value, onChange) {
+    var s = el("select", "form-select form-select-sm");
+    Object.keys(map).forEach(function (k) { var o = el("option", null, map[k]); o.value = k; if (k === (value || "")) o.selected = true; s.appendChild(o); });
+    s.addEventListener("change", function () { onChange(s.value); touch(); });
+    return s;
+  }
+  function input(value, ph, onInput, max) {
+    var i = el("input", "form-control form-control-sm"); i.type = "text"; i.value = value || ""; if (ph) i.placeholder = ph; if (max) i.maxLength = max;
+    i.addEventListener("input", function () { onInput(i.value); touch(); });
+    return i;
+  }
+  function cell(tr, child, cls) { var td = el("td", cls); td.appendChild(child); tr.appendChild(td); return td; }
+  function render(group) {
+    var tbody = document.querySelector('.mv-table[data-group="' + group + '"] tbody');
+    tbody.innerHTML = "";
+    var rows = V[group];
+    rows.forEach(function (r, i) {
+      var tr = el("tr", "mv-row");
+      var mv = el("div", "mv-move");
+      var up = el("button", "btn btn-sm btn-light", "▲"); up.type = "button"; up.disabled = i === 0; up.title = "上へ（優先を上げる）";
+      var dn = el("button", "btn btn-sm btn-light", "▼"); dn.type = "button"; dn.disabled = i === rows.length - 1; dn.title = "下へ";
+      up.addEventListener("click", function () { rows.splice(i - 1, 0, rows.splice(i, 1)[0]); touch(); render(group); });
+      dn.addEventListener("click", function () { rows.splice(i + 1, 0, rows.splice(i, 1)[0]); touch(); render(group); });
+      mv.appendChild(up); mv.appendChild(dn);
+      cell(tr, mv, "text-nowrap");
+      var nameBox = el("div", "d-flex align-items-center gap-1");
+      nameBox.appendChild(input(r.label, "名前", function (v) { r.label = v; }, 30));
+      if (r.builtin) nameBox.appendChild(el("span", "badge text-bg-light border", "組み込み"));
+      cell(tr, nameBox);
+      cell(tr, input(r.words, "例: Excel、エクセル、xlsx", function (v) { r.words = v; }), "mv-words");
+      cell(tr, input(r.exclude, "", function (v) { r.exclude = v; }));
+      if (group !== "methods") {
+        var wrap = el("div", "d-flex align-items-center gap-1");
+        var icons = {}; CH.icons.forEach(function (k) { icons[k] = k.replace(/^bi-/, ""); });
+        var prev = el("i", "bi " + r.icon + " mv-icon");
+        wrap.appendChild(select(icons, r.icon, function (v) { r.icon = v; prev.className = "bi " + v + " mv-icon"; }));
+        wrap.appendChild(prev);
+        cell(tr, wrap);
+      }
+      if (group === "actors") cell(tr, select(CH.users, r.user, function (v) { r.user = v; }));
+      if (group === "media") cell(tr, select(CH.shapes, r.shape, function (v) { r.shape = v; }));
+      if (group === "methods") {
+        cell(tr, select(CH.kinds, r.kind, function (v) { r.kind = v; }));
+        cell(tr, select(CH.directions, r.direction, function (v) { r.direction = v; }));
+        var media = {}; V.media.forEach(function (m) { media[m.key] = m.label; });
+        cell(tr, select(media, r.medium, function (v) { r.medium = v; }));
+      }
+      var del = el("button", "btn btn-sm btn-outline-danger", "削除"); del.type = "button";
+      del.disabled = !!r.builtin; if (r.builtin) del.title = "組み込みの行は消せません";
+      del.addEventListener("click", function () { rows.splice(i, 1); touch(); render(group); });
+      cell(tr, del);
+      tbody.appendChild(tr);
+    });
+  }
+  function renderAll() {
+    ["actors", "media", "methods"].forEach(render);
+    ["push", "pull"].forEach(function (k) {
+      document.getElementById("mv-" + k + "-label").value = V.handoff[k].label;
+      document.getElementById("mv-" + k + "-words").value = V.handoff[k].words;
+    });
+  }
+  ["push", "pull"].forEach(function (k) {
+    document.getElementById("mv-" + k + "-label").addEventListener("input", function (e) { V.handoff[k].label = e.target.value; touch(); });
+    document.getElementById("mv-" + k + "-words").addEventListener("input", function (e) { V.handoff[k].words = e.target.value; touch(); });
+  });
+  document.querySelectorAll(".mv-add").forEach(function (b) {
+    b.addEventListener("click", function () {
+      var g = b.dataset.group;
+      var row = { key: "", label: "", words: "", exclude: "" };
+      if (g === "actors") { row.icon = "bi-person-fill"; row.user = ""; }
+      if (g === "media") { row.icon = "bi-file-earmark"; row.shape = "doc"; }
+      if (g === "methods") { row.kind = "channel"; row.direction = ""; row.medium = "unknown"; }
+      V[g].push(row);
+      touch();
+      render(g);
+      var inputs = document.querySelectorAll('.mv-table[data-group="' + g + '"] tbody tr:last-child input');
+      if (inputs[0]) inputs[0].focus();
+    });
+  });
+  async function post(url, body) {
+    var r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify(body) });
+    return r.json();
+  }
+  document.getElementById("mv-try-btn").addEventListener("click", async function () {
+    var t = document.getElementById("mv-try").value.trim();
+    var out = document.getElementById("mv-try-out");
+    out.innerHTML = "";
+    if (!t) return;
+    var j = await post("{{ url_for('admin.map_vocab_try') }}", { vocab: V, text: t });
+    [["情報の箱なら 媒体", j.medium], ["作業の箱なら だれ", j.who], ["線なら 方法", j.method], ["手順の欄なら", j.role], ["引き継ぎ方", j.handoff]].forEach(function (p) {
+      out.appendChild(el("dt", "col-sm-4 fw-normal text-muted", p[0]));
+      out.appendChild(el("dd", "col-sm-8 mb-1", p[1]));
+    });
+  });
+  document.getElementById("mv-try").addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); document.getElementById("mv-try-btn").click(); } });
+  document.getElementById("mv-save").addEventListener("click", async function () {
+    try {
+      var j = await post("{{ url_for('admin.map_vocab_save') }}", { vocab: V });
+      if (!j.success) throw new Error("failed");
+      V = j.vocab; dirty = false; renderAll();
+      msg.className = "small text-success"; msg.textContent = "保存しました";
+    } catch (e) { msg.className = "small text-danger"; msg.textContent = "保存できませんでした"; }
+  });
+  document.getElementById("mv-reset").addEventListener("click", async function () {
+    if (!confirm("区分と判定の語を既定に戻しますか？（追加した区分も消えます）")) return;
+    try {
+      var j = await post("{{ url_for('admin.map_vocab_save') }}", { reset: true });
+      V = j.vocab; dirty = false; renderAll();
+      msg.className = "small text-success"; msg.textContent = "既定に戻しました";
+    } catch (e) { msg.className = "small text-danger"; msg.textContent = "戻せませんでした"; }
+  });
+  window.addEventListener("beforeunload", function (e) { if (dirty) { e.preventDefault(); e.returnValue = ""; } });
+  renderAll();
+})();
+</script>
+{% endblock %}
+''',
     'admin/index.html': r'''{% extends "base.html" %}
 {% block title %}管理{% endblock %}
 {% block content %}
@@ -5846,6 +6524,12 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
     <div class="card mb-3"><div class="card-body">
       <h5 class="card-title">ログイン</h5>
       <p class="small mb-0">{{ auth_status }}</p>
+    </div></div>
+
+    <div class="card mb-3"><div class="card-body">
+      <h5 class="card-title">業務マップの区分</h5>
+      <p class="small mb-2">業務マップの「作業」「情報」「仕事の流れ」「情報の流れ」に付く区分（だれ・媒体・方法・引き継ぎ方）と、名前から見分けるための語を決めます。</p>
+      <a class="btn btn-sm btn-outline-primary" href="{{ url_for('admin.map_vocab_page') }}"><i class="bi bi-diagram-3"></i> 業務マップの区分を設定</a>
     </div></div>
 
     <div class="card mb-3"><div class="card-body">
@@ -6145,7 +6829,8 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
       <button type="button" class="btn btn-sm btn-outline-secondary" id="fe-undo" title="Ctrl+Z" disabled>↩ 元に戻す</button>
       <button type="button" class="btn btn-sm btn-outline-secondary" id="fe-redo" title="Ctrl+Y" disabled>↪ やり直す</button>
       <span class="fe-sep"></span>
-      <button type="button" class="btn btn-sm btn-outline-primary" id="fe-add">➕ ノード追加</button>
+      <button type="button" class="btn btn-sm btn-outline-primary" id="fe-add-work" title="作業の箱を足す"><i class="bi bi-plus-square"></i> 作業</button>
+      <button type="button" class="btn btn-sm btn-outline-primary" id="fe-add-info" title="情報の箱を足す"><i class="bi bi-file-earmark-plus"></i> 情報</button>
       <button type="button" class="btn btn-sm btn-outline-primary" id="fe-layout">自動レイアウト</button>
       <button type="button" class="btn btn-sm btn-outline-primary" id="fe-fit">全体表示</button>
       <div class="btn-group btn-group-sm" role="group">
@@ -6163,21 +6848,17 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
     </div>
   </div>
   <div class="fe-hint">
-    操作: ドラッグで移動 ／ 文字をダブルクリックで名前を編集 ／ 🔗 で矢印を引く（相手をクリック） ／ 矢印をクリックで向き反転・ラベル・削除 ／ Shift+ドラッグで範囲選択 ／ 空白をドラッグで画面移動 ／ ホイールで拡大縮小 ／ Delete で選択を削除
-    <span class="fe-legend">
-      {% for cls, label in cls_labels.items() if cls != 'done' %}<span class="legend-chip fe-lg-{{ cls }}">{{ label }}</span>{% endfor %}
-      <span class="fe-edge-legend"><i class="fe-line fe-line-info"></i>情報 <i class="fe-line fe-line-seq"></i>前後の業務 <i class="fe-line fe-line-manual"></i>手で追加</span>
-    </span>
-    <div class="kind-legend fe-kind-legend" id="fe-kind-legend"></div>
+    操作: ドラッグで移動 ／ 文字をダブルクリックで名前を編集 ／ 🔗 で線を引く（相手をクリック。作業どうしは仕事の流れ、作業と情報は情報の流れ。情報どうしは結べません） ／ 線をクリックで方法・引き継ぎ方・向き・削除 ／ 🎨 で種類・だれ・媒体・色 ／ Shift+ドラッグで範囲選択 ／ 空白をドラッグで画面移動 ／ ホイールで拡大縮小 ／ Delete で選択を削除
+  </div>
+  <div class="map-legend fe-kind-legend" id="fe-kind-legend"></div>
   </div>
   <div id="fe-mode" class="fe-mode"></div>
   <div class="fe-container" id="fe-container">
     <div class="fe-canvas" id="fe-canvas">
       <svg class="fe-svg" id="fe-svg">
         <defs>
-          <marker id="fe-arrow-info" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#0d6efd"/></marker>
-          <marker id="fe-arrow-seq" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#6c757d"/></marker>
-          <marker id="fe-arrow-manual" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#6f42c1"/></marker>
+          <marker id="fe-arrow-info" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#5b8def"/></marker>
+          <marker id="fe-arrow-work" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#495057"/></marker>
         </defs>
         <g id="fe-edges"></g>
         <g id="fe-temp"></g>
@@ -6191,11 +6872,18 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
         {% for c in ['white','red','orange','yellow','green','blue','purple','pink'] %}<span class="fe-color" data-color="{{ c }}" title="{{ c }}"></span>{% endfor %}
         <span class="fe-color fe-color-reset" data-color="" title="元の色に戻す">×</span>
       </div>
-      <div class="mt-2" id="fe-cls-row">
-        <label class="small mb-0">種類</label>
-        <select class="form-select form-select-sm" id="fe-cls-select">
-          {% for cls, label in cls_labels.items() if cls not in ('done',) %}<option value="{{ cls }}">{{ label }}</option>{% endfor %}
-        </select>
+      <div class="mt-2 fe-type-row" id="fe-type-row">
+        <span class="small me-2">種類</span>
+        <div class="btn-group btn-group-sm" role="group"><button type="button" class="btn btn-outline-secondary" data-type="work"><i class="bi bi-square"></i> 作業</button><button type="button" class="btn btn-outline-secondary" data-type="info"><i class="bi bi-file-earmark"></i> 情報</button></div>
+      </div>
+      <div class="mt-2" id="fe-who-row">
+        <label class="small mb-0" for="fe-who-input">だれ（職場・役職・部署。氏名は書かない）</label>
+        <input type="text" class="form-control form-control-sm mb-1" id="fe-who-input" placeholder="例: 製造1課 課長、生産管理課">
+        <select class="form-select form-select-sm" id="fe-actor-select" aria-label="だれの区分"></select>
+      </div>
+      <div class="mt-2" id="fe-medium-row">
+        <label class="small mb-0" for="fe-medium-select">媒体</label>
+        <select class="form-select form-select-sm" id="fe-medium-select"></select>
       </div>
       <div class="mt-2 d-flex gap-1">
         <button type="button" class="btn btn-sm btn-outline-danger" id="fe-node-delete">削除（非表示）</button>
@@ -6212,8 +6900,10 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
       </div>
     </div>
     <div class="fe-popover" id="fe-edge-popover">
-      <div class="fe-pop-title">矢印の設定</div>
-      <input type="text" class="form-control form-control-sm" id="fe-edge-label" placeholder="ラベル（例：日報、材料）">
+      <div class="fe-pop-title">線の設定 <span class="small text-muted fw-normal" id="fe-edge-type"></span></div>
+      <div class="mb-2" id="fe-method-row"><label class="small mb-0" for="fe-method-select">方法（渡し方）</label><select class="form-select form-select-sm" id="fe-method-select"></select></div>
+      <div class="mb-2" id="fe-handoff-row"><label class="small mb-0" for="fe-handoff-select">引き継ぎ方</label><select class="form-select form-select-sm" id="fe-handoff-select"></select></div>
+      <input type="text" class="form-control form-control-sm" id="fe-edge-label" placeholder="メモ（書くとラベルになります）">
       <div class="mt-2 d-flex flex-wrap gap-1">
         <button type="button" class="btn btn-sm btn-outline-primary" id="fe-edge-reverse">向きを反転</button>
         <button type="button" class="btn btn-sm btn-outline-danger" id="fe-edge-delete">削除</button>
@@ -6295,7 +6985,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
   <div id="tab-info">
     {{ flow_panel('info', '業務マップ',
        'システム・帳票・人などの情報源 → 業務 → アウトプット → 受け渡し先。聞き取りで答えた名前（システム・帳票・部署）で描き、同じ名前は1つの箱にまとめます。職場ごとの枠に業務を置き、点線は前後の業務やアウトプットの受け渡し（ある業務のできるものを別の業務が使っている）です。灰色の点線の箱は、月次アンケートで挙がったものの、まだ流れを登録していない業務です。',
-       '<div class="legend-row"><span class="legend-title">色</span><span class="legend-chip lg-source">情報源</span><span class="legend-chip lg-system">システム</span><span class="legend-chip lg-task">業務</span><span class="legend-chip lg-done">完了した業務</span><span class="legend-chip lg-output">アウトプット</span><span class="legend-chip lg-dupout">同じアウトプット（統合候補）</span><span class="legend-chip lg-wp">職場内の利用者</span><span class="legend-chip lg-ext">他部署・社外</span><span class="legend-chip lg-warn">利用者不明</span><span class="legend-chip lg-pending">未登録の業務（月次）</span></div>',
+       '',
        flows.info, '業務が登録されると図が描かれます。') }}
 
     <div class="row g-3 mt-1">
@@ -8369,8 +9059,17 @@ document.addEventListener("DOMContentLoaded", function () {
     nodePop: document.getElementById("fe-node-popover"),
     edgePop: document.getElementById("fe-edge-popover"),
     edgeLabel: document.getElementById("fe-edge-label"),
-    clsSelect: document.getElementById("fe-cls-select"),
-    clsRow: document.getElementById("fe-cls-row"),
+    typeRow: document.getElementById("fe-type-row"),
+    whoRow: document.getElementById("fe-who-row"),
+    whoInput: document.getElementById("fe-who-input"),
+    actorSelect: document.getElementById("fe-actor-select"),
+    mediumRow: document.getElementById("fe-medium-row"),
+    mediumSelect: document.getElementById("fe-medium-select"),
+    edgeType: document.getElementById("fe-edge-type"),
+    methodRow: document.getElementById("fe-method-row"),
+    methodSelect: document.getElementById("fe-method-select"),
+    handoffRow: document.getElementById("fe-handoff-row"),
+    handoffSelect: document.getElementById("fe-handoff-select"),
     undo: document.getElementById("fe-undo"),
     redo: document.getElementById("fe-redo")
   };
@@ -8378,31 +9077,36 @@ document.addEventListener("DOMContentLoaded", function () {
   var G = { nodes: [], edges: [], suppressed_nodes: [], suppressed_edges: [] };
 
   var KC = JSON.parse(document.getElementById("fe-kinds").textContent);
-  function compileRules(rules) { return rules.map(function (r) { return { kind: r[0], tier: r[1], rx: new RegExp(r[2], "gi") }; }); }
-  var KIND_RX = compileRules(KC.rules), WHO_RX = compileRules(KC.who);
-  function matchKind(text, rules, maxTier) {
-    var best = null;
-    rules.forEach(function (r, i) {
-      if (maxTier !== undefined && r.tier > maxTier) return;
-      r.rx.lastIndex = 0;
-      var m;
-      while ((m = r.rx.exec(text)) !== null) {
-        var key = [r.tier, -m.index, i];
-        if (!best || key[0] < best.key[0] || (key[0] === best.key[0] && (key[1] < best.key[1] || (key[1] === best.key[1] && key[2] < best.key[2])))) best = { key: key, kind: r.kind };
-        if (m[0] === "") r.rx.lastIndex++;
-      }
-    });
-    return best ? best.kind : null;
+  function vrow(group, key) { var rows = KC.vocab[group] || []; for (var i = 0; i < rows.length; i++) if (rows[i].key === key) return rows[i]; return null; }
+  function typeOf(n) { return n.type === "info" || n.type === "work" ? n.type : (KC.cls_type[n.cls] || "work"); }
+  function shapeOf(n) {
+    if (typeOf(n) !== "info") return "rect";
+    var r = vrow("media", n.medium || "unknown");
+    return r && ["doc", "cyl", "stadium"].indexOf(r.shape) !== -1 ? r.shape : "doc";
   }
-  function kindOf(cls, text, hint) {
-    text = String(text || "");
-    if (KC.fixed[cls]) return KC.fixed[cls];
-    if (KC.who_default[cls]) return matchKind(text, WHO_RX) || matchKind(text, KIND_RX, 1) || KC.who_default[cls];
-    var kind = matchKind(text, KIND_RX);
-    if ((!kind || kind === "doc") && hint && KC.kinds[hint]) return hint;
-    return kind || (cls === "manual" ? "task" : "doc");
+  function iconOf(n) {
+    if (typeOf(n) === "info") {
+      var m = n.medium || "unknown", r = vrow("media", m) || vrow("media", "unknown");
+      return [r ? r.icon : "bi-question-square", "m-" + m];
+    }
+    if (n.cls === "done") return ["bi-check-circle-fill", "done"];
+    if (n.cls === "task") return ["", ""];
+    if (n.cls === "pending") return ["bi-hourglass-split", "pending"];
+    if (n.who_state === "unconfirmed" || !n.actor) return ["bi-question-circle", "who-unconfirmed"];
+    var a = vrow("actors", n.actor);
+    return [a ? a.icon : "bi-person-fill", "a-" + n.actor];
   }
-  var SHAPE_PATHS = { doc: "M0 0H100V84C82 70 66 70 50 84S18 98 0 84Z", hex: "M10 0H90L100 50L90 100H10L0 50Z", para: "M8 0H100L92 100H0Z" };
+  function normText(v) { return String(v || "").replace(/[\s　（）()・,、。.／/\-−―「」『』]/g, "").toLowerCase(); }
+  function showWho(n) {
+    return typeOf(n) === "work" && (n.cls === "work" || n.cls === "warn") && (n.who_state === "ok" || n.who_state === "unknown") && n.who && normText(n.who) !== normText(n.text);
+  }
+  function edgeLabel(e) {
+    if (e.label) return e.label;
+    if (e.type === "work") return (e.handoff === "push" || e.handoff === "pull") && KC.vocab.handoff[e.handoff] ? KC.vocab.handoff[e.handoff].label : "";
+    if (e.show_method && e.method) { var r = vrow("methods", e.method); return r ? r.label : ""; }
+    return "";
+  }
+  var SHAPE_PATHS = { doc: "M0 0H100V84C82 70 66 70 50 84S18 98 0 84Z" };
   function shapeBg(shape) {
     var ns = "http://www.w3.org/2000/svg";
     var svg = document.createElementNS(ns, "svg");
@@ -8414,19 +9118,43 @@ document.addEventListener("DOMContentLoaded", function () {
     svg.appendChild(p);
     return svg;
   }
-  function renderKindLegend() {
+  function glyph(shape) { return '<svg class="ks" viewBox="0 0 18 14" aria-hidden="true">' + (KC.glyphs[shape] || KC.glyphs.rect) + "</svg>"; }
+  function escHtml(v) { return String(v).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
+  function renderLegend() {
     var box = document.getElementById("fe-kind-legend");
     if (!box) return;
-    var used = {};
-    G.nodes.forEach(function (n) { used[kindOf(n.cls, n.text, n.hint)] = true; });
-    var html = "";
-    Object.keys(KC.kinds).forEach(function (k) {
-      if (!used[k] || KC.skip.indexOf(k) !== -1) return;
-      var v = KC.kinds[k];
-      html += '<span class="kind-chip"><svg class="ks" viewBox="0 0 18 14" aria-hidden="true">' + (KC.glyphs[v[2]] || KC.glyphs.rect) + "</svg>" +
-        (v[1] ? '<i class="bi ' + v[1] + " fi fi-" + k + '"></i>' : "") + v[0] + "</span>";
-    });
-    box.innerHTML = html ? '<span class="legend-title">形・アイコン</span>' + html : "";
+    var html = '<div class="legend-row lg-grammar"><span class="legend-title">箱と線</span><span class="lg-item">' + glyph("rect") + '作業</span><span class="lg-item">' + glyph("doc") + "情報</span>" +
+      '<span class="lg-item"><i class="lg-line lg-line-work"></i>仕事の流れ</span><span class="lg-item"><i class="lg-line lg-line-info"></i>情報の流れ</span>' +
+      '<span class="lg-item"><i class="lg-line lg-line-guess"></i>名前から推定</span></div>';
+    var roles = Object.keys(KC.cls_labels).filter(function (c) { return G.nodes.some(function (n) { return n.cls === c; }); });
+    if (roles.length) html += '<div class="legend-row"><span class="legend-title">色</span>' + roles.map(function (c) { return '<span class="legend-chip lg-' + c + '">' + escHtml(KC.cls_labels[c]) + "</span>"; }).join("") + "</div>";
+    var media = (KC.vocab.media || []).filter(function (r) { return G.nodes.some(function (n) { return typeOf(n) === "info" && (n.medium || "unknown") === r.key; }); });
+    if (media.length) html += '<div class="kind-legend"><span class="legend-title">媒体</span>' + media.map(function (r) {
+      return '<span class="kind-chip">' + glyph(r.shape) + '<i class="bi ' + r.icon + " fi m-" + r.key + '"></i>' + escHtml(r.label) + "</span>";
+    }).join("") + "</div>";
+    var actors = (KC.vocab.actors || []).filter(function (r) { return G.nodes.some(function (n) { return typeOf(n) === "work" && (n.cls === "work" || n.cls === "warn") && n.actor === r.key && n.who_state !== "unconfirmed"; }); });
+    var unconf = G.nodes.some(function (n) { return typeOf(n) === "work" && n.cls === "work" && (n.who_state === "unconfirmed" || !n.actor); });
+    if (actors.length || unconf) html += '<div class="kind-legend"><span class="legend-title">だれ</span>' + actors.map(function (r) {
+      return '<span class="kind-chip"><i class="bi ' + r.icon + " fi a-" + r.key + '"></i>' + escHtml(r.label) + "</span>";
+    }).join("") + (unconf ? '<span class="kind-chip"><i class="bi bi-question-circle fi who-unconfirmed"></i>だれ未確認</span>' : "") + "</div>";
+    box.innerHTML = html;
+  }
+  async function classify(list) {
+    list = list.filter(Boolean);
+    if (!list.length) return;
+    try {
+      var r = await fetch(KC.classify_url, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ items: list.map(function (n) { return { id: n.id, type: typeOf(n), text: n.text, who: n.who || "", workplace: n.group_title || "" }; }) }) });
+      var j = await r.json();
+      (j.items || []).forEach(function (it) {
+        var n = nodeById(it.id);
+        if (!n) return;
+        if (typeOf(n) === "info") { if (!n.medium_edited) n.medium = it.medium; }
+        else if (!n.actor_locked) { n.actor = it.actor; n.who_state = it.who_state; if (it.who) n.who = it.who; }
+      });
+      renderAll();
+      if (popNodeId) refreshNodePopover();
+    } catch (e) { setStatus("種類の判定に失敗しました（通信状態を確認してください）"); }
   }
   var meta = {};
   var view = { x: 40, y: 40, zoom: 1 };
@@ -8485,17 +9213,15 @@ document.addEventListener("DOMContentLoaded", function () {
     els.nodes.innerHTML = "";
     G.nodes.forEach(function (n) { els.nodes.appendChild(createNodeEl(n)); });
     drawEdges();
-    renderKindLegend();
+    renderLegend();
   }
 
   function createNodeEl(n) {
     var div = document.createElement("div");
-    var kind = kindOf(n.cls || "manual", n.text, n.hint);
-    var meta = KC.kinds[kind] || ["", "", "rect"];
-    div.className = "fe-node fe-cls-" + (n.cls || "manual") + " fe-shape-" + meta[2] + (n.source === "manual" ? " fe-manual" : "");
+    var type = typeOf(n), shape = shapeOf(n), ic = iconOf(n);
+    div.className = "fe-node fe-type-" + type + " fe-cls-" + (n.cls || (type === "info" ? "source" : "work")) + " fe-shape-" + shape + (n.source === "manual" ? " fe-manual" : "");
     div.dataset.id = n.id;
-    div.dataset.kind = kind;
-    if (SHAPE_PATHS[meta[2]]) div.appendChild(shapeBg(meta[2]));
+    if (SHAPE_PATHS[shape]) div.appendChild(shapeBg(shape));
     if (n.color) div.dataset.color = n.color;
     div.style.left = (n.x || 0) + "px";
     div.style.top = (n.y || 0) + "px";
@@ -8507,15 +9233,21 @@ document.addEventListener("DOMContentLoaded", function () {
     if (n.url) btns.appendChild(btn("↗", "案件詳細を開く", "fe-btn-open", function () { window.open(n.url, "_blank"); }));
     btns.appendChild(btn("🔗", "この箱から矢印を引く", "fe-btn-link", function () { startLink(n.id); }));
     btns.appendChild(btn("➕", "つながる箱を追加", "fe-btn-add", function () { addChild(n.id); }));
-    btns.appendChild(btn("🎨", "色・種類", "fe-btn-color", function (e) { openNodePopover(n.id, e); }));
+    btns.appendChild(btn("🎨", "種類・だれ・媒体・色", "fe-btn-color", function (e) { openNodePopover(n.id, e); }));
     btns.appendChild(btn("✕", n.source === "manual" ? "削除" : "非表示にする", "fe-btn-del", function () { deleteNode(n.id); }));
     div.appendChild(btns);
 
+    if (showWho(n)) {
+      var whoEl = document.createElement("div");
+      whoEl.className = "fe-who";
+      whoEl.textContent = n.who;
+      div.appendChild(whoEl);
+    }
     var label = document.createElement("div");
     label.className = "fe-label";
-    if (meta[1]) {
+    if (ic[0]) {
       var icon = document.createElement("i");
-      icon.className = "bi " + meta[1] + " fe-icon fi fi-" + kind;
+      icon.className = "bi " + ic[0] + " fe-icon fi " + ic[1];
       label.appendChild(icon);
     }
     var text = document.createElement("div");
@@ -8609,16 +9341,17 @@ document.addEventListener("DOMContentLoaded", function () {
       var p = endpoints(a, b);
       if (!p) return;
       var c = curve(p);
-      var kind = e.source === "manual" ? "manual" : (e.kind || "info");
+      var type = e.type === "work" ? "work" : "info";
       var g = svgEl("g", { "class": "fe-edge-group", "data-id": e.id });
       var hit = svgEl("path", { d: c.d, "class": "fe-hit" });
-      var path = svgEl("path", { d: c.d, "class": "fe-edge fe-kind-" + kind + (e.source === "manual" ? " fe-src-manual" : "") });
-      if (kind !== "relation") path.setAttribute("marker-end", "url(#fe-arrow-" + kind + ")");
+      var path = svgEl("path", { d: c.d, "class": "fe-edge fe-type-" + type + (e.inferred ? " fe-inferred" : "") + (e.source === "manual" ? " fe-src-manual" : "") });
+      path.setAttribute("marker-end", "url(#fe-arrow-" + type + ")");
       g.appendChild(hit);
       g.appendChild(path);
-      if (e.label) {
+      var lab = edgeLabel(e);
+      if (lab) {
         var t = svgEl("text", { x: c.mx, y: c.my - 4, "class": "fe-edge-label", "text-anchor": "middle" });
-        t.textContent = e.label;
+        t.textContent = lab;
         g.appendChild(t);
       }
       g.addEventListener("click", function (ev) { ev.stopPropagation(); openEdgePopover(e.id, ev); });
@@ -8681,6 +9414,7 @@ document.addEventListener("DOMContentLoaded", function () {
         n.text_edited = true;
         renderAll();
         pushHistory();
+        if (typeOf(n) === "info" && !n.medium_edited) classify([n]);
       } else {
         text.textContent = n.text;
         drawEdges();
@@ -8693,8 +9427,10 @@ document.addEventListener("DOMContentLoaded", function () {
     });
   }
 
-  function addNode(x, y, text, cls) {
-    var n = { id: newId("m_"), text: text || "新しいノード", cls: cls || "manual", shape: null, group: null, group_title: null, url: null,
+  function addNode(x, y, text, type) {
+    type = type === "info" ? "info" : "work";
+    var n = { id: newId("m_"), text: text || (type === "info" ? "新しい情報" : "新しい作業"), type: type, cls: type === "info" ? "source" : "work",
+      medium: type === "info" ? "unknown" : "", actor: "", who: "", who_state: type === "work" ? "unconfirmed" : "", group: null, group_title: null, url: null,
       source: "manual", x: x, y: y, color: null, text_edited: false };
     G.nodes.push(n);
     els.nodes.appendChild(createNodeEl(n));
@@ -8708,8 +9444,9 @@ document.addEventListener("DOMContentLoaded", function () {
   function addChild(parentId) {
     var p = nodeById(parentId), b = bounds(parentId);
     if (!p || !b) return;
-    var n = addNode(p.x + b.w + 90, p.y, "新しいノード", "manual");
-    G.edges.push({ id: parentId + "->" + n.id, from: parentId, to: n.id, label: "", kind: "manual", style: "solid", source: "manual", reversed: false, label_edited: false });
+    var childType = typeOf(p) === "info" ? "work" : "info";
+    var n = addNode(p.x + b.w + 90, p.y, childType === "info" ? "新しい情報" : "新しい作業", childType);
+    G.edges.push({ id: parentId + "->" + n.id, from: parentId, to: n.id, label: "", type: "info", method: "", handoff: "", show_method: false, inferred: false, source: "manual", reversed: false, label_edited: false });
     drawEdges();
     pushHistory();
   }
@@ -8801,11 +9538,18 @@ document.addEventListener("DOMContentLoaded", function () {
   }
 
   function createLink(from, to) {
+    var na = nodeById(from), nb = nodeById(to);
+    if (na && nb && typeOf(na) === "info" && typeOf(nb) === "info") {
+      setMode("情報どうしは結べません。間に作業を置いてください");
+      setTimeout(cancelLink, 1800);
+      return;
+    }
     var id = from + "->" + to;
     if (edgeById(id)) { setMode("この矢印はすでにあります"); setTimeout(cancelLink, 1200); return; }
     var sup = G.suppressed_edges.indexOf(id);
     if (sup !== -1) G.suppressed_edges.splice(sup, 1);
-    G.edges.push({ id: id, from: from, to: to, label: "", kind: "manual", style: "solid", source: "manual", reversed: false, label_edited: false });
+    var ltype = na && nb && typeOf(na) === "work" && typeOf(nb) === "work" ? "work" : "info";
+    G.edges.push({ id: id, from: from, to: to, label: "", type: ltype, method: "", handoff: "", show_method: false, inferred: false, source: "manual", reversed: false, label_edited: false });
     cancelLink();
     drawEdges();
     pushHistory();
@@ -8827,13 +9571,31 @@ document.addEventListener("DOMContentLoaded", function () {
     if (wb) wb.classList.remove("fe-show");
     popNodeId = null; popEdgeId = null;
   }
+  function fillSelect(sel, first, rows) {
+    sel.innerHTML = "";
+    first.concat(rows).forEach(function (o) { var op = document.createElement("option"); op.value = o[0]; op.textContent = o[1]; sel.appendChild(op); });
+  }
+  fillSelect(els.actorSelect, [["", "自動（名前から）"]], (KC.vocab.actors || []).map(function (r) { return [r.key, r.label]; }));
+  fillSelect(els.mediumSelect, [["", "自動（名前から）"]], (KC.vocab.media || []).map(function (r) { return [r.key, r.label]; }));
+  fillSelect(els.methodSelect, [["", "自動"], ["-", "なし（書かない）"]], (KC.vocab.methods || []).map(function (r) { return [r.key, r.label]; }));
+  fillSelect(els.handoffSelect, [["", "自動"], ["-", "未設定"]], [["push", KC.vocab.handoff.push.label], ["pull", KC.vocab.handoff.pull.label], ["none", "引き継ぎなし（同じ人）"]]);
+  function refreshNodePopover() {
+    var n = nodeById(popNodeId);
+    if (!n) return;
+    var type = typeOf(n);
+    els.typeRow.style.display = n.source === "manual" ? "flex" : "none";
+    els.typeRow.querySelectorAll("[data-type]").forEach(function (b) { b.classList.toggle("active", b.dataset.type === type); });
+    els.whoRow.style.display = type === "work" && ["task", "done", "pending"].indexOf(n.cls) === -1 ? "block" : "none";
+    if (document.activeElement !== els.whoInput) els.whoInput.value = n.who || "";
+    els.actorSelect.value = n.actor_locked ? (n.actor || "") : "";
+    els.mediumRow.style.display = type === "info" ? "block" : "none";
+    els.mediumSelect.value = n.medium_edited ? (n.medium || "") : "";
+  }
   function openNodePopover(id, ev) {
     closePopovers();
-    var n = nodeById(id);
-    if (!n) return;
+    if (!nodeById(id)) return;
     popNodeId = id;
-    els.clsRow.style.display = n.source === "manual" ? "block" : "none";
-    els.clsSelect.value = n.cls || "manual";
+    refreshNodePopover();
     placePopover(els.nodePop, ev);
   }
   function openEdgePopover(id, ev) {
@@ -8841,9 +9603,14 @@ document.addEventListener("DOMContentLoaded", function () {
     var e = edgeById(id);
     if (!e) return;
     popEdgeId = id;
+    var work = e.type === "work";
     els.edgeLabel.value = e.label || "";
+    els.edgeType.textContent = work ? "仕事の流れ（作業 → 作業）" : "情報の流れ";
+    els.methodRow.style.display = work ? "none" : "block";
+    els.handoffRow.style.display = work ? "block" : "none";
+    els.methodSelect.value = e.method_edited ? (e.method || "-") : "";
+    els.handoffSelect.value = e.handoff_edited ? (e.handoff || "-") : "";
     placePopover(els.edgePop, ev);
-    els.edgeLabel.focus();
   }
 
   els.nodePop.querySelectorAll(".fe-color").forEach(function (sw) {
@@ -8856,12 +9623,66 @@ document.addEventListener("DOMContentLoaded", function () {
       pushHistory();
     });
   });
-  els.clsSelect.addEventListener("change", function () {
+  els.typeRow.querySelectorAll("[data-type]").forEach(function (b) {
+    b.addEventListener("click", function () {
+      var n = nodeById(popNodeId);
+      var t = b.dataset.type;
+      if (!n || n.source !== "manual" || typeOf(n) === t) return;
+      n.type = t;
+      n.cls = t === "info" ? "source" : "work";
+      n.medium = t === "info" ? "unknown" : "";
+      n.medium_edited = false;
+      n.actor = ""; n.who = ""; n.who_state = t === "work" ? "unconfirmed" : ""; n.who_edited = false; n.actor_locked = false;
+      G.edges = G.edges.filter(function (e) { var x = nodeById(e.from), y = nodeById(e.to); return !(x && y && typeOf(x) === "info" && typeOf(y) === "info"); });
+      G.edges.forEach(function (e) { var x = nodeById(e.from), y = nodeById(e.to); if (x && y) e.type = typeOf(x) === "work" && typeOf(y) === "work" ? "work" : "info"; });
+      renderAll();
+      refreshNodePopover();
+      pushHistory();
+      classify([n]);
+    });
+  });
+  els.whoInput.addEventListener("change", function () {
     var n = nodeById(popNodeId);
-    if (!n || n.source !== "manual") return;
-    n.cls = els.clsSelect.value;
-    n.shape = null;
-    renderAll();
+    if (!n) return;
+    n.who = els.whoInput.value.trim();
+    n.who_edited = true;
+    pushHistory();
+    if (n.actor_locked) renderAll(); else classify([n]);
+  });
+  els.actorSelect.addEventListener("change", function () {
+    var n = nodeById(popNodeId);
+    if (!n) return;
+    var v = els.actorSelect.value;
+    n.who_edited = true;
+    if (v) { n.actor = v; n.actor_locked = true; n.who_state = v === "unknown" ? "unknown" : "ok"; renderAll(); }
+    else { n.actor_locked = false; classify([n]); }
+    pushHistory();
+  });
+  els.mediumSelect.addEventListener("change", function () {
+    var n = nodeById(popNodeId);
+    if (!n) return;
+    var v = els.mediumSelect.value;
+    if (v) { n.medium = v; n.medium_edited = true; renderAll(); }
+    else { n.medium_edited = false; classify([n]); }
+    pushHistory();
+  });
+  els.methodSelect.addEventListener("change", function () {
+    var e = edgeById(popEdgeId);
+    if (!e) return;
+    var v = els.methodSelect.value;
+    if (!v) e.method_edited = false;
+    else if (v === "-") { e.method = ""; e.show_method = false; e.method_edited = true; }
+    else { e.method = v; e.show_method = true; e.method_edited = true; }
+    drawEdges();
+    pushHistory();
+  });
+  els.handoffSelect.addEventListener("change", function () {
+    var e = edgeById(popEdgeId);
+    if (!e) return;
+    var v = els.handoffSelect.value;
+    if (!v) e.handoff_edited = false;
+    else { e.handoff = v === "-" ? "" : v; e.handoff_edited = true; }
+    drawEdges();
     pushHistory();
   });
   document.getElementById("fe-node-delete").addEventListener("click", function () { if (popNodeId) deleteNode(popNodeId); });
@@ -9180,10 +10001,12 @@ document.addEventListener("DOMContentLoaded", function () {
   document.getElementById("fe-save").addEventListener("click", save);
   els.undo.addEventListener("click", undo);
   els.redo.addEventListener("click", redo);
-  document.getElementById("fe-add").addEventListener("click", function () {
-    var r = els.container.getBoundingClientRect();
-    var c = toCanvas(r.left + r.width / 2, r.top + r.height / 2);
-    addNode(Math.round(c.x - 60), Math.round(c.y - 20), "新しいノード", "manual");
+  ["work", "info"].forEach(function (t) {
+    document.getElementById("fe-add-" + t).addEventListener("click", function () {
+      var r = els.container.getBoundingClientRect();
+      var c = toCanvas(r.left + r.width / 2, r.top + r.height / 2);
+      addNode(Math.round(c.x - 60), Math.round(c.y - 20), t === "info" ? "新しい情報" : "新しい作業", t);
+    });
   });
   document.getElementById("fe-layout").addEventListener("click", function () { autoLayout(); fitView(); pushHistory(); });
   document.getElementById("fe-fit").addEventListener("click", fitView);
@@ -9435,17 +10258,29 @@ document.addEventListener("DOMContentLoaded", function () {
 .ks rect, .ks path { fill: #fff; stroke: #6c757d; stroke-width: 1.2; }
 .kind-chip .fi { margin-right: 0; }
 .fi { margin-right: 0.2em; }
-.fi-done, .fi-csv, .fi-phone { color: #198754; }
-.fi-excel { color: #1d6f42; }
-.fi-word { color: #2b579a; }
-.fi-ppt { color: #c43e1c; }
-.fi-pdf { color: #d93025; }
-.fi-paper, .fi-doc { color: #6c757d; }
-.fi-system { color: #495057; }
-.fi-folder { color: #d39e00; }
-.fi-mail { color: #0d6efd; }
-.fi-chat { color: #5b5fc7; }
-.fi-web { color: #0aa2c0; }
+.fi.m-excel { color: #1d6f42; }
+.fi.m-word { color: #2b579a; }
+.fi.m-ppt { color: #c43e1c; }
+.fi.m-pdf { color: #d93025; }
+.fi.m-csv, .fi.done { color: #198754; }
+.fi.m-paper, .fi.m-doc { color: #6c757d; }
+.fi.m-photo, .fi.m-board { color: #6f42c1; }
+.fi.m-system { color: #495057; }
+.fi.m-web { color: #0aa2c0; }
+.fi.m-mail { color: #0d6efd; }
+.fi.m-chat { color: #5b5fc7; }
+.fi.m-verbal { color: #b35c00; }
+.fi.m-unknown, .fi.who-unconfirmed, .fi.pending { color: #adb5bd; }
+.map-legend { margin-top: 0.15rem; }
+.lg-item { display: inline-flex; align-items: center; gap: 0.3rem; font-size: 0.78rem; color: #495057; margin-right: 0.85rem; white-space: nowrap; }
+.lg-line { display: inline-block; width: 26px; height: 0; vertical-align: middle; }
+.lg-line-work { border-top: 3px solid #495057; }
+.lg-line-info { border-top: 1.5px solid #5b8def; }
+.lg-line-guess { border-top: 2px dashed #6c757d; }
+.lg-work { background: #fff; border-color: #6c757d; }
+.lg-source { background: #fff3cd; border-color: #e0a800; }
+.lg-output { background: #fff; border-color: #0d6efd; border-style: solid; }
+.lg-dupout { background: #ffe5d0; border-color: #fd7e14; border-style: solid; border-width: 2px; }
 .flow-max-btn { white-space: nowrap; }
 .card.flow-max { position: fixed; inset: 0; z-index: 1050; margin: 0; border-radius: 0; background: #fff; }
 .card.flow-max > .card-body { display: flex; flex-direction: column; height: 100%; min-height: 0; }
@@ -9460,7 +10295,13 @@ body.flow-max-open { overflow: hidden; }
 .fe-sep { width: 1px; height: 1.4rem; background: #dee2e6; margin: 0 0.2rem; }
 .fe-status { font-size: 0.8rem; margin-left: 0.6rem; }
 .fe-hint { font-size: 0.78rem; color: #6c757d; margin-bottom: 0.3rem; }
-.fe-legend { display: inline-block; margin-left: 0.5rem; }
+.mv-move { display: flex; gap: 2px; }
+.mv-move .btn { padding: 0 0.4rem; line-height: 1.3; font-size: 0.7rem; }
+.mv-words { min-width: 16rem; }
+.mv-table td:nth-child(2) { min-width: 11rem; }
+.mv-table td:nth-child(4) { min-width: 7rem; }
+.mv-icon { font-size: 1.15rem; width: 1.3rem; text-align: center; }
+.mv-savebar { position: sticky; bottom: 0; z-index: 5; display: flex; gap: 0.5rem; align-items: center; padding: 0.75rem 0; background: linear-gradient(to top, #f5f6f8 70%, rgba(245, 246, 248, 0)); }
 .member-wrap { overflow: auto; max-height: 72vh; }
 .member-table th, .member-table td { white-space: nowrap; }
 .member-table thead th { position: sticky; top: 0; z-index: 1; background: #fff; }
@@ -9471,11 +10312,6 @@ body.flow-max-open { overflow: hidden; }
 .member-table tr.is-excluded td { color: #adb5bd; background: #f8f9fa; }
 .member-table tr.is-excluded .member-yes { color: #adb5bd; }
 .member-table tfoot th, .member-table tfoot td { background: #f8f9fa; font-size: 0.8rem; line-height: 1.2; }
-.fe-edge-legend { margin-left: 0.4rem; }
-.fe-line { display: inline-block; width: 22px; height: 0; border-top: 2px solid #0d6efd; vertical-align: middle; margin: 0 0.2rem 0 0.4rem; }
-.fe-line-goods { border-top-width: 4px; border-top-color: #198754; }
-.fe-line-seq { border-top-style: dashed; border-top-color: #6c757d; }
-.fe-line-manual { border-top-style: dashed; border-top-color: #6f42c1; }
 .fe-mode { display: none; font-size: 0.85rem; background: #e7f1ff; color: #052c65; border: 1px solid #b6d4fe; border-radius: 0.4rem; padding: 0.25rem 0.6rem; margin-bottom: 0.3rem; }
 .fe-container { position: relative; flex: 1; overflow: hidden; border: 1px solid #dee2e6; border-radius: 0.5rem; background: #fff;
   background-image: linear-gradient(#f1f3f5 1px, transparent 1px), linear-gradient(90deg, #f1f3f5 1px, transparent 1px); background-size: 24px 24px; cursor: grab; }
@@ -9487,10 +10323,16 @@ body.flow-max-open { overflow: hidden; }
 .fe-hit { fill: none; stroke: transparent; stroke-width: 16px; }
 .fe-edge { fill: none; stroke: #0d6efd; stroke-width: 2px; }
 .fe-edge-group:hover .fe-edge { stroke-width: 3.5px; }
-.fe-kind-goods { stroke: #198754; stroke-width: 3.5px; }
-.fe-kind-seq { stroke: #6c757d; stroke-dasharray: 6 4; }
-.fe-kind-relation { stroke: #adb5bd; stroke-width: 1.5px; stroke-dasharray: 2 4; }
-.fe-kind-manual, .fe-src-manual { stroke: #6f42c1; stroke-dasharray: 8 4; }
+.fe-edge.fe-type-info { stroke: #5b8def; stroke-width: 1.6px; }
+.fe-edge.fe-type-work { stroke: #495057; stroke-width: 2.6px; }
+.fe-edge.fe-inferred { stroke-dasharray: 6 4; }
+.fe-who { font-size: 11px; font-weight: 700; color: #495057; line-height: 1.2; margin-bottom: 2px; }
+.fe-cls-work { --fe-fill: #fff; --fe-stroke: #6c757d; color: #343a40; }
+.fe-type-row { display: flex; align-items: center; }
+.fe-type-row .btn.active { background: #e7f1ff; border-color: #0d6efd; color: #052c65; }
+.fe-node.fe-manual { border-style: solid; }
+.fe-node.fe-manual::after { content: "手"; position: absolute; left: -7px; top: -8px; font-size: 9px; line-height: 1.4; padding: 0 4px; border-radius: 6px; background: #6f42c1; color: #fff; }
+.fe-shape-rect { border-radius: 2px; }
 .fe-edge-label { font-size: 11px; fill: #343a40; paint-order: stroke; stroke: #fff; stroke-width: 3px; pointer-events: none; }
 .fe-temp-line { fill: none; stroke: #60a5fa; stroke-width: 2px; stroke-dasharray: 4 4; }
 #fe-nodes { position: absolute; left: 0; top: 0; }
@@ -9508,7 +10350,7 @@ body.flow-max-open { overflow: hidden; }
 .fe-shape-hex { padding-left: 18px; padding-right: 18px; }
 .fe-shape-bg { position: absolute; left: -2px; top: -2px; width: calc(100% + 4px); height: calc(100% + 4px); overflow: visible; pointer-events: none; z-index: -1; filter: drop-shadow(0 2px 2px rgba(0,0,0,0.08)); }
 .fe-shape-bg path { fill: var(--fe-fill, #fff); stroke: var(--fe-stroke, #0d6efd); stroke-width: 2px; vector-effect: non-scaling-stroke; }
-.fe-cls-output .fe-shape-bg path, .fe-cls-dupout .fe-shape-bg path, .fe-cls-note .fe-shape-bg path, .fe-cls-pending .fe-shape-bg path, .fe-manual .fe-shape-bg path { stroke-dasharray: 6 3; }
+.fe-cls-pending .fe-shape-bg path { stroke-dasharray: 6 3; }
 .fe-node:hover { box-shadow: 0 4px 10px rgba(0,0,0,0.15); z-index: 5; }
 .fe-node.fe-selected { outline: 3px solid rgba(25, 135, 84, 0.45); outline-offset: 1px; z-index: 6; }
 .fe-node.fe-link-source { outline: 3px solid rgba(246, 173, 85, 0.8); outline-offset: 1px; }
@@ -9524,18 +10366,10 @@ body.flow-max-open { overflow: hidden; }
 .fe-btn-del { color: #dc3545; }
 .fe-cls-task { --fe-fill: #e7f1ff; --fe-stroke: #0d6efd; color: #052c65; }
 .fe-cls-done { --fe-fill: #d1e7dd; --fe-stroke: #198754; color: #0f5132; }
-.fe-cls-source { --fe-fill: #fff3cd; --fe-stroke: #ffc107; color: #664d03; }
-.fe-cls-system { --fe-fill: #f8f9fa; --fe-stroke: #6c757d; color: #343a40; }
-.fe-cls-output { --fe-fill: #fff; --fe-stroke: #0d6efd; border-style: dashed; color: #052c65; }
-.fe-cls-dupout { --fe-fill: #fff3cd; --fe-stroke: #fd7e14; border-style: dashed; color: #664d03; }
-.fe-cls-person { --fe-fill: #fde2e4; --fe-stroke: #dc3545; color: #842029; }
-.fe-cls-wp { --fe-fill: #e7f1ff; --fe-stroke: #0d6efd; color: #052c65; }
-.fe-cls-ext { --fe-fill: #fff3cd; --fe-stroke: #fd7e14; color: #664d03; }
-.fe-cls-goods { --fe-fill: #e2f0d9; --fe-stroke: #198754; color: #0f5132; }
-.fe-cls-place { --fe-fill: #f1f3f5; --fe-stroke: #adb5bd; color: #343a40; }
+.fe-cls-source { --fe-fill: #fff3cd; --fe-stroke: #e0a800; color: #664d03; }
+.fe-cls-output { --fe-fill: #fff; --fe-stroke: #0d6efd; color: #052c65; }
+.fe-cls-dupout { --fe-fill: #ffe5d0; --fe-stroke: #fd7e14; color: #7a3a00; }
 .fe-cls-warn { --fe-fill: #f8d7da; --fe-stroke: #dc3545; color: #842029; }
-.fe-cls-note { --fe-fill: #fff; --fe-stroke: #adb5bd; border-style: dashed; color: #6c757d; }
-.fe-cls-manual { --fe-fill: #e9d5ff; --fe-stroke: #6f42c1; color: #3b0764; }
 .fe-cls-pending { --fe-fill: #f8f9fa; --fe-stroke: #adb5bd; border-style: dashed; color: #6c757d; }
 .fe-node[data-color="white"] { --fe-fill: #fff; }
 .fe-node[data-color="red"] { --fe-fill: #fee2e2; }
@@ -9545,19 +10379,6 @@ body.flow-max-open { overflow: hidden; }
 .fe-node[data-color="blue"] { --fe-fill: #dbeafe; }
 .fe-node[data-color="purple"] { --fe-fill: #e9d5ff; }
 .fe-node[data-color="pink"] { --fe-fill: #fce7f3; }
-.fe-lg-task { background: #e7f1ff; border-color: #0d6efd; }
-.fe-lg-source { background: #fff3cd; border-color: #ffc107; }
-.fe-lg-system { background: #f8f9fa; border-color: #6c757d; }
-.fe-lg-output { background: #fff; border-color: #0d6efd; border-style: dashed; }
-.fe-lg-person { background: #fde2e4; border-color: #dc3545; }
-.fe-lg-wp { background: #e7f1ff; border-color: #0d6efd; border-radius: 1rem; }
-.fe-lg-ext { background: #fff3cd; border-color: #fd7e14; border-radius: 1rem; }
-.fe-lg-goods { background: #e2f0d9; border-color: #198754; }
-.fe-lg-place { background: #f1f3f5; border-color: #adb5bd; border-radius: 1rem; }
-.fe-lg-warn { background: #f8d7da; border-color: #dc3545; }
-.fe-lg-note { background: #fff; border-color: #adb5bd; border-style: dashed; }
-.fe-lg-manual { background: #e9d5ff; border-color: #6f42c1; }
-.fe-lg-pending { background: #f8f9fa; border-color: #adb5bd; border-style: dashed; }
 .fe-selection { display: none; position: absolute; border: 2px dashed #0d6efd; background: rgba(13,110,253,0.08); pointer-events: none; z-index: 50; }
 .fe-popover { display: none; position: absolute; z-index: 100; background: #fff; border: 1px solid #ced4da; border-radius: 0.5rem; padding: 0.6rem; width: 230px; box-shadow: 0 6px 16px rgba(0,0,0,0.18); font-size: 0.85rem; }
 .fe-popover.fe-show { display: block; }
@@ -10113,7 +10934,6 @@ html { scroll-behavior: smooth; }
 
 /* ---- 業務マップ: 同じアウトプット（統合候補） ---- */
 .lg-dupout { background: #fff3cd; border-color: #fd7e14; border-style: dashed; }
-.fe-lg-dupout { background: #fff3cd; border-color: #fd7e14; border-style: dashed; }
 .fe-cls-dupout { background: #fff3cd; border-color: #fd7e14; border-style: dashed; color: #664d03; transform: skewX(-6deg); }
 .fe-cls-dupout .fe-text { transform: skewX(6deg); }
 .rq-lead { color: var(--ui-text-2); margin: 0.25rem 0 0; max-width: 46rem; }
@@ -10501,7 +11321,7 @@ html { scroll-behavior: smooth; }
   function renderSteps(steps, upto) {
     stepsBox.innerHTML = "";
     steps.slice(0, upto).forEach(function (x, i) {
-      stepsBox.appendChild(el("li", i >= conv.shownSteps ? "is-new" : null, x.action + (x.system ? "［" + x.system + "］" : "")));
+      stepsBox.appendChild(el("li", i >= conv.shownSteps ? "is-new" : null, x.action + (x.system ? "［" + x.system + "］" : "") + (x.to ? " → " + x.to + (x.how ? "（" + x.how + "）" : "") : "")));
     });
     var sc = $("rq-stepcount");
     sc.textContent = "手順 " + upto;

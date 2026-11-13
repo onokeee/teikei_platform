@@ -32,30 +32,45 @@ def smoke_bizmap_edit():
     client.post("/admin/demo/load")
 
     import app as app_module
-    kinds = {(c, t): app_module.node_kind(c, t) for c, t in (
-        ("source", "他のExcel"), ("source", "紙の帳票"), ("source", "メール"), ("source", "人から聞く"), ("system", "生産管理システム"),
-        ("output", "残業予定表（Excel）をメール送付"), ("output", "不良報告メール"), ("wp", "製造1課（職場内）"), ("wp", "製造1課 上司"),
-        ("ext", "顧客・社外"), ("warn", "利用者不明"), ("source", "共有フォルダのExcel"), ("wp", "生産管理システム"), ("output", "改訂管理台帳"))}
-    check(list(kinds.values()) == ["excel", "paper", "mail", "person", "system", "excel", "mail", "team", "person", "org", "unknown", "excel", "system", "doc"],
-          f"箱の種類を名前から判定（Excel・紙・メール・ヒト・システム…）: {list(kinds.values())}")
-    dg = app_module.Diagram()
-    dg.node("s_a", "日次実績集計表（Excel）", "source")
-    dg.node("s_b", "生産管理システム", "system")
-    dg.node("p_a", "製造1課 上司", "wp")
-    dg.node("t1", "週報の作成", "task")
-    src = dg.render()
-    check("s_a:::source@{ shape: doc, label:" in src and "bi-file-earmark-excel-fill" in src and 's_b[("' in src and "bi-database-fill" in src and 'p_a(["' in src and "bi-person-fill" in src and 't1["週報の作成"]:::task' in src,
-          "Mermaid: 書類は下が波の形、システムは円柱、ヒトは丸い端の形で、名前の前にアイコン（業務はそのまま）")
-    check(dg.kinds_used() == ["task", "system", "excel", "person"] and "Excel" in app_module.kind_legend_html(dg.kinds_used()) and "業務" not in app_module.kind_legend_html(dg.kinds_used()),
-          "凡例には図に出てくる形・アイコンだけを出す")
+    with app.app_context():
+        media = {t: app_module.medium_of(t) for t in ("残業予定表（Excel）をメール送付", "不良報告メール", "メール", "紙の日報", "生産管理システム", "共有フォルダのExcel", "パスワード表", "ＰＤＦ", "各ラインリーダー（口頭）", "謎のもの")}
+        check(list(media.values()) == ["excel", "mail", "unknown", "paper", "system", "excel", "doc", "pdf", "verbal", "unknown"], f"情報の媒体を名前から判定（区分の設定の語・除く語・全角）: {media}")
+        who = {t: (app_module.who_of(t, "製造1課")["actor"], app_module.who_of(t, "製造1課")["label"]) for t in ("課長", "品質保証課 課長", "生産管理課の進捗確認", "製造1課（職場内）", "山田さん", "顧客", "日常点検", "分からない")}
+        check(who == {"課長": ("boss", "製造1課 課長"), "品質保証課 課長": ("dept", "品質保証課 課長"), "生産管理課の進捗確認": ("dept", "生産管理課の進捗確認"),
+                      "製造1課（職場内）": ("team", "製造1課の人"), "山田さん": ("team", "製造1課の担当者"), "顧客": ("external", "顧客"), "日常点検": ("", "日常点検"), "分からない": ("unknown", "利用者不明")},
+              f"作業のだれ: 職場マスタ → 区分の語 → 未確認。役職だけなら職場名を付け、氏名は担当者に置き換える: {who}")
+        check([app_module.field_role(t) for t in ("メール", "生産管理システム", "Excel（共有フォルダ）", "紙の日報")] == [("line", "mail"), ("both", "system"), ("both", "folder"), ("box", "")],
+              "手順の欄: 渡し方は線の方法、置き場は箱と方法、それ以外は情報の箱")
+        check([app_module.handoff_of(t) for t in ("課長に渡す", "各ラインから日報を集める", "前週比のコメントを書く", "生産管理課に問い合わせる")] == ["push", "pull", "", "pull"],
+              "引き継ぎ方は動詞（伝えに行く語・取りに行く語）で決める")
+        check(app_module.mask_person_names("山田さん、課長さん、品質保証課") == "担当者、課長、品質保証課", "氏名は担当者に置き換え、役職は残す")
+        dg = app_module.Diagram()
+        dg.node("s_a", "日次実績集計表（Excel）", "source")
+        dg.node("s_b", "生産管理システム", "source")
+        dg.node("t1", "週報の作成", "task", who={"actor": "team", "label": "製造1課", "state": "ok"})
+        dg.node("p_a", "朝会で確認する", "work", who=app_module.who_of("課長", "製造1課"))
+        dg.edge("s_a", "t1", "info")
+        dg.edge("t1", "p_a", "work", handoff="push")
+        dg.edge("s_b", "t1", "info", method="system", show_method=app_module.show_method_for("system", "system"))
+        src = dg.render()
+        check("s_a:::source@{ shape: doc, label:" in src and "bi-file-earmark-excel-fill" in src and 's_b[("' in src and 't1["週報の作成"]:::task' in src
+              and "<b>製造1課 課長</b>" in src and 'p_a["' in src and '== "前が伝えに行く" ==>' in src and "linkStyle 1 stroke:#495057" in src and "システム（登録・参照）" not in src,
+              "Mermaid: 作業は四角（だれを太字で）、情報は媒体の形とアイコン、仕事の流れは太い灰の矢印に引き継ぎ方、媒体から分かる方法は書かない")
+        legend = app_module.map_legend_html(dg)
+        check("箱と線" in legend and "仕事の流れ" in legend and "情報の流れ" in legend and "Excel" in legend and "PowerPoint" not in legend and "上司・役職" in legend, "凡例は箱と線の2種類と、図に出てくる色・媒体・だれだけ")
+        check('"how"' in app_module.INTAKE_PROMPT and '"use"' in app_module.INTAKE_PROMPT and '"how_from"' in app_module.INTAKE_PROMPT and "誰にどうやって渡し" in app_module.INTAKE_PROMPT
+              and "氏名・〇〇さん" in app_module.INTAKE_PROMPT and "{methods}" not in app_module._intake_prompt() and "state.purpose" in app_module.FINALIZE_PROMPT,
+              "聞き取り: 渡す相手・渡し方・使いみちを1問で聞き、受け取り方も集め、氏名は書かない")
     html = client.get("/bizmap/").data.decode("utf-8")
-    check("形・アイコン" in html and "kind-chip" in html and "legend-row" in html, "業務マップ: 色（役割）と形・アイコン（種類）の凡例")
+    check("map-legend" in html and "箱と線" in html, "業務マップ: 箱と線・色・媒体・だれの凡例")
     js = client.get("/static/flows.js").data.decode("utf-8")
     check("最大表示" in js and "requestFullscreen" in js and "flow-max" in js and "bootstrap-icons" in js, "閲覧: 図の最大表示（Esc で戻る）とアイコンの読み込み待ち")
     html = client.get("/bizmap/edit?kind=info").data.decode("utf-8")
     fe = client.get("/static/flowedit.js").data.decode("utf-8")
-    check('id="fe-max"' in html and 'id="fe-kinds"' in html and 'id="fe-kind-legend"' in html and "kindOf" in fe and "fe-shape-" in fe and "requestFullscreen" in fe,
-          "編集: 最大表示ボタン、形・アイコン（判定ルールはサーバーと共通）")
+    check('id="fe-max"' in html and 'id="fe-add-work"' in html and 'id="fe-add-info"' in html and 'id="fe-type-row"' in html and 'id="fe-method-select"' in html and 'id="fe-handoff-select"' in html
+          and "classify(" in fe and "情報どうしは結べません" in fe and "requestFullscreen" in fe, "編集: ＋作業・＋情報、種類・だれ・媒体、線の方法・引き継ぎ方、情報どうしは結べない")
+    r = client.post("/bizmap/api/classify", json={"items": [{"id": "a", "type": "info", "text": "週報（Excel）"}, {"id": "b", "type": "work", "who": "課長", "workplace": "製造1課"}]})
+    check(r.get_json()["items"] == [{"id": "a", "medium": "excel"}, {"id": "b", "actor": "boss", "who": "製造1課 課長", "who_state": "ok"}], "編集画面の判定はサーバーに問い合わせる（区分の設定と同じ判定）")
 
     # ---- 聞き取りの答えと業務マップの連動 ----
     with app.test_request_context():
@@ -63,51 +78,57 @@ def smoke_bizmap_edit():
         by_name = {t.name: t for t in tasks}
         t_day, t_week, t_asm = by_name["日報の実績をExcelの集計表に転記する"], by_name["週報の作成"], by_name["組立実績の日次入力（生産管理システム）"]
         flow = app_module.build_info_flow(tasks)
-        text_of = {k: n["text"] for k, n in flow.nodes.items()}
-        into = lambda t: [(text_of[a], e["label"], e["style"]) for (a, b), e in flow.edges.items() if b == f"t{t.id}"]
-        out_of = lambda t: [(text_of[b], e["label"]) for (a, b), e in flow.edges.items() if a in (f"t{t.id}", f"o{t.id}")]
-        check(("紙の日報", "", "solid") in into(t_day) and not any(x[0] == "各ラインの手書き日報" for x in into(t_day)),
-              f"取り出し元は手順で答えた名前（紙の日報）で、同じものは1つ: {into(t_day)}")
-        check((t_day.output, "", "dotted") in into(t_week) and not any(x[0] == "Excel（週報）" for x in into(t_week)),
-              f"ある業務のできるもの（日次実績集計表）を別の業務が使うと、点線で自動につながる（作業中のファイルは取り出し元にしない）: {into(t_week)}")
-        check(("生産管理課", "") in out_of(t_asm) and ("生産管理システム", "") in out_of(t_asm) and ("他部署", "") not in out_of(t_asm),
-              f"渡す相手は手順の名前（生産管理課）で、入力するシステムへは業務から矢印: {out_of(t_asm)}")
-        check(("製造1課 課長", "メール") in out_of(t_week), "渡し方（メール）を矢印に書き、課長は職場名つきの箱")
-        cat_labels = {"他のExcel", "紙の帳票", "メール", "人から聞く", "その他", "生産管理システム"}
-        check(not any(e["label"] in cat_labels - {"メール"} for e in flow.edges.values()), "区分名（他のExcel・紙の帳票など）を矢印のラベルにしない")
-        steps = app_module.build_steps_flow(t_day.steps)
-        st = {(steps.nodes[a]["text"], steps.nodes[b]["text"], e["label"]) for (a, b), e in steps.edges.items()}
-        check(("紙の日報", "① 各ラインから手書きの日報を集める", "前日の生産実績") in st and ("紙の日報", "② 日報の数字を日次実績集計表に転記する", "") in st
-              and ("② 日報の数字を日次実績集計表に転記する", "Excel（日次実績集計表）", "") in st,
-              "手順図: 何を（前日の生産実績）を矢印に書き、前の手順の帳票は線でつなぎ、転記先は手順から矢印")
-        steps = app_module.build_steps_flow(t_asm.steps)
-        st = {(steps.nodes[a]["text"], steps.nodes[b]["text"], e["label"]) for (a, b), e in steps.edges.items()}
-        check(("② 生産管理システムに品番ごとの実績を入力する", "生産管理システム", "") in st and ("システム上の実績データ", "生産管理課", "") in st,
-              "手順図: 入力するシステムは手順から矢印、渡す相手の部署は名前で")
+        nd = flow.nodes
+        into = lambda t: [(nd[a]["text"], nd[a]["type"], e["type"], e["inferred"]) for (a, b), e in flow.edges.items() if b == f"t{t.id}"]
+        out_of = lambda t: [(nd[b].get("who") or nd[b]["text"], nd[b]["type"], app_module.edge_label(e)) for (a, b), e in flow.edges.items() if a in (f"t{t.id}", f"o{t.id}")]
+        check(("紙の日報", "info", "info", False) in into(t_day) and not any(x[0] == "各ラインの手書き日報" for x in into(t_day)),
+              f"取り出し元は手順で答えた名前（紙の日報）の情報の箱で、同じものは1つ: {into(t_day)}")
+        check((t_day.output, "info", "info", True) in into(t_week) and not any(x[0] == "Excel（週報）" for x in into(t_week)),
+              f"別の業務のできるもの（日次実績集計表）を使うと、点線（推定）の情報の流れで自動につながる: {into(t_week)}")
+        check(("生産管理課", "work", "") in out_of(t_asm) and ("生産管理システム", "info", "") in out_of(t_asm) and not any(x[0] == "他部署" for x in out_of(t_asm)),
+              f"渡す相手は相手の作業（だれ＝生産管理課）、入力するシステムは書き込む情報の箱: {out_of(t_asm)}")
+        check(("製造1課 課長", "work", "メール") in out_of(t_week), f"渡し方（メール）を情報の流れのラベルに書き、課長は職場名つき: {out_of(t_week)}")
+        types = {k: n["type"] for k, n in nd.items()}
+        bad = [(a, b) for (a, b), e in flow.edges.items() if (e["type"] == "work") != (types[a] == "work" and types[b] == "work") or (types[a] == "info" and types[b] == "info")]
+        check(not bad and set(n["type"] for n in nd.values()) == {"work", "info"} and set(e["type"] for e in flow.edges.values()) <= {"work", "info"}, f"箱は作業と情報、線は仕事の流れと情報の流れだけ（規則違反 {len(bad)} 本）")
+        labels = {app_module.edge_label(e) for e in flow.edges.values()}
+        check(not labels & {"他のExcel", "紙の帳票", "人から聞く", "その他", "未設定", "次の業務", "前の業務"}, f"区分名や「未設定」を線のラベルにしない: {labels}")
+        steps = app_module.build_task_flow(t_day)
+        st = {(steps.nodes[a].get("who") if steps.nodes[a]["cls"] == "work" else steps.nodes[a]["text"], steps.nodes[b].get("who") if steps.nodes[b]["cls"] == "work" else steps.nodes[b]["text"], e["type"], app_module.edge_label(e)) for (a, b), e in steps.edges.items()}
+        check(("紙の日報", "① 各ラインから手書きの日報を集める", "info", "") in st and ("紙の日報", "② 日報の数字を日次実績集計表に転記する", "info", "") in st
+              and ("② 日報の数字を日次実績集計表に転記する", "Excel（日次実績集計表）", "info", "") in st and ("④ 朝会用に印刷して課長に渡す", "製造1課 課長", "work", "前が伝えに行く") in st
+              and ("印刷した集計表", "製造1課 課長", "info", "") in st and ("① 各ラインから手書きの日報を集める", "② 日報の数字を日次実績集計表に転記する", "work", "") in st,
+              f"手順図: 帳票 → 手順、手順 → 転記先、渡すもの → 相手の作業（情報の流れ）と 渡す手順 → 相手の作業（仕事の流れ・前が伝えに行く）")
+        recip = next(n for n in steps.nodes.values() if n["cls"] == "work" and n["who"] == "製造1課 課長")
+        check(recip["text"] == t_day.purpose, "相手の作業の内容は使いみち（相手が1つなら業務の目的）")
+        steps = app_module.build_task_flow(t_asm)
+        st = {(steps.nodes[a].get("who") if steps.nodes[a]["cls"] == "work" else steps.nodes[a]["text"], steps.nodes[b].get("who") if steps.nodes[b]["cls"] == "work" else steps.nodes[b]["text"], e["type"]) for (a, b), e in steps.edges.items()}
+        check(("② 生産管理システムに品番ごとの実績を入力する", "生産管理システム", "info") in st and ("システム上の実績データ", "生産管理課", "info") in st,
+              "手順図: 入力するシステムは手順から情報の流れ、渡す相手の部署は相手の作業")
         rows = app_module.source_rows(tasks)
         check(any(r["name"] == "紙の日報" for r in rows), "システム・情報源の表も同じ名前で数える")
-    check(app_module.users_from_names(["課長", "生産管理課", "顧客", "山田さん", "生産管理システム"]) == ["上司", "他部署", "顧客・社外", "職場内"],
-          "渡す相手の名前から利用者の区分を決める（AI が使えないときの予備）")
     with app.app_context():
-        state = app_module._clean_state({"steps": [{"action": "集計する", "to": "課長"}], "recipients": ["品質保証課"], "purpose": "朝会で前日の実績を確認する"})
+        check(app_module.users_from_names(["課長", "生産管理課", "顧客", "山田さん", "生産管理システム"]) == ["上司", "他部署", "顧客・社外", "職場内"],
+              "渡す相手の名前から利用者の区分を決める（AI が使えないときの予備）")
+        state = app_module._clean_state({"steps": [{"action": "集計する", "to": "課長", "how": "メール", "use": "朝会で確認"}], "recipients": ["品質保証課"], "purpose": "朝会で前日の実績を確認する"})
         tmp = Task(name="予備判定の確認")
         app_module._fill_from_state(tmp, state)
-        check(state["purpose"] == "朝会で前日の実績を確認する" and tmp.purpose == "朝会で前日の実績を確認する" and tmp.output_users_list == ["他部署", "上司"],
-              f"使いみちは目的に入り、渡す相手（品質保証課・課長）は他部署・上司になる: {tmp.output_users_list}")
+        check(state["purpose"] == "朝会で前日の実績を確認する" and state["steps"][0]["how"] == "メール" and state["steps"][0]["use"] == "朝会で確認" and tmp.purpose == "朝会で前日の実績を確認する" and tmp.output_users_list == ["他部署", "上司"],
+              f"手順の渡し方・使いみちを受け取り、使いみちは目的に、渡す相手（品質保証課・課長）は他部署・上司になる: {tmp.output_users_list}")
         db.session.rollback()
-    check("誰が何に使うか" in app_module.INTAKE_PROMPT and '"purpose"' in app_module.INTAKE_PROMPT and "できるもの（outputs と steps の output）も" in app_module.INTAKE_PROMPT and "state.purpose" in app_module.FINALIZE_PROMPT,
-          "聞き取り: 渡す相手と使いみちを1問で聞き、できるものの名前もそろえる")
-    with app.app_context():
         r0 = Respondent.query.filter(Respondent.emp_id == "E001").first()
-        known = app_module.intake_handlers(r0)["list_known_systems"]({})
-        check(any(x["種類"] == "できるもの" for x in known["候補"]) and any(x["種類"] == "取り出し元" for x in known["候補"]), "名寄せの道具は、できるものの名前も返す")
+        handlers = app_module.intake_handlers(r0)
+        known = handlers["list_known_systems"]({})
+        ph = handlers["person_history"]({})
+        check(any(x["種類"] == "できるもの" for x in known["候補"]) and "氏名" not in ph and all("担当" not in app_module._task_brief(t) for t in Task.query.limit(3)),
+              "名寄せの道具はできるものの名前も返し、AI には氏名を渡さない")
         db.session.add(MonthlyResponse(period=current_period(), emp_id="P100", name="", workplace_id=t_day.workplace_id,
                                        answers_json=json.dumps({"has": "ある", "task_names": "検査記録の月次まとめ\n週報の作成"}, ensure_ascii=False)))
         db.session.commit()
     g = client.get(f"/bizmap/api/graph?kind=info&workplace_id={t_day.workplace_id}").get_json()
     pend = [n["text"] for n in g["nodes"] if n["cls"] == "pending"]
-    check(any(p.startswith("検査記録の月次まとめ") for p in pend) and not any(p.startswith("週報の作成") for p in pend),
-          f"月次で挙がったが未登録の業務は灰色の箱（登録済みの業務は出さない）: {pend}")
+    check(any(p.startswith("検査記録の月次まとめ") for p in pend) and not any(p.startswith("週報の作成") for p in pend) and all(n["type"] == "work" for n in g["nodes"] if n["cls"] == "pending"),
+          f"月次で挙がったが未登録の業務は灰色の作業の箱（登録済みの業務は出さない）: {pend}")
     html = client.get(f"/bizmap/?workplace_id={t_day.workplace_id}").data.decode("utf-8")
     check("月次で挙がった未登録の業務" in html and "lg-pending" in html, "業務マップに未登録の業務の件数と凡例")
     g = client.get(f"/bizmap/api/graph?kind=info&domain_id=1").get_json()
@@ -116,13 +137,22 @@ def smoke_bizmap_edit():
         MonthlyResponse.query.filter_by(emp_id="P100").delete()
         db.session.commit()
 
-    auto = {"nodes": [{"id": "t1", "text": "業務", "cls": "task"}, {"id": "s_new", "text": "紙の日報", "cls": "source"}], "edges": []}
-    saved = {"nodes": [{"id": "t1", "text": "業務", "cls": "task", "x": 1, "y": 1}, {"id": "s_old", "text": "各ラインの手書き日報", "cls": "source", "source": "auto", "x": 5, "y": 5},
-                       {"id": "t99", "text": "消えた業務", "cls": "task", "source": "auto"}],
-             "edges": [{"id": "s_old->t1", "from": "s_old", "to": "t1", "source": "manual", "kind": "manual"}, {"id": "t99->t1", "from": "t99", "to": "t1", "source": "manual", "kind": "manual"}]}
-    mg = app_module.merge_graph(auto, saved)
-    check({n["id"] for n in mg["nodes"]} == {"t1", "s_new", "s_old"} and [e["id"] for e in mg["edges"]] == ["s_old->t1"],
-          "名前が変わって自動では描かれなくなった箱も、手で引いた矢印の相手なら残す（消えた業務は残さない）")
+    with app.app_context():
+        auto = {"nodes": [{"id": "t1", "text": "業務", "cls": "task", "type": "work", "source": "auto"}, {"id": "s_new", "text": "紙の日報", "cls": "source", "type": "info", "medium": "paper", "source": "auto"}], "edges": []}
+        saved = {"nodes": [{"id": "t1", "text": "業務", "cls": "task", "x": 1, "y": 1}, {"id": "s_old", "text": "各ラインの手書き日報", "cls": "source", "source": "auto", "x": 5, "y": 5},
+                           {"id": "t99", "text": "消えた業務", "cls": "task", "source": "auto"}, {"id": "p_x", "text": "品質保証課", "cls": "ext", "source": "auto", "text_edited": True},
+                           {"id": "m_x", "text": "Excelの台帳", "cls": "manual", "source": "manual"}, {"id": "m_y", "text": "紙の日報", "cls": "manual", "source": "manual"}],
+                 "edges": [{"id": "s_old->t1", "from": "s_old", "to": "t1", "source": "manual", "kind": "manual"}, {"id": "t99->t1", "from": "t99", "to": "t1", "source": "manual", "kind": "manual"},
+                           {"id": "m_x->t1", "from": "m_x", "to": "t1", "source": "manual", "kind": "manual", "label": "メール"}, {"id": "m_y->t1", "from": "m_y", "to": "t1", "source": "manual", "kind": "manual"}]}
+        up = app_module.upgrade_graph(saved)
+        check(up["schema"] == 2 and {n["id"]: (n["type"], n["cls"]) for n in up["nodes"]}["p_x"] == ("work", "work") and next(n for n in up["nodes"] if n["id"] == "p_x").get("who") == "品質保証課",
+              "保存済みの図は読み込むときに新しい形へ読み替える（人の箱は作業、名前を直していればだれへ）")
+        mg = app_module.merge_graph(auto, saved)
+        ids = {n["id"] for n in mg["nodes"]}
+        mx = next(e for e in mg["edges"] if e["from"] == "m_x")
+        check({"t1", "s_new", "s_old", "m_x"} <= ids and "t99" not in ids and "m_y" not in ids and any(e["from"] == "s_new" and e["to"] == "t1" for e in mg["edges"])
+              and mx["type"] == "info" and mx.get("method") == "mail" and mx.get("show_method") and not mx.get("label"),
+              "手で引いた線の相手は残し、同じ名前の手で足した箱は自動の箱にまとめ、ラベルの方法名は線の方法に読み替える")
 
     r = client.get("/bizmap/api/graph?kind=info")
     g = r.get_json()
@@ -1059,7 +1089,7 @@ def smoke_request():
         j = r.get_json()
         b = calls[-1]["body"]
         outs = {i["call_id"]: json.loads(i["output"]) for i in b["input"] if i.get("type") == "function_call_output"}
-        check(len(calls) == n_before + 2 and r.status_code == 200 and outs["call_ph"]["氏名"] == "試験 太郎" and outs["call_ph"]["勤務形態"] == "交代勤務" and outs["call_ph"]["月次アンケート"]["行っている業務"] == "日報の集計、出勤簿の転記" and outs["call_dup"]["二重登録"] is False, "聞き取り中に AI が本人の履歴と二重登録の有無を道具で調べ、結果を受け取って続ける")
+        check(len(calls) == n_before + 2 and r.status_code == 200 and "氏名" not in outs["call_ph"] and outs["call_ph"]["勤務形態"] == "交代勤務" and outs["call_ph"]["月次アンケート"]["行っている業務"] == "日報の集計、出勤簿の転記" and outs["call_dup"]["二重登録"] is False, "聞き取り中に AI が本人の履歴と二重登録の有無を道具で調べ、結果を受け取って続ける")
         check(r.status_code == 200 and len(j["state"]["steps"]) == 1 and "st1" in j["diagram"] and "生産管理システム" in j["diagram"] and "flowchart LR" in j["diagram"], "2ターン目: 手順1が入り、図に手順とシステムが出る")
         check(len(j["frames"]) == 1 and j["frames"][0] == j["diagram"], "増えた手順のぶんだけコマ送りの図（frames）が返る")
         check([m.get("role") for m in b["input"] if m.get("role")] == ["assistant", "user"] and b["input"][1]["content"] == "生産管理システムから前日の実績をCSVで出す", "会話の記録をそのまま送る（道具の項目は role なしで続く）")
@@ -1214,9 +1244,9 @@ def smoke_writeback():
         t3 = Task.query.filter_by(name="残業予定表の提出").first()
         t1_id, t2_id, t3_id = t1.id, t2.id, t3.id
         check(f"t{t1_id}->t{t2_id}" in {e["id"] for e in g["edges"]}, "auto seq edge t1->t2 exists")
-        sys_node = next(nid for nid, n in nodes.items() if n["cls"] == "system" and n["text"] in ("生産管理システム", "品質システム", "設備データ"))
-        ext_node = next(nid for nid, n in nodes.items() if n["cls"] == "ext")
-        src_node = next(nid for nid, n in nodes.items() if n["cls"] == "source")
+        sys_node = next(nid for nid, n in nodes.items() if n.get("type") == "info" and n["text"] in ("生産管理システム", "品質システム", "設備データ"))
+        ext_node = next(nid for nid, n in nodes.items() if n.get("type") == "work" and n["cls"] == "work" and n.get("actor") == "dept")
+        src_node = next(nid for nid, n in nodes.items() if n.get("type") == "info" and n["cls"] == "source" and n["text"] not in ("生産管理システム", "品質システム", "設備データ"))
 
     data = {"nodes": [], "edges": [], "suppressed_nodes": [], "suppressed_edges": [f"t{t1_id}->t{t2_id}"], "view": None}
     for n in g["nodes"]:
