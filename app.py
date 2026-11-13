@@ -6875,12 +6875,27 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
 
 <main class="container py-4">
   {% with messages = get_flashed_messages(with_categories=true) %}
+    {% set toasts = [] %}
     {% for category, message in messages %}
-      <div class="alert alert-{{ 'secondary' if category == 'message' else category }} alert-dismissible fade show" role="alert">
+      {% if category in ('success', 'info', 'secondary', 'message') %}
+        {% set _ = toasts.append((category, message)) %}
+      {% else %}
+      <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
         {{ message }}
         <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="閉じる"></button>
       </div>
+      {% endif %}
     {% endfor %}
+    {% if toasts %}
+    <div class="ui-toasts" role="status" aria-live="polite">
+      {% for category, message in toasts %}
+      <div class="alert alert-{{ 'secondary' if category == 'message' else category }} alert-dismissible fade show" role="alert">
+        <i class="bi {{ 'bi-check-circle-fill' if category == 'success' else 'bi-info-circle-fill' }}"></i>{{ message }}
+        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="閉じる"></button>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
   {% endwith %}
   {% block content %}{% endblock %}
 </main>
@@ -8064,6 +8079,8 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
   Chart.defaults.plugins.tooltip.backgroundColor = "#1d1d1f";
   Chart.defaults.plugins.tooltip.padding = 10;
   Chart.defaults.plugins.tooltip.cornerRadius = 8;
+  Chart.defaults.animation.duration = 900;
+  Chart.defaults.animation.easing = "easeOutQuart";
   var axisX = { grid: { display: false }, border: { display: false } };
   var axisY = function (extra) { return Object.assign({ beginAtZero: true, grid: { color: "#ececf0" }, border: { display: false, dash: [4, 4] } }, extra || {}); };
   new Chart(document.getElementById("chart-wish"), {
@@ -8293,7 +8310,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
 {% block title %}回答ありがとうございました{% endblock %}
 {% block content %}
 <div class="mq-wrap">
-  <div class="card mq-card mq-done"><div class="card-body text-center">
+  <div class="card mq-card mq-done" data-celebrate><div class="card-body text-center">
     <div class="mq-check"><i class="bi bi-check-lg"></i></div>
     <h2 class="h4 mb-1">回答を受け付けました</h2>
     <p class="text-muted mb-3">{{ period_label }}のアンケートにご協力ありがとうございました。</p>
@@ -8332,6 +8349,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
   <form id="mq-form" class="card mq-card {% if existing %}d-none{% endif %}" method="post" action="{{ url_for('monthly.submit') }}" novalidate>
     <div class="card-body">
       <input type="hidden" name="period" value="{{ period }}">
+      <div class="mq-progress" id="mq-progress" aria-live="polite"><div class="mq-progress-bar"><span></span></div><span class="mq-progress-text">あと少しです</span></div>
       <div class="mq-identity">
         <div class="row g-2">
           <div class="col-sm-6">
@@ -8457,6 +8475,26 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
     } else {
       setMsg(NOT_FOUND, "ng");
     }
+    updateProgress();
+  }
+  var prog = document.getElementById("mq-progress");
+  function answeredOf(q) {
+    if (q.dataset.type === "choice") return !!q.querySelector("input:checked");
+    if (q.dataset.type === "list") return Array.prototype.some.call(q.querySelectorAll("[data-list-item]"), function (i) { return i.value.trim(); });
+    var t = q.querySelector("textarea");
+    return !!(t && t.value.trim());
+  }
+  function updateProgress() {
+    if (!prog) return;
+    var items = [!!(empInput.value.trim() && empFound !== false && wpSelect.value && patSelect.value)];
+    form.querySelectorAll(".mq-q[data-key]").forEach(function (q) {
+      if (!q.classList.contains("d-none") && q.dataset.required === "1") items.push(answeredOf(q));
+    });
+    var done = items.filter(Boolean).length, rest = items.length - done;
+    prog.style.setProperty("--p", items.length ? done / items.length : 0);
+    prog.classList.toggle("is-complete", rest === 0);
+    form.classList.toggle("mq-ready", rest === 0);
+    prog.querySelector(".mq-progress-text").textContent = rest === 0 ? "すべて答えました。送信できます" : "あと " + rest + " 問";
   }
   function applyDeps() {
     form.querySelectorAll(".mq-q[data-dep-key]").forEach(function (q) {
@@ -8477,7 +8515,8 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
       if (err && !shown) err.textContent = "";
     });
   }
-  form.addEventListener("change", function (e) { if (e.target.matches('input[type="radio"]')) applyDeps(); });
+  form.addEventListener("change", function (e) { if (e.target.matches('input[type="radio"]')) applyDeps(); updateProgress(); });
+  form.addEventListener("input", function () { updateProgress(); });
   function listBox(el) { return el.closest(".mq-list-input"); }
   function listValues(box) { return Array.prototype.map.call(box.querySelectorAll("[data-list-item]"), function (i) { return i.value.trim(); }).filter(Boolean); }
   function addListRow(box, value) {
@@ -8530,6 +8569,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
     if (next) next.focus(); else addListRow(box).focus();
   });
   applyDeps();
+  updateProgress();
   empInput.addEventListener("input", function () { clearTimeout(lookupTimer); lookupTimer = setTimeout(lookupEmp, 500); });
   empInput.addEventListener("change", lookupEmp);
   {% if emp_id and not existing %}lookupEmp();{% endif %}
@@ -8573,6 +8613,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
         }
         document.getElementById("mq-success").classList.remove("d-none");
         window.scrollTo({ top: 0, behavior: "smooth" });
+        if (window.uiCelebrate) window.uiCelebrate();
       } else {
         errBox.textContent = j.message || "送信できませんでした"; errBox.classList.remove("d-none");
         if (j.errors) Object.keys(j.errors).forEach(function (k) { var el = form.querySelector('.mq-q[data-key="' + k + '"] .mq-err'); if (el) el.textContent = j.errors[k]; });
@@ -8806,6 +8847,11 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
   Chart.defaults.color = "#6e6e73";
   Chart.defaults.plugins.legend.labels.usePointStyle = true;
   Chart.defaults.plugins.legend.labels.boxWidth = 8;
+  Chart.defaults.plugins.tooltip.backgroundColor = "#1d1d1f";
+  Chart.defaults.plugins.tooltip.padding = 10;
+  Chart.defaults.plugins.tooltip.cornerRadius = 8;
+  Chart.defaults.animation.duration = 900;
+  Chart.defaults.animation.easing = "easeOutQuart";
   var line = function (label, data, color) { return { label: label, data: data, borderColor: color, backgroundColor: color, tension: 0.35, pointRadius: 3, borderWidth: 2.5 }; };
   new Chart(document.getElementById("chart-rates"), {
     type: "line",
@@ -9211,6 +9257,129 @@ document.addEventListener("DOMContentLoaded", function () {
   if (document.fonts && document.fonts.ready) document.fonts.ready.then(fit);
   sel.addEventListener("change", fit);
   fit();
+})();
+
+// 仕上げの動き: ヘッダーの影・波紋・スクロールで現れる・お知らせ・送信中・紙吹雪
+(function () {
+  var reduce = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+  var root = document.documentElement;
+  var header = document.querySelector(".app-header");
+
+  function onScroll() { root.classList.toggle("is-scrolled", window.scrollY > 4); }
+  function headerHeight() { if (header) root.style.setProperty("--ui-header-h", header.offsetHeight + "px"); }
+  window.addEventListener("scroll", onScroll, { passive: true });
+  window.addEventListener("resize", headerHeight);
+  onScroll();
+  headerHeight();
+
+  document.addEventListener("pointerdown", function (e) {
+    if (reduce || e.button !== 0) return;
+    var btn = e.target.closest ? e.target.closest(".btn") : null;
+    if (!btn || btn.disabled || btn.tagName === "INPUT" || btn.classList.contains("btn-link") || btn.classList.contains("is-busy")) return;
+    var r = btn.getBoundingClientRect();
+    var size = Math.max(r.width, r.height) * 2.2;
+    var wrap = btn.querySelector(":scope > .ui-ripple");
+    if (!wrap) {
+      wrap = document.createElement("span");
+      wrap.className = "ui-ripple";
+      wrap.setAttribute("aria-hidden", "true");
+      btn.appendChild(wrap);
+    }
+    var dot = document.createElement("span");
+    dot.style.width = dot.style.height = size + "px";
+    dot.style.left = (e.clientX - r.left - size / 2) + "px";
+    dot.style.top = (e.clientY - r.top - size / 2) + "px";
+    wrap.appendChild(dot);
+    dot.addEventListener("animationend", function () { dot.remove(); });
+  });
+
+  if (!reduce && "IntersectionObserver" in window) {
+    var io = new IntersectionObserver(function (entries) {
+      var n = 0;
+      entries.forEach(function (en) {
+        if (!en.isIntersecting) return;
+        var el = en.target;
+        io.unobserve(el);
+        el.style.transitionDelay = Math.min(n++, 5) * 70 + "ms";
+        el.classList.add("is-in");
+        setTimeout(function () { el.classList.add("is-done"); el.style.transitionDelay = ""; }, 1100);
+      });
+    }, { rootMargin: "0px 0px -6% 0px", threshold: 0.05 });
+    var limit = window.innerHeight * 0.96;
+    document.querySelectorAll("main .card, main .section-title, main .pb-row, main .pb-section").forEach(function (el) {
+      if (el.closest("#fe-app, .ui-toasts, .modal, .ui-reveal")) return;
+      if (el.getBoundingClientRect().top < limit) return;
+      el.classList.add("ui-reveal");
+      io.observe(el);
+    });
+  }
+
+  document.querySelectorAll(".ui-toasts .alert").forEach(function (a) {
+    var close = function () {
+      if (a.classList.contains("is-leaving")) return;
+      a.classList.add("is-leaving");
+      setTimeout(function () { a.remove(); }, 340);
+    };
+    a.addEventListener("animationend", function (e) { if (e.animationName === "ui-toast-timer") close(); });
+    if (reduce) setTimeout(close, 6000);
+  });
+
+  document.addEventListener("submit", function (e) {
+    if (e.defaultPrevented) return;
+    var f = e.target;
+    if (!f || f.hasAttribute("data-no-busy") || f.target === "_blank") return;
+    var b = e.submitter || f.querySelector('button[type="submit"], button:not([type])');
+    if (!b || !b.classList.contains("btn")) return;
+    b.classList.add("is-busy");
+    b.setAttribute("aria-busy", "true");
+    setTimeout(function () { b.classList.remove("is-busy"); b.removeAttribute("aria-busy"); }, 10000);
+  });
+  window.addEventListener("pageshow", function () {
+    document.querySelectorAll(".btn.is-busy").forEach(function (b) { b.classList.remove("is-busy"); b.removeAttribute("aria-busy"); });
+  });
+
+  // 紙吹雪。window.uiCelebrate() で呼ぶ。data-celebrate のある画面は開いたときに1回
+  window.uiCelebrate = function () {
+    if (reduce || !document.body) return;
+    var c = document.createElement("canvas");
+    c.className = "ui-confetti";
+    c.setAttribute("aria-hidden", "true");
+    document.body.appendChild(c);
+    var ctx = c.getContext("2d");
+    var dpr = window.devicePixelRatio || 1, W = window.innerWidth, H = window.innerHeight;
+    c.width = W * dpr; c.height = H * dpr;
+    ctx.scale(dpr, dpr);
+    var colors = ["#0a84ff", "#30d158", "#ff9f0a", "#bf5af2", "#ff375f", "#5ac8fa", "#ffd60a", "#5e5ce6"];
+    var parts = [];
+    for (var i = 0; i < 150; i++) {
+      var left = i % 2 === 0;
+      parts.push({
+        x: left ? -12 : W + 12, y: H * (0.5 + Math.random() * 0.25),
+        vx: (left ? 1 : -1) * (5 + Math.random() * 8), vy: -(10 + Math.random() * 9),
+        w: 6 + Math.random() * 6, h: 9 + Math.random() * 9, r: Math.random() * Math.PI, vr: (Math.random() - 0.5) * 0.32,
+        color: colors[i % colors.length]
+      });
+    }
+    var start = null, life = 2800;
+    function frame(t) {
+      if (start === null) start = t;
+      var el = t - start;
+      ctx.clearRect(0, 0, W, H);
+      parts.forEach(function (p) {
+        p.vy += 0.3; p.vx *= 0.99; p.x += p.vx; p.y += p.vy; p.r += p.vr;
+        ctx.save();
+        ctx.translate(p.x, p.y);
+        ctx.rotate(p.r);
+        ctx.globalAlpha = Math.max(0, 1 - Math.max(0, el - 1600) / (life - 1600));
+        ctx.fillStyle = p.color;
+        ctx.fillRect(-p.w / 2, -p.h / 2, p.w, p.h * Math.max(0.25, Math.abs(Math.cos(p.r * 1.7))));
+        ctx.restore();
+      });
+      if (el < life) requestAnimationFrame(frame); else c.remove();
+    }
+    requestAnimationFrame(frame);
+  };
+  if (document.querySelector("[data-celebrate]")) setTimeout(window.uiCelebrate, 300);
 })();
 ''',
     'flowedit.js': r'''// 業務マップ 編集エディタ
@@ -10868,6 +11037,106 @@ html { scroll-behavior: smooth; }
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
 
+/* ============================================================
+   仕上げ: ページの切り替え・スクロールで現れる・押した手応え・お知らせ・送信中・紙吹雪
+   ============================================================ */
+/* 背景にうっすら色を差す（上のほうだけ） */
+body {
+  background:
+    radial-gradient(1100px 520px at 0% -10%, rgba(10, 132, 255, 0.07), transparent 62%),
+    radial-gradient(900px 480px at 100% -14%, rgba(191, 90, 242, 0.06), transparent 60%),
+    var(--ui-bg);
+  background-repeat: no-repeat;
+}
+::selection { background: rgba(0, 113, 227, 0.18); }
+a:focus-visible, .nav-link:focus-visible, summary:focus-visible, [tabindex]:focus-visible, .nav-admin:focus-visible { outline: 3px solid rgba(0, 113, 227, 0.35); outline-offset: 2px; border-radius: 8px; }
+.section-title::before { content: ""; align-self: center; width: 4px; height: 1.05em; border-radius: 4px; background: linear-gradient(180deg, var(--c-blue), var(--c-indigo)); flex: 0 0 auto; }
+.card { box-shadow: var(--ui-shadow), inset 0 0 0 1px rgba(0, 0, 0, 0.025); }
+.brand-mark { transition: transform 0.35s cubic-bezier(0.3, 1.4, 0.4, 1); }
+.navbar-brand:hover .brand-mark { transform: rotate(-8deg) scale(1.08); }
+
+/* ページの切り替え（対応ブラウザだけ）。ヘッダーは動かさず、いまのページの印が次のページへ滑って移る */
+@view-transition { navigation: auto; }
+@keyframes ui-vt-out { to { opacity: 0; transform: translateY(-4px); } }
+@keyframes ui-vt-in { from { opacity: 0; transform: translateY(10px); } }
+::view-transition-old(root) { animation: ui-vt-out 0.16s ease both; }
+::view-transition-new(root) { animation: ui-vt-in 0.34s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+.app-header { view-transition-name: app-header; }
+.app-nav .nav-link.active { view-transition-name: nav-current; }
+::view-transition-group(nav-current) { animation-duration: 0.42s; animation-timing-function: cubic-bezier(0.3, 1.25, 0.4, 1); }
+
+/* スクロールして見えてきたカードだけ、ふわっと出す（JS が画面の外のものに印を付ける） */
+.ui-reveal { animation: none !important; opacity: 0; transform: translateY(18px); }
+.ui-reveal.is-in { opacity: 1; transform: none; transition: opacity 0.6s cubic-bezier(0.2, 0.7, 0.2, 1), transform 0.6s cubic-bezier(0.2, 0.7, 0.2, 1); }
+.ui-reveal.is-done { transition: background-color 0.18s ease, box-shadow 0.22s ease, transform 0.18s ease; }
+
+/* ヘッダー: スクロールしたら薄い影 */
+.app-header { transition: box-shadow 0.25s ease; }
+html.is-scrolled .app-header { box-shadow: 0 1px 0 rgba(0, 0, 0, 0.02), 0 8px 24px rgba(0, 0, 0, 0.06); }
+
+/* 押した手応え（押した所から広がる波紋） */
+.btn { position: relative; }
+.ui-ripple { position: absolute; inset: 0; border-radius: inherit; overflow: hidden; pointer-events: none; }
+.ui-ripple > span { position: absolute; border-radius: 50%; background: currentColor; opacity: 0.2; transform: scale(0); animation: ui-ripple 0.6s cubic-bezier(0.2, 0.7, 0.2, 1) forwards; }
+@keyframes ui-ripple { to { transform: scale(1); opacity: 0; } }
+
+/* 送信中のボタン（くるくる） */
+@keyframes ui-spin { to { transform: rotate(360deg); } }
+.btn.is-busy { pointer-events: none; opacity: 0.85; }
+.btn.is-busy::after { content: ""; display: inline-block; width: 0.95em; height: 0.95em; margin-left: 0.5em; vertical-align: -0.12em; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: ui-spin 0.7s linear infinite; }
+
+/* お知らせ（保存しました など）: 右上に出て数秒で消える。触れている間は止まる。注意・エラーは本文に残す */
+.ui-toasts { position: fixed; top: calc(var(--ui-header-h, 56px) + 12px); right: 16px; z-index: 1080; display: flex; flex-direction: column; gap: 0.5rem; width: min(420px, calc(100vw - 32px)); pointer-events: none; }
+.ui-toasts .alert { position: relative; pointer-events: auto; margin: 0; padding-right: 2.75rem; background: rgba(255, 255, 255, 0.92); -webkit-backdrop-filter: saturate(180%) blur(16px); backdrop-filter: saturate(180%) blur(16px); color: var(--ui-text); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06), 0 12px 32px rgba(0, 0, 0, 0.14); animation: ui-toast-in 0.5s cubic-bezier(0.2, 0.9, 0.3, 1.15) both; overflow: hidden; }
+.ui-toasts .alert > .bi { margin-right: 0.45rem; }
+.ui-toasts .alert-success > .bi { color: var(--ui-green); }
+.ui-toasts .alert-info > .bi, .ui-toasts .alert-secondary > .bi { color: var(--ui-accent); }
+.ui-toasts .alert::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: currentColor; opacity: 0.18; transform-origin: left center; animation: ui-toast-timer 4.5s linear 0.4s forwards; }
+.ui-toasts .alert-success::after { background: var(--ui-green); opacity: 0.45; }
+.ui-toasts .alert:hover::after { animation-play-state: paused; }
+.ui-toasts .alert.is-leaving { animation: ui-toast-out 0.32s ease forwards; }
+@keyframes ui-toast-in { from { opacity: 0; transform: translateX(28px) scale(0.98); } }
+@keyframes ui-toast-out { to { opacity: 0; transform: translateX(28px); } }
+@keyframes ui-toast-timer { from { transform: scaleX(1); } to { transform: scaleX(0); } }
+main > .alert-warning, main > .alert-danger { animation: ui-nudge 0.5s cubic-bezier(0.3, 1.4, 0.4, 1) both; }
+@keyframes ui-nudge { 0% { opacity: 0; transform: translateX(0); } 30% { opacity: 1; transform: translateX(-6px); } 60% { transform: translateX(4px); } 100% { transform: none; } }
+
+/* 紙吹雪（回答・登録が終わったとき） */
+.ui-confetti { position: fixed; inset: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: 1090; }
+
+/* 図を描いている間は、光が流れる下地を出す */
+@keyframes ui-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+.flow-inner > .text-muted.small:only-child { display: flex; align-items: center; justify-content: center; min-height: 160px; border-radius: 12px; background: linear-gradient(90deg, #f2f2f5 0%, #fbfbfd 40%, #f2f2f5 80%); background-size: 200% 100%; animation: ui-shimmer 1.6s linear infinite; }
+
+/* 最大表示は、ふわっと広がる */
+@keyframes ui-max-in { from { opacity: 0.35; transform: scale(0.985); } }
+.card.flow-max, .fe-wrap.is-max { animation: ui-max-in 0.28s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+
+/* 開閉（詳細の記録など）を滑らかに */
+:root { interpolate-size: allow-keywords; }
+details::details-content { block-size: 0; overflow-y: clip; transition: block-size 0.35s cubic-bezier(0.2, 0.7, 0.2, 1), content-visibility 0.35s allow-discrete; }
+details[open]::details-content { block-size: auto; }
+summary { transition: color 0.15s ease; }
+
+/* 選んだ選択肢は、ぽんと弾む */
+@keyframes ui-pick { 0% { transform: scale(1); } 40% { transform: scale(1.07); } 100% { transform: scale(1); } }
+.mq-option input:checked + span { animation: ui-pick 0.32s cubic-bezier(0.3, 1.4, 0.4, 1); }
+
+/* 月次アンケート: 進み具合（あと何問か） */
+.mq-progress { position: sticky; top: calc(var(--ui-header-h, 56px) + 10px); z-index: 4; display: flex; align-items: center; gap: 0.8rem; margin: 0 0 0.75rem; padding: 0.5rem 0.95rem; border-radius: 999px; background: rgba(255, 255, 255, 0.9); -webkit-backdrop-filter: saturate(180%) blur(14px); backdrop-filter: saturate(180%) blur(14px); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05), 0 6px 18px rgba(0, 0, 0, 0.07); }
+.mq-progress-bar { flex: 1 1 auto; height: 6px; border-radius: 999px; background: var(--ui-fill); overflow: hidden; }
+.mq-progress-bar > span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--c-blue), var(--c-indigo)); transform-origin: left center; transform: scaleX(var(--p, 0)); transition: transform 0.5s cubic-bezier(0.2, 0.7, 0.2, 1), background 0.3s ease; }
+.mq-progress-text { flex: 0 0 auto; font-size: 0.82rem; font-weight: 600; color: var(--ui-text-2); font-variant-numeric: tabular-nums; }
+.mq-progress.is-complete .mq-progress-bar > span { background: linear-gradient(90deg, #28b24a, var(--c-green)); }
+.mq-progress.is-complete .mq-progress-text { color: var(--ui-green-text); }
+@keyframes ui-glow { 0%, 100% { box-shadow: 0 0 0 0 rgba(0, 113, 227, 0); } 50% { box-shadow: 0 0 0 6px rgba(0, 113, 227, 0.16); } }
+.mq-ready #mq-submit { animation: ui-glow 1.8s ease-in-out 2; }
+
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(*), ::view-transition-old(*), ::view-transition-new(*) { animation: none !important; }
+  .ui-reveal { opacity: 1 !important; transform: none !important; }
+}
+
 /* 進捗掲示板: 割合の帯と凡例 */
 .pb-summary { max-width: 580px; margin-top: 0.7rem; }
 .pb-bar { display: flex; gap: 3px; height: 10px; border-radius: 999px; overflow: hidden; background: var(--ui-fill); }
@@ -11826,6 +12095,7 @@ html { scroll-behavior: smooth; }
     done.classList.remove("d-none");
     done.scrollIntoView({ behavior: "smooth", block: "center" });
     toast("送信しました");
+    if (window.uiCelebrate) window.uiCelebrate();
   });
 
   // ---------- 初期表示 ----------
