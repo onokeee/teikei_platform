@@ -82,6 +82,87 @@ def smoke_bizmap_edit():
     r = client.post("/bizmap/api/classify", json={"items": [{"id": "a", "type": "info", "text": "週報（Excel）"}, {"id": "b", "type": "work", "who": "課長", "workplace": "製造1課"}]})
     check(r.get_json()["items"] == [{"id": "a", "medium": "excel"}, {"id": "b", "actor": "boss", "who": "製造1課 課長", "who_state": "ok"}], "編集画面の判定はサーバーに問い合わせる（区分の設定と同じ判定）")
 
+    from html.parser import HTMLParser
+
+    class DivTree(HTMLParser):
+        """div の入れ子だけを追い、id のある div がどの div の中にあるかを控える"""
+        def __init__(self):
+            super().__init__()
+            self.stack, self.inside = [], {}
+
+        def handle_starttag(self, tag, attrs):
+            if tag != "div":
+                return
+            i = dict(attrs).get("id")
+            if i:
+                self.inside[i] = [x for x in self.stack if x]
+            self.stack.append(i)
+
+        def handle_endtag(self, tag):
+            if tag == "div" and self.stack:
+                self.stack.pop()
+
+    tree = DivTree()
+    tree.feed(html)
+    check("fe-app" in tree.inside.get("fe-container", []) and "fe-app" in tree.inside.get("fe-node-popover", []) and "fe-app" in tree.inside.get("fe-edge-popover", []),
+          f"編集画面: 図の領域とポップアップは #fe-app の中（閉じタグの数が合っている）: {tree.inside.get('fe-container')}")
+    check("auto_method" in fe and "classifySeq" in fe and "history[historyIndex] = snapshot()" in fe and "SELECT" in fe and "pop.offsetHeight" in fe,
+          "編集: 「自動」で元の方法に戻す、判定の結果は履歴に入れ古い応答は捨てる、選択欄で Delete しても箱を消さない、ポップアップは実際の高さで収める")
+
+    # ---- 区分のキー: 追加した行のキーは保存し直しても変わらず、消したキーは使い回さない ----
+    with app.app_context():
+        v0 = app_module.vocab_public()
+    row = lambda label: {"key": "", "label": label, "words": label, "exclude": "", "icon": "bi-file-earmark", "shape": "doc"}
+    r1 = client.post("/admin/map-vocab", json={"vocab": dict(v0, media=v0["media"] + [row("図面")])}).get_json()["vocab"]
+    k_zumen = next(x["key"] for x in r1["media"] if x["label"] == "図面")
+    r2 = client.post("/admin/map-vocab", json={"vocab": dict(r1, media=[row("動画")] + r1["media"])}).get_json()["vocab"]
+    keys2 = {x["label"]: x["key"] for x in r2["media"]}
+    r3 = client.post("/admin/map-vocab", json={"vocab": dict(r2, media=[x for x in r2["media"] if x["label"] not in ("図面", "動画")] + [row("音声")])}).get_json()["vocab"]
+    keys3 = {x["label"]: x["key"] for x in r3["media"]}
+    check(keys2["図面"] == k_zumen and keys2["動画"] != k_zumen and keys3["音声"] not in (k_zumen, keys2["動画"]) and "図面" not in keys3,
+          f"区分のキー: 並べ替え・追加でも変わらず、消したキーは使い回さない: {k_zumen} {keys2.get('動画')} {keys3.get('音声')}")
+    client.post("/admin/map-vocab", json={"reset": True})
+    r4 = client.post("/admin/map-vocab", json={"vocab": dict(v0, media=v0["media"] + [row("写真台帳")])}).get_json()["vocab"]
+    check(next(x["key"] for x in r4["media"] if x["label"] == "写真台帳") not in (k_zumen, keys2["動画"], keys3["音声"]), "既定に戻しても、前に使ったキーは使い回さない")
+    client.post("/admin/map-vocab", json={"reset": True})
+
+    with app.app_context():
+        # ---- 氏名・方法・手順図（実装レビューの指摘） ----
+        check([app_module.method_of(t) for t in ("人に聞く", "紙で届く")] == ["verbal", "hand"], "受け取り方のチップ（人に聞く・紙で届く）も方法になる")
+        check(app_module.mask_person_names("製品仕様") == "製品仕様" and app_module.mask_person_names("生産管理課の渡辺さん") == "生産管理課の担当者"
+              and app_module.mask_person_names("山田さん（生産管理課）") == "担当者（生産管理課）", "仕様は氏名にしない、部署の後ろ・かっこの前の氏名だけ担当者")
+        w = app_module.who_of("製造１課 課長", "製造1課")
+        check((w["actor"], w["label"]) == ("boss", "製造1課 課長"), f"職場マスタは全角の数字でも同じ職場: {w}")
+        d1 = app_module.build_steps_flow([{"no": 1, "action": "生産管理システムから日次表を出力する", "output": "日次表"},
+                                          {"no": 2, "action": "週報を課長に渡す", "input": "週報", "to": "課長"}], "製造1課")
+        into_boss = [d1.nodes[a]["text"] for (a, b), e in d1.edges.items() if e["type"] == "info" and d1.nodes[b].get("who") == "製造1課 課長"]
+        check(into_boss == ["週報"], f"渡すものは手順の input（前の手順のできるものではない）: {into_boss}")
+        d2 = app_module.build_steps_flow([{"no": 1, "action": "日次実績集計表から1週間分の数字を週報に転記する", "system": "Excel（週報）", "input": "日次実績集計表"}])
+        check(any(d2.nodes[a]["text"] == "日次実績集計表" and b == "st1" for (a, b) in d2.edges) and any(a == "st1" and d2.nodes[b]["text"] == "Excel（週報）" for (a, b) in d2.edges),
+              "書き込み先のシステムがある手順でも、input を取り出し元として描く")
+        d3 = app_module.build_steps_flow([{"no": 1, "action": "実績を生産管理システムに登録する", "to": "生産管理システム"}])
+        check(not any(n["text"] == "（渡すもの未確認）" for n in d3.nodes.values()), "相手がシステムだけなら「渡すもの未確認」を作らない")
+
+        # ---- 手修正の重ね合わせ・昔の形の読み替え ----
+        auto = {"nodes": [{"id": "o8", "text": "段取り時間推移グラフ", "type": "info", "cls": "output", "medium": "unknown", "source": "auto", "hint": None},
+                          {"id": "p_x", "text": "使いみち未確認", "type": "work", "cls": "work", "who": "他部署", "actor": "dept", "who_state": "ok", "source": "auto"}],
+                "edges": [{"id": "o8->p_x", "from": "o8", "to": "p_x", "type": "info", "method": "mail", "show_method": True, "handoff": "", "inferred": False, "label": "", "source": "auto"}]}
+        saved = {"schema": 2, "nodes": [dict(auto["nodes"][0], text="段取り時間推移グラフ（Excel版）", text_edited=True),
+                                        dict(auto["nodes"][1], actor="external", who_edited=True, actor_locked=True)],
+                 "edges": [dict(auto["edges"][0], method="u99", method_edited=True)]}
+        mg = app_module.merge_graph(auto, app_module.sanitize_graph(saved))
+        nm, em = {n["id"]: n for n in mg["nodes"]}, mg["edges"][0]
+        check(nm["o8"]["medium"] == "excel" and nm["p_x"]["actor"] == "external" and nm["p_x"].get("actor_locked") and em["method"] == "mail" and not em.get("method_edited") and em["auto_method"] == "mail",
+              f"手修正: 名前を直した情報は新しい名前で媒体を判定、手で選んだだれ区分は残る、消された方法のキーは自動に戻る: {nm['o8']['medium']} {nm['p_x']['actor']} {em['method']}")
+        legacy = {"nodes": [{"id": "p_05", "text": "生産管理課", "cls": "ext", "source": "auto"}, {"id": "m_k", "text": "kintone", "cls": "system", "source": "manual"}],
+                  "edges": [{"id": "e1", "from": "m_k", "to": "t1", "kind": "manual", "source": "manual", "label": "毎朝8時までにメールで届く（遅れたら電話）", "label_edited": True},
+                            {"id": "e2", "from": "m_k", "to": "t2", "kind": "manual", "source": "manual", "label": "メール"}]}
+        up = app_module.upgrade_graph(legacy)
+        un, ue = {n["id"]: n for n in up["nodes"]}, {e["id"]: e for e in up["edges"]}
+        check(un["p_05"]["who"] == "生産管理課" and un["p_05"]["actor"] == "dept" and un["p_05"]["text"] == "使いみち未確認" and un["m_k"].get("medium_edited")
+              and ue["e1"]["label"].startswith("毎朝") and not ue["e1"].get("method_edited") and ue["e2"]["method"] == "mail" and ue["e2"]["label"] == "",
+              "昔の形: 人・部署の箱はだれのある作業に、手で選んだシステムは残り、文のラベルはそのまま・方法の名前だけのラベルは方法にする")
+
     # ---- 聞き取りの答えと業務マップの連動 ----
     with app.test_request_context():
         tasks = Task.query.all()
@@ -117,6 +198,18 @@ def smoke_bizmap_edit():
               "手順図: 入力するシステムは手順から情報の流れ、渡す相手の部署は相手の作業")
         rows = app_module.source_rows(tasks)
         check(any(r["name"] == "紙の日報" for r in rows), "システム・情報源の表も同じ名前で数える")
+        wb_saved = {"schema": 2, "nodes": [{"id": f"t{t_day.id}", "text": t_day.name, "type": "work", "cls": "task", "source": "auto"},
+                                           {"id": "u_x", "text": "出勤簿の転記（2人）", "type": "work", "cls": "pending", "who": "製造1課", "who_state": "ok", "actor": "team", "source": "auto"},
+                                           {"id": "p_unknown", "text": "使う人が分からない", "type": "work", "cls": "warn", "source": "auto"},
+                                           {"id": "p_y", "text": "使いみち未確認", "type": "work", "cls": "work", "who": "生産管理課", "actor": "dept", "who_state": "ok", "source": "auto"}],
+                    "edges": [{"id": "a", "from": f"t{t_day.id}", "to": "u_x", "type": "work", "source": "manual"},
+                              {"id": "b", "from": f"t{t_day.id}", "to": "p_unknown", "type": "info", "source": "manual"},
+                              {"id": "c", "from": "p_y", "to": f"t{t_day.id}", "type": "work", "source": "manual"}]}
+        wc = app_module.writeback_candidates(wb_saved, {t.id: t for t in tasks})
+        got = sorted(op["field"] + ":" + op["value"] for c in wc for op in c["ops"])
+        check(got == ["actors:生産管理課", "next_task:出勤簿の転記"], f"書き戻し: 未登録の業務は後の業務（人数は外す）、だれのある箱から業務へは関わる人、分からない箱は出さない: {got}")
+        src_def = next(s_ for s_ in app_module.task_sources(by_name["不良品発生報告のメール配信"]) if "不良報告書" in s_["name"])
+        check(src_def["method"] != "verbal", f"取り出し元の受け取り方は、名前に合う区分から取る（紙の報告書に「口頭」を付けない）: {src_def}")
     with app.app_context():
         check(app_module.users_from_names(["課長", "生産管理課", "顧客", "山田さん", "生産管理システム"]) == ["上司", "他部署", "顧客・社外", "職場内"],
               "渡す相手の名前から利用者の区分を決める（AI が使えないときの予備）")
