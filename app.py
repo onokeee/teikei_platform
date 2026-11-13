@@ -16,7 +16,7 @@ import urllib.request
 from collections import Counter, OrderedDict, defaultdict
 from datetime import datetime, timedelta
 
-from flask import Blueprint, Flask, Response, abort, flash, jsonify, redirect, render_template, request, session, url_for
+from flask import Blueprint, Flask, Response, abort, flash, g, has_request_context, jsonify, redirect, render_template, request, session, url_for
 from flask_sqlalchemy import SQLAlchemy
 from jinja2 import DictLoader
 
@@ -1478,7 +1478,7 @@ DEFAULT_MAP_VOCAB = {
         {"key": "external", "label": "社外・顧客", "words": "顧客、社外、取引先、お客、仕入先、協力会社、外注、業者、メーカー、外部", "exclude": "作業者", "icon": "bi-briefcase-fill", "user": "顧客・社外"},
         {"key": "dept", "label": "他部署", "words": "他部署、部署、倉庫、購買、営業、総務、経理、人事、品証、品質保証、～課、～係、～センター、～グループ", "exclude": "", "icon": "bi-building", "user": "他部署"},
         {"key": "boss", "label": "上司・役職", "words": "上司、課長、係長、部長、班長、職長、組長、工場長、リーダー、主任、次長、副課長", "exclude": "", "icon": "bi-person-badge-fill", "user": "上司"},
-        {"key": "team", "label": "職場内", "words": "職場、チーム、メンバー、全員、みんな、本人、自分、担当、作業者、検査員、オペレーター、オペレータ、課内、班内、同僚、先輩、後輩", "exclude": "", "icon": "bi-people-fill", "user": "職場内"},
+        {"key": "team", "label": "職場内", "words": "職場、チーム、メンバー、全員、みんな、本人、自分、担当、作業者、検査員、オペレーター、オペレータ、課内、班内、同僚、先輩、後輩、ライン、前の勤務、次の勤務", "exclude": "オンライン", "icon": "bi-people-fill", "user": "職場内"},
         {"key": "system", "label": "システム（自動）", "words": "自動、RPA、マクロ、バッチ", "exclude": "", "icon": "bi-cpu-fill", "user": ""},
         {"key": "unknown", "label": "不明", "words": "不明、分からない、わからない", "exclude": "", "icon": "bi-question-circle-fill", "user": "分からない"},
     ],
@@ -1488,7 +1488,7 @@ DEFAULT_MAP_VOCAB = {
         {"key": "ppt", "label": "PowerPoint", "words": "PowerPoint、パワーポイント、パワポ、ppt、pptx、スライド", "exclude": "", "icon": "bi-file-earmark-ppt-fill", "shape": "doc"},
         {"key": "pdf", "label": "PDF", "words": "PDF", "exclude": "", "icon": "bi-file-earmark-pdf-fill", "shape": "doc"},
         {"key": "csv", "label": "CSV", "words": "CSV", "exclude": "", "icon": "bi-filetype-csv", "shape": "doc"},
-        {"key": "paper", "label": "紙・帳票", "words": "紙、帳票、伝票、用紙、手書き、印刷、プリント、チェックシート、チェック表、記録表", "exclude": "", "icon": "bi-file-earmark-text-fill", "shape": "doc"},
+        {"key": "paper", "label": "紙・帳票", "words": "紙、帳票、伝票、用紙、手書き、印刷、プリント、チェックシート、チェック表、記録表、メモ", "exclude": "", "icon": "bi-file-earmark-text-fill", "shape": "doc"},
         {"key": "photo", "label": "写真・画像", "words": "写真、画像、スクリーンショット、スクショ", "exclude": "", "icon": "bi-file-earmark-image-fill", "shape": "doc"},
         {"key": "system", "label": "システムのデータ", "words": "システム、DB、データベース、SAP、基幹、MES、ERP、Access、サーバ、データ", "exclude": "ファイルサーバ", "icon": "bi-database-fill", "shape": "cyl"},
         {"key": "web", "label": "Web・画面", "words": "Web、ウェブ、ホームページ、サイト、ブラウザ、ポータル、イントラ、URL、画面", "exclude": "", "icon": "bi-globe2", "shape": "stadium"},
@@ -1514,8 +1514,8 @@ DEFAULT_MAP_VOCAB = {
         {"key": "other", "label": "その他", "words": "その他", "exclude": "", "kind": "channel", "direction": "", "medium": "unknown"},
     ],
     "handoff": {
-        "push": {"label": "前が伝えに行く", "words": "渡す、渡し、送る、送付、届ける、配る、配布、提出、報告、連絡、知らせる、伝える、共有する、掲示する、回覧する"},
-        "pull": {"label": "後ろが取りに行く", "words": "集める、回収、取りに、取ってくる、見に行く、聞く、聞き、問い合わせ、確認しに、参照、開く、ダウンロード、抽出、引き出"},
+        "push": {"label": "前が伝えに行く", "words": "渡す、渡し、送る、送付、届ける、配る、配布、提出、報告、連絡、知らせる、伝える、共有する、掲示する、回覧する、届く、来る、送られて、もらう、受ける、受け取る、連絡が入る"},
+        "pull": {"label": "後ろが取りに行く", "words": "集める、回収、取りに、取ってくる、見に行く、見に、見る、聞く、聞き、問い合わせ、確認しに、参照、開く、ダウンロード、抽出、引き出"},
     },
 }
 BUILTIN_VOCAB_KEYS = {g: {r["key"] for r in DEFAULT_MAP_VOCAB[g]} for g in VOCAB_GROUPS}
@@ -1684,43 +1684,135 @@ def handoff_of(*texts, side="", method="", vocab=None):
     return row["direction"] if row else ""
 
 _HONORIFIC_RX = re.compile(r"(さん|様|さま|氏|くん|君|ちゃん)$")
-_WP_CACHE = {"at": None, "names": []}
+_NAME_HONORIFIC_RX = re.compile(r"((?:お|ご)?(?:[一-龥々]{1,4}|[ァ-ヶー]{2,8}|[A-Za-z]{2,12}))[ 　]?(さん|さま|くん|ちゃん|(?:様|氏|君)(?![一-龥々]))")
+_NAME_SEP_RX = re.compile(r"([、,，／/\n・]|[ 　]+)")
+_NOT_PERSON_WORDS = {"皆", "お客", "客", "先方", "相手", "先様", "お得意", "各", "副", "前", "元", "新", "旧", "当", "同", "全", "直", "現場", "職場"}
+# 「佐藤課長」「佐藤」のように役職の前や単独で出てきたときだけ氏名とみなす名字（社員名簿の名字も加える）
+COMMON_SURNAMES = frozenset((
+    "佐藤、鈴木、高橋、田中、伊藤、渡辺、山本、中村、小林、加藤、吉田、山田、佐々木、山口、松本、井上、木村、斎藤、清水、山崎、池田、橋本、阿部、石川、"
+    "山下、中島、石井、小川、前田、岡田、長谷川、藤田、後藤、近藤、村上、遠藤、青木、坂本、斉藤、福田、太田、西村、藤井、金子、岡本、藤原、中野、三浦、"
+    "原田、中川、松田、竹内、小野、田村、中山、和田、石田、森田、上田、内田、柴田、酒井、宮崎、横山、高木、安藤、宮本、大野、小島、谷口、今井、工藤、"
+    "高田、増田、丸山、杉山、村田、大塚、新井、小山、平野、藤本、河野、上野、野口、武田、千葉、岩崎、佐野、菅原、木下、久保、野村、松尾、菊地、杉本、"
+    "市川、大西、古川、島田、水野、桜井、高野、渡部、吉川、山内、西田、飯田、菊池、西川、小松、北村、安田、五十嵐、川口、平田、中田、久保田、服部、岩田、"
+    "土屋、川崎、福島、本田、樋口、秋山、田口、永井、山中、中西、吉村、川上、石原、大橋、松井、馬場、浅野、荒木、大久保、野田、小池、松下、熊谷、菅野、"
+    "内藤、黒田、尾崎、永田、川村、望月、田辺、松岡、本間、荒井").split("、"))
 
 
 def _workplace_names():
+    """[(見つける名前, 職場名)] 長い順。「検査・品質保証課」は「品質保証課」でも見つける。1回のリクエストの中では使い回す"""
+    if has_request_context() and "wp_names" in g:
+        return g.wp_names
+    pairs = []
     try:
-        names = sorted({w.name for w in Workplace.query.all() if w.name}, key=len, reverse=True)
+        for w in Workplace.query.all():
+            if not w.name:
+                continue
+            pairs.append((w.name, w.name))
+            alias = w.name.split("・")[-1].strip() if "・" in w.name else ""
+            if len(alias) >= 3:
+                pairs.append((alias, w.name))
     except Exception:
-        names = []
-    return names
+        pairs = []
+    pairs.sort(key=lambda p: len(p[0]), reverse=True)
+    if has_request_context():
+        g.wp_names = pairs
+    return pairs
+
+def _person_names():
+    """社員名簿の氏名 {"full": 3文字以上の氏名（長い順）, "surnames": 名字}。1回のリクエストの中では使い回す"""
+    if has_request_context() and "person_names" in g:
+        return g.person_names
+    full, surnames = set(), set()
+    try:
+        for (name,) in db.session.query(Employee.name).all():
+            parts = [p for p in re.split(r"[\s　]+", (name or "").strip()) if p]
+            if not parts:
+                continue
+            full.update({" ".join(parts), "".join(parts), "　".join(parts)})
+            if len(parts) >= 2 and len(parts[0]) >= 2:
+                surnames.add(parts[0])
+    except Exception:
+        pass
+    out = {"full": sorted((n for n in full if len(n) >= 3), key=len, reverse=True), "surnames": surnames}
+    if has_request_context():
+        g.person_names = out
+    return out
 
 def _role_only(text, vocab=None):
     row = vocab_row("actors", "boss", vocab)
     return bool(row) and vnorm(text).strip() in set(_split_words(row.get("words")))
 
-def who_of(name, own_wp="", vocab=None):
-    """作業のだれ {actor, label, state}。職場マスタ → 区分の語 → 未確認 の順。氏名は担当者に置き換える"""
+def _not_person(word, vocab=None):
+    """敬称がついても人の名前ではない語（営業さん、お客様、検査員さん、品質保証課さん など）"""
+    w = vnorm(word).strip()
+    if not w or w in _NOT_PERSON_WORDS:
+        return True
+    if _role_only(w, vocab) or vocab_match("actors", w, vocab) or vocab_match("media", w, vocab):
+        return True
+    return any(found in w or (len(w) >= 2 and w in found) for found, _ in _workplace_names())
+
+def mask_person_names(text, vocab=None):
+    """氏名を置き換える。社員名簿の氏名・「〇〇さん」・単独の名字 → 担当者、「佐藤課長」→ 課長。「課長さん」は課長、「営業さん」「お客様」はそのまま"""
+    text = str(text or "")
+    if not text.strip():
+        return text
     vocab = vocab or map_vocab()
-    raw = str(name or "").strip()
+    people = _person_names()
+    for name in people["full"]:
+        if name in text:
+            text = re.sub(re.escape(name) + r"[ 　]?(さん|様|さま|氏|くん|君|ちゃん)?", "担当者", text)
+    surnames = COMMON_SURNAMES | people["surnames"]
+    roles = [r for r in _split_words((vocab_row("actors", "boss", vocab) or {}).get("words")) if not r.startswith("~")]
+    if roles:
+        rx = re.compile(r"([一-龥々]+?)[ 　]?(" + "|".join(re.escape(r) for r in sorted(roles, key=len, reverse=True)) + ")")
+
+        def strip_surname(m):
+            run, role = m.group(1), m.group(2)
+            for n in range(min(len(run), 4), 1, -1):
+                if run[-n:] in surnames:
+                    return run[:-n] + role
+            return m.group(0)
+        text = rx.sub(strip_surname, text)
+
+    def honorific(m):
+        word = m.group(1)
+        core = re.sub(r"^[おご]", "", word) or word
+        if _role_only(word, vocab) or _role_only(core, vocab):
+            return core
+        if _not_person(word, vocab) or _not_person(core, vocab):
+            return m.group(0)
+        return "担当者"
+    text = _NAME_HONORIFIC_RX.sub(honorific, text)
+    return "".join("担当者" if p.strip() in surnames else p for p in _NAME_SEP_RX.split(text))
+
+def _mask_destination(text):
+    """「課長へ提出する日報作成」の「課長へ」のように、後ろに続きがある行き先の語は、だれの判定に使わない"""
+    return re.sub(r"[^\s　、。をがはでとも]+(への|へ|宛て|宛に)(?=\S)", lambda m: " " * len(m.group(0)), text)
+
+def who_of(name, own_wp="", vocab=None):
+    """作業のだれ {actor, label, state}。職場マスタ → 区分の語 → 未確認 の順。氏名は担当者に置き換え、だれは未確認にする"""
+    vocab = vocab or map_vocab()
+    raw = mask_person_names(str(name or "").strip(), vocab).strip()
     if not raw:
         return {"actor": "", "label": "", "state": "unconfirmed"}
-    for w in _workplace_names():
-        if w in raw:
-            rest = raw.replace(w, " ").strip(" 　の・（）()")
-            if rest and _role_only(_HONORIFIC_RX.sub("", rest), vocab):
-                return {"actor": "boss" if w == own_wp else "dept", "label": f"{w} {_HONORIFIC_RX.sub('', rest)}", "state": "ok"}
+    if raw == "担当者":
+        return {"actor": "", "label": "担当者", "state": "unconfirmed"}
+    for found, w in _workplace_names():
+        if found in raw:
+            rest = raw.replace(found, " ").strip(" 　の・（）()")
+            role = _HONORIFIC_RX.sub("", rest)
+            if rest and _role_only(role, vocab):
+                return {"actor": "boss" if w == own_wp else "dept", "label": f"{w} {role}", "state": "ok"}
             if w == own_wp:
                 return {"actor": "team", "label": f"{w}の人" if not rest or vocab_match("actors", rest, vocab) == "team" else raw, "state": "ok"}
             return {"actor": "dept", "label": raw, "state": "ok"}
     bare = _HONORIFIC_RX.sub("", raw).strip()
     if _role_only(bare, vocab):
         return {"actor": "boss", "label": f"{own_wp} {bare}".strip() if own_wp else bare, "state": "ok"}
-    if _HONORIFIC_RX.search(raw) and bare and bare != raw:
-        return {"actor": "team", "label": f"{own_wp or '職場'}の担当者", "state": "ok"}
-    key = vocab_match("actors", raw, vocab)
+    key = vocab_match("actors", _mask_destination(bare), vocab)
     if key == "unknown":
         return {"actor": "unknown", "label": "利用者不明", "state": "unknown"}
-    if key == "team" and own_wp and normalize_text(raw) in ("職場内", "職場", "本人", "自分", "全員", "みんな", "課内", "班内"):
+    if key == "team" and own_wp and normalize_text(bare) in ("職場内", "職場", "本人", "自分", "全員", "みんな", "課内", "班内"):
         return {"actor": "team", "label": f"{own_wp}の人", "state": "ok"}
     if key:
         return {"actor": key, "label": raw, "state": "ok"}
@@ -2578,6 +2670,35 @@ def task_recipients(t):
         add(n)
     return out
 
+def dept_in_text(text, own_wp="", actor="dept"):
+    """業務の目的などの文から、相手の部署・社外の名前を探す（「翌日の残業人員を総務に伝えるため」→ 総務）。なければ空"""
+    text = str(text or "")
+    if not text.strip():
+        return ""
+    if actor == "dept":
+        for found, w in _workplace_names():
+            if found in text and w != own_wp:
+                return w
+    row = vocab_row("actors", actor)
+    m = row["_rx"].search(_masked(text, row)) if row and row.get("_rx") else None
+    if not m:
+        return ""
+    word = m.group(0)
+    if word in {w[1:] for w in _split_words(row.get("words")) if w.startswith("~")}:
+        word = re.search(r"[一-龥々ァ-ヶーA-Za-z0-9]*$", text[:m.start()]).group(0) + word
+    return word[:20] if len(word) >= 2 else ""
+
+def category_recipient(u, t):
+    """利用者の区分（アンケートの選択肢）しか分からない相手の (だれ, 業務ごとの箱にするなら業務ID)"""
+    own = _own_wp(t)
+    w = category_who(u, own)
+    if not w:
+        return None, None
+    if w["actor"] in ("dept", "external"):
+        found = dept_in_text(_purpose(t), own, w["actor"])
+        return (dict(w, label=found), None) if found else (w, t.id)
+    return w, (t.id if w["actor"] == "unknown" else None)
+
 def users_from_names(names, own_wp=""):
     """渡す相手の名前から、利用者の区分（職場内・上司・他部署・顧客・社外）を決める"""
     cats = []
@@ -2603,16 +2724,37 @@ def category_who(u, own_wp=""):
         return {"actor": "unknown", "label": "", "state": "unknown"}
     return None
 
-def recipient_node(d, name, own_wp="", use="", frame=None, who=None):
-    """渡す相手の箱。システムなら書き込み先の情報、それ以外は相手の作業（だれ＋使いみち）。(node_id, 'work'|'info')"""
+def same_info(a, b):
+    """業務をまたいで同じ情報とみなすか。名前の完全一致か、片方が「名前（媒体など）」でもう片方が「名前」"""
+    na, nb = normalize_text(a), normalize_text(b)
+    if not na or not nb:
+        return False
+    if na == nb:
+        return True
+    base = lambda v: normalize_text(re.sub(r"[（(][^（()）]*[）)]\s*$", "", str(v or "")))
+    ba, bb = base(a), base(b)
+    return (bool(ba) and ba == nb) or (bool(bb) and bb == na) or (len(ba) >= 3 and ba == bb)
+
+def _wp_frame(name):
+    w = Workplace.query.filter_by(name=name).first() if name else None
+    return (f"wp{w.id}", w.name) if w else None
+
+def recipient_node(d, name, own_wp="", use="", frame=None, who=None, task_id=None):
+    """渡す相手の箱。システムなら書き込み先の情報、それ以外は相手の作業（だれ＋使いみち）。(node_id, 'work'|'info')
+    task_id を渡すと業務ごとの箱にする（「他部署」「顧客・社外」「分からない」のような区分だけの相手）"""
     w = who or who_of(name, own_wp)
     if w["state"] == "unconfirmed" and medium_of(name) == "system":
         return d.node(nid("s", name), name, "source", medium="system"), "info"
     if w["state"] == "unknown":
-        return d.node("p_unknown", "使う人が分からない", "warn", who=dict(w, label="")), "work"
+        return d.node(nid("p", f"{task_id}:unknown") if task_id is not None else "p_unknown", "使う人が分からない", "warn", who=dict(w, label="")), "work"
     content = use or "使いみち未確認"
-    inside = frame if frame and own_wp and w["actor"] in ("team", "boss") and w["label"].startswith(own_wp) else None
-    return d.node(nid("p", f"{w['label']}|{content}"), content, "work", subgraph=inside, who=w), "work"
+    inside = None
+    if frame and own_wp and w["actor"] in ("team", "boss") and w["label"].startswith(own_wp):
+        inside = frame
+    elif frame and w["actor"] == "dept":
+        inside = next((_wp_frame(wp) for found, wp in _workplace_names() if found in w["label"]), None)
+    key = f"{w['label']}|{content}" if task_id is None else f"{task_id}:{w['label']}|{content}"
+    return d.node(nid("p", key), content, "work", subgraph=inside, who=w), "work"
 
 def task_user_nodes(d, t, frame=None):
     """利用者の箱 [{id, type, how}]。具体名を優先し、区分（職場内・上司・他部署・社外・分からない）は具体名で表せないものだけ"""
@@ -2630,10 +2772,10 @@ def task_user_nodes(d, t, frame=None):
     for u in cats:
         if u in covered:
             continue
-        w = category_who(u, own)
+        w, per_task = category_recipient(u, t)
         if not w:
             continue
-        node, typ = recipient_node(d, w["label"], own, purpose if not named and len(cats) == 1 else "", frame, who=w)
+        node, typ = recipient_node(d, w["label"], own, purpose if not named and len(cats) == 1 else "", frame, who=w, task_id=per_task)
         out.append({"id": node, "type": typ, "how": ""})
     return out
 
@@ -2642,7 +2784,7 @@ def _add_task_info(d, t, tid, outs=None, dups=None, frame=None):
     for s in task_sources(t):
         prev = None
         if outs and s["shared"] and medium_of(s["name"], s["hint"]) != "system":
-            prev = next((oid for o, oid in outs if o is not t and same_name(s["name"], o.output)), None)
+            prev = next((oid for o, oid in outs if o is not t and same_info(s["name"], o.output)), None)
         if prev:
             d.edge(prev, tid, "info", method=s["method"], show_method=show_method_for(s["method"], d.nodes[prev]["medium"]), inferred=True)
             continue
@@ -2841,15 +2983,16 @@ def build_steps_flow(steps, own_wp="", purpose=""):
                 d.edge(node, sid, "info", method=recv, show_method=show_method_for(recv, d.nodes[node]["medium"]))
         if prev:
             d.edge(prev, sid, "work", handoff="none")
-        out = (x.get("output") or "").strip()
+        out, oid = (x.get("output") or "").strip(), None
         if out:
-            oid = f"o{x['no']}"
-            d.node(oid, out, "output")
-            seen.append((out, oid))
+            oid = next((nd for text, nd in seen if d.nodes[nd]["cls"] == "output" and same_thing(out, text)), None)
+            if oid is None:
+                oid = d.node(f"o{x['no']}", out, "output")
+                seen.append((out, oid))
             d.edge(sid, oid, "info")
             latest = oid
         if to:
-            deliver = (f"o{x['no']}" if out else None) or src or latest
+            deliver = oid or src or latest
             if not deliver and inp:
                 deliver = info(inp)
                 d.edge(deliver, sid, "info")
@@ -2867,11 +3010,52 @@ def build_steps_flow(steps, own_wp="", purpose=""):
         prev = sid
     return d
 
+def _task_ref(name, t):
+    """前後の業務の名前が登録済みの業務なら、その業務の職場をだれにする"""
+    hit = _match_tasks(name, Task.query.filter(Task.id != t.id).all(), exclude=t, limit=1) if t.id else []
+    if hit:
+        wp = _own_wp(hit[0])
+        if wp:
+            return {"actor": "team" if wp == _own_wp(t) else "dept", "label": wp, "state": "ok"}
+    return who_of(name, _own_wp(t))
+
+def _extra_case_links(d, t, steps):
+    """手順に出てこない業務レベルの取り出し元・渡す相手（アンケートや登録で答えたもの）を、案件の流れ図に足す"""
+    own, purpose = _own_wp(t), _purpose(t)
+    first, last = "st1", f"st{steps[-1]['no']}"
+    texts = [v for x in steps for v in (x.get("system"), x.get("input"), x.get("output")) if v]
+    for s_ in task_sources(t):
+        if any(same_name(s_["name"], v, 2) for v in texts):
+            continue
+        node = d.node(nid("s", s_["name"]), s_["name"], "source", hint=s_["hint"])
+        d.edge(node, first, "info", method=s_["method"], show_method=show_method_for(s_["method"], d.nodes[node]["medium"]))
+    step_to = [n for x in steps for n in _names(x.get("to"))]
+    extra = [dict(r, who=None) for r in task_recipients(t) if not any(same_name(r["name"], v, 2) for v in step_to)]
+    covered = {actor_user(who_of(n, own)["actor"]) or "職場内" for n in step_to + [r["name"] for r in extra]}
+    if step_to or extra:
+        covered.add("分からない")
+    for u in t.output_users_list:
+        w = category_recipient(u, t)[0] if u != "自分" and u not in covered else None
+        if w:
+            extra.append({"name": w["label"], "how": "", "use": "", "who": w})
+    deliver = next((i for i, n in reversed(d.nodes.items()) if n["cls"] == "output"), None)
+    for r in extra:
+        node, typ = recipient_node(d, r["name"], own, r["use"] or (purpose if len(extra) == 1 and not step_to else ""), who=r["who"])
+        if typ == "info":
+            d.edge(last, node, "info", method="system")
+            continue
+        if deliver is None:
+            deliver = d.node(f"o{t.id}", t.output or "（渡すもの未確認）", "output", medium=None if (t.output or "").strip() else "unknown")
+            d.edge(last, deliver, "info")
+        d.edge(deliver, node, "info", method=method_of(r["how"]), show_method=bool(method_of(r["how"])))
+        d.edge(last, node, "work", handoff=handoff_of(steps[-1].get("action") or "", r["how"], side="push", method=method_of(r["how"])))
+
 def build_task_flow(t):
     own = _own_wp(t)
     steps = t.steps
     if steps:
         d = build_steps_flow(steps, own, t.purpose or "")
+        _extra_case_links(d, t, steps)
         first, last = "st1", f"st{steps[-1]['no']}"
     else:
         d = Diagram("LR")
@@ -2879,10 +3063,16 @@ def build_task_flow(t):
         d.node(first, t.name, "done" if t.status == "完了" else "task", width=16, who={"actor": "team", "label": own, "state": "ok"})
         _add_task_info(d, t, first)
     if (t.prev_task or "").strip():
-        node = d.node("prev_task", t.prev_task, "work", who=who_of(t.prev_task, own))
+        node = d.node("prev_task", t.prev_task, "work", who=_task_ref(t.prev_task, t))
         d.edge(node, first, "work", handoff=handoff_of(t.prev_task, steps[0].get("action") if steps else ""))
     if (t.next_task or "").strip():
-        node = d.node("next_task", t.next_task, "work", who=who_of(t.next_task, own))
+        w = _task_ref(t.next_task, t)
+        twin = None
+        if w["state"] == "ok" and w["actor"] != "team":
+            twin = next((i for i, n in d.nodes.items() if n["cls"] == "work" and n["who_state"] == "ok" and n["who"] and (n["who"] == w["label"] or t.next_task.startswith(n["who"]))), None)
+        if twin:
+            d.nodes[twin]["text"] = t.next_task.replace(d.nodes[twin]["who"], "", 1).strip(" 　の") or t.next_task
+        node = twin or d.node("next_task", t.next_task, "work", who=w)
         d.edge(last, node, "work", handoff=handoff_of(steps[-1].get("action") if steps else "", t.next_task))
     return d
 
@@ -3242,6 +3432,7 @@ INTAKE_PROMPT = """あなたは製造部「PC定型業務ゼロ化プロジェ�
 - 推測で手順を作らない。相手が言ったことだけを入れる。
 - 人の名前（氏名・〇〇さん）は state にも返事にも書かない。職場・役職・部署で書く（例: 製造1課の担当者、品質保証課 課長）。
 - 渡す手順（送る・渡す・提出する）の output には、渡したものの名前を入れる。
+- sources・outputs と steps の input・output には情報の名前だけを書く（「〜をメール送付」「〜を印刷」のような渡し方・作業は how や action に書く）。
 - 引き継ぎの話が出たら、前の勤務からの引き継ぎは情報の取り出し元（sources と steps の input）、次の勤務への引き継ぎは渡す相手（recipients と steps の to）として扱う。
 
 state は次の形（必ず全部のキーを返す。不明は "" か [] か null）:
@@ -3283,7 +3474,7 @@ FINALIZE_PROMPT = """あなたは製造部「PC定型業務ゼロ化プロジェ
   "output_users_note": "<渡す相手の部署名・人を「、」区切りで1つずつ（例: 課長、生産管理課）。なければ空>",
   "inputs": ["<情報のもと。次の中から: {input_sources}>"],
   "inputs_note": "<具体的なシステム名・ファイル名・帳票名を「、」区切りで1つずつ>",
-  "info_from": "<情報の受け取り元（部署・人・システム・帳票）>",
+  "info_from": "<情報の受け取り元（部署・システム・帳票）の名前を「、」区切りで。氏名は書かない>",
   "actors": "<関わる人・部署を「、」区切り>",
   "prev_task": "<この業務の前に終わっている必要がある業務。なければ空>",
   "next_task": "<この業務の後に始まる業務。なければ空>",
@@ -3323,17 +3514,6 @@ def _intake_state_default():
     return {"title": "", "steps": [], "sources": [], "outputs": [], "recipients": [], "purpose": "", "frequency": None, "duration": None, "shift": None, "pains": [], "unknowns": [], "notes": [], "checked": []}
 
 
-def mask_person_names(text):
-    """「〇〇さん」などの氏名を「担当者」に置き換える（役職の「課長さん」はそのまま役職にする）"""
-    parts = re.split(r"([、,，／/\n])", str(text or ""))
-    out = []
-    for p in parts:
-        bare = _HONORIFIC_RX.sub("", p.strip())
-        if p.strip() and bare != p.strip():
-            p = bare if _role_only(bare) else "担当者"
-        out.append(p)
-    return "".join(out)
-
 def _clean_state(data):
     base = _intake_state_default()
     if not isinstance(data, dict):
@@ -3346,24 +3526,21 @@ def _clean_state(data):
         action = str(x.get("action") or "").strip()
         if not action:
             continue
+        field = lambda key, n: mask_person_names(str(x.get(key) or "").strip())[:n]
         steps.append({
-            "no": len(steps) + 1, "action": action[:200],
-            "system": str(x.get("system") or "").strip()[:100], "input": str(x.get("input") or "").strip()[:200],
-            "output": str(x.get("output") or "").strip()[:200], "to": mask_person_names(str(x.get("to") or "").strip())[:100],
-            "how": str(x.get("how") or "").strip()[:60], "use": str(x.get("use") or "").strip()[:120], "how_from": str(x.get("how_from") or "").strip()[:60],
+            "no": len(steps) + 1, "action": mask_person_names(action)[:200], "system": field("system", 100), "input": field("input", 200),
+            "output": field("output", 200), "to": field("to", 100), "how": field("how", 60), "use": field("use", 120), "how_from": field("how_from", 60),
         })
         if len(steps) >= C.INTAKE_STEP_LIMIT:
             break
     base["steps"] = steps
     for key in ("sources", "outputs", "recipients", "pains", "unknowns"):
-        base[key] = [str(v).strip()[:100] for v in (data.get(key) or []) if str(v).strip()][:10]
-    base["recipients"] = [mask_person_names(v) for v in base["recipients"]]
-    base["sources"] = [mask_person_names(v) for v in base["sources"]]
-    base["purpose"] = str(data.get("purpose") or "").strip()[:300]
+        base[key] = [mask_person_names(str(v).strip())[:100] for v in (data.get(key) or []) if str(v).strip()][:10]
+    base["purpose"] = mask_person_names(str(data.get("purpose") or "").strip())[:300]
     base["frequency"] = data.get("frequency") if data.get("frequency") in C.FREQUENCIES else None
     base["duration"] = data.get("duration") if data.get("duration") in C.DURATIONS else None
     base["shift"] = data.get("shift") if data.get("shift") in C.SHIFT_OPTIONS + ["普通勤務"] else None
-    base["notes"] = [str(v).strip()[:200] for v in (data.get("notes") or []) if str(v).strip()][-12:]
+    base["notes"] = [mask_person_names(str(v).strip())[:200] for v in (data.get("notes") or []) if str(v).strip()][-12:]
     base["checked"] = [str(v)[:120] for v in (data.get("checked") or []) if str(v).strip()][:20]
     return base
 
@@ -3508,8 +3685,9 @@ def intake_handlers(r, used=None):
         counter = Counter()
         for t in Task.query.all():
             for x in t.steps:
-                if (x.get("system") or "").strip():
-                    counter[(x["system"].strip(), "取り出し元")] += 1
+                system = (x.get("system") or "").strip()
+                if system and field_role(system)[0] != "line" and not _is_destination(system, x.get("action")):
+                    counter[(system, "取り出し元")] += 1
                 if (x.get("output") or "").strip():
                     counter[(x["output"].strip(), "できるもの")] += 1
             for v in _names(t.inputs_note):
@@ -4823,7 +5001,7 @@ def _finalize_task(task, state, messages):
         return
     ai_fields = []
     for key in ("purpose", "output", "output_users_note", "inputs_note", "info_from", "actors", "prev_task", "next_task", "pains_note"):
-        value = str(data.get(key) or "").strip()[:500]
+        value = mask_person_names(str(data.get(key) or "").strip())[:500]
         if value:
             setattr(task, key, value)
             ai_fields.append(key)
@@ -6744,7 +6922,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
   <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
     <div>
       <h5 class="mb-1">この領域の情報の流れ</h5>
-      <p class="small text-muted mb-0">情報源 → 業務 → アウトプット → 利用者。業務の箱をクリックすると案件詳細を開きます。</p>
+      <p class="small text-muted mb-0">取り出し元の情報 → 業務 → できるもの → 渡す相手の作業。業務の箱をクリックすると案件詳細を開きます。</p>
       {{ info_legend|safe }}
     </div>
     <div class="btn-group btn-group-sm flow-toolbar" data-target="info" role="group">
@@ -6953,7 +7131,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
 {%- endmacro %}
 {% block content %}
 <h2 class="mb-1">業務体系・業務マップ</h2>
-<p class="text-muted">登録された業務から、システム・帳票・人などの情報源 → 業務 → アウトプット → 受け渡し先を1枚の図に自動生成します。案件が増えるほど製造部の業務全体像が描かれていきます。間違いは「この図を編集する」で手で直せ、直した内容は保存され、新しい業務を取り込んで再生成しても残ります。</p>
+<p class="text-muted">登録された業務から、仕事の流れ（作業 → 作業）と情報の流れ（情報 → 作業 → 情報）を1枚の図に自動生成します。案件が増えるほど製造部の業務全体像が描かれていきます。間違いは「この図を編集する」で手で直せ、直した内容は保存され、新しい業務を取り込んで再生成しても残ります。</p>
 
 <form method="get" class="card mb-3"><div class="card-body py-2">
   <div class="row g-2 align-items-end">
@@ -6984,7 +7162,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
 <div class="bizmap-sections">
   <div id="tab-info">
     {{ flow_panel('info', '業務マップ',
-       'システム・帳票・人などの情報源 → 業務 → アウトプット → 受け渡し先。聞き取りで答えた名前（システム・帳票・部署）で描き、同じ名前は1つの箱にまとめます。職場ごとの枠に業務を置き、点線は前後の業務やアウトプットの受け渡し（ある業務のできるものを別の業務が使っている）です。灰色の点線の箱は、月次アンケートで挙がったものの、まだ流れを登録していない業務です。',
+       '取り出し元の情報 → 業務 → できるもの → 渡す相手の作業。箱は作業（四角・だれつき）と情報（媒体の形とアイコン）の2種類、線は仕事の流れ（太い灰）と情報の流れ（細い青）の2種類です。聞き取りで答えた名前で描き、同じ名前は1つの箱にまとめます。職場ごとの枠に業務を置き、点線は名前から推定したつながり（ある業務のできるものを別の業務が使っている、前後の業務）です。灰色の点線の箱は、月次アンケートで挙がったものの、まだ流れを登録していない業務です。',
        '',
        flows.info, '業務が登録されると図が描かれます。') }}
 
@@ -7342,7 +7520,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
       <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
         <div>
           <h5 class="mb-1">この業務の流れ</h5>
-          <p class="small text-muted mb-0">情報源 → 業務 → アウトプット → 利用者、関わる人。<a href="{{ url_for('bizmap.index', workplace_id=task.workplace_id) }}">職場全体の流れ図</a></p>
+          <p class="small text-muted mb-0">取り出し元の情報 → 手順 → できるもの → 渡す相手の作業、前後の業務。<a href="{{ url_for('bizmap.index', workplace_id=task.workplace_id) }}">職場全体の流れ図</a></p>
           {{ task_legend|safe }}
         </div>
         <div class="btn-group btn-group-sm flow-toolbar" data-target="task" role="group">
