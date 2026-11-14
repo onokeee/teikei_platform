@@ -6589,7 +6589,6 @@ def index():
         workplace_usage=_workplace_usage(),
         domains=_domains(),
         ai_status=ai_status_text(),
-        ldap_status=ldap_status_text(),
         demo_count=Task.query.filter_by(is_demo=True).count(),
         answered_count=len(answered_people()),
         task_count=Task.query.count(),
@@ -6751,6 +6750,7 @@ def employees():
         periods=periods,
         stats=stats,
         active_count=active,
+        answered_count=len(answered_people()),
         ldap_status=ldap_status_text(),
         workplaces=_workplaces(),
         demo_real=demo_ids_with_real_data(),
@@ -7347,14 +7347,11 @@ TEMPLATES = {
     'admin/employees.html': r'''{% extends "base.html" %}
 {% block title %}対象者一覧{% endblock %}
 {% block content %}
-<nav aria-label="breadcrumb"><ol class="breadcrumb small mb-2">
-  <li class="breadcrumb-item"><a href="{{ url_for('admin.index') }}">管理</a></li>
-  <li class="breadcrumb-item active">対象者一覧</li>
-</ol></nav>
 <div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-2">
   <div>
     <h2 class="mb-1">対象者一覧</h2>
     <p class="text-muted mb-0">月次アンケートか「自動化を検討」に一度でも回答した人が、社員IDごとに1行で自動で載ります。退職や他部門への異動で回答率の分母から外す人は「対象外」にチェックします。</p>
+    <p class="small text-muted mb-0">回答した人 {{ answered_count }} 人（業務を1件以上登録したか、月次アンケートに回答した人。対象外は除く）。</p>
   </div>
   <div class="d-flex gap-2">
     <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('monthly.results') }}">月次集計</a>
@@ -7682,10 +7679,9 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
     </div></div>
 
     <div class="card mb-3"><div class="card-body">
-      <h5 class="card-title">対象者・月次アンケート</h5>
-      <p class="small mb-1">回答した人 {{ answered_count }} 人（業務を1件以上登録したか、月次アンケートに回答した人。対象外は除く）。{{ ldap_status }}</p>
+      <h5 class="card-title">月次アンケート</h5>
+      <p class="small mb-2">毎月の設問を編集します。</p>
       <div class="d-flex flex-wrap gap-2">
-        <a class="btn btn-sm btn-outline-primary" href="{{ url_for('admin.employees') }}">対象者一覧</a>
         <a class="btn btn-sm btn-outline-primary" href="{{ url_for('monthly.survey_admin') }}">月次の設問を編集</a>
         <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('monthly.results') }}">月次集計</a>
       </div>
@@ -7828,7 +7824,8 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
         <li class="nav-item"><a class="nav-link nav-link-admin {% if bp == 'bizmap' %}active{% endif %}" href="{{ url_for('bizmap.index') }}">業務マップ</a></li>
         <li class="nav-item"><a class="nav-link nav-link-admin {% if bp == 'people' %}active{% endif %}" href="{{ url_for('people.index') }}">DX人財情報</a></li>
         <li class="nav-item"><a class="nav-link nav-link-admin {% if request.endpoint in ('monthly.results', 'monthly.survey_admin') %}active{% endif %}" href="{{ url_for('monthly.results') }}">月次集計</a></li>
-        <li class="nav-item"><a class="nav-link nav-link-admin {% if bp == 'admin' %}active{% endif %}" href="{{ url_for('admin.index') }}">管理</a></li>
+        <li class="nav-item"><a class="nav-link nav-link-admin {% if request.endpoint == 'admin.employees' %}active{% endif %}" href="{{ url_for('admin.employees') }}">対象者一覧</a></li>
+        <li class="nav-item"><a class="nav-link nav-link-admin {% if bp == 'admin' and request.endpoint != 'admin.employees' %}active{% endif %}" href="{{ url_for('admin.index') }}">管理</a></li>
         {% endif %}
       </ul>
       {% if current_user %}

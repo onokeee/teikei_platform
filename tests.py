@@ -1608,8 +1608,13 @@ def smoke_login_monthly():
     check("アンケート対象者数" not in html and "目標期限" not in html and "target_respondents" not in html, "管理: 対象者数・目標期限の設定はない")
     with app.app_context():
         answered_n = len(app_module.answered_people())
-    check(f"回答した人 {answered_n} 人（業務を1件以上登録したか、月次アンケートに回答した人。対象外は除く）" in html and f"回答した人 {answered_n} 人／業務" in html and "一度でも回答した人）" not in html,
-          f"P9: 管理のトップの人数は「回答した人」（対象外とまだ回答のない人を除く）: {answered_n} 人")
+    code, html_e, r = get("/admin/employees")
+    check(f"回答した人 {answered_n} 人（業務を1件以上登録したか、月次アンケートに回答した人。対象外は除く）" in html_e and f"回答した人 {answered_n} 人／業務" in html and "一度でも回答した人）" not in html + html_e,
+          f"P9: 対象者一覧と管理の人数は「回答した人」（対象外とまだ回答のない人を除く）: {answered_n} 人")
+    check('href="/admin/employees">対象者一覧</a>' in html_e and 'active" href="/admin/employees">対象者一覧' in html_e and 'active" href="/admin/">管理' not in html_e
+          and 'active" href="/admin/">管理' in html and "breadcrumb-item\"><a href=\"/admin/\">管理" not in html_e and 'href="/admin/employees">対象者一覧</a>' in html
+          and "対象者・月次アンケート" not in html,
+          "対象者一覧はナビの独立したタブ（開いている間は「対象者一覧」を選び、「管理」は選ばない。管理画面には対象者一覧のボタンを置かない）")
 
     # ---- 対象外の人は回答できず、回答率と同じ数え方で回答数を出す ----
     EXCL = "この社員IDは対象外になっています。管理者に連絡してください"
@@ -1795,8 +1800,8 @@ def _people_checks(check):
     html = client.get("/").data.decode("utf-8")
     check("自ら改善に取り組みたい人（回答した人 5 人中）" in html and "<th class=\"text-end\">回答した人</th>" in html and "（うち対象者 1 人）" in html,
           "P9・P17・P7: ダッシュボードの自主改善者の分母・職場別の「回答した人」・月次カードの回答数（うち対象者）")
-    html = client.get("/admin/").data.decode("utf-8")
-    check("回答した人 5 人（" in html, "P9: 管理のトップも同じ人数")
+    html = client.get("/admin/employees").data.decode("utf-8")
+    check("回答した人 5 人（" in html, "P9: 対象者一覧も同じ人数")
     rid = None
     with app.app_context():
         rid = Respondent.query.filter_by(emp_id="P008").first()
