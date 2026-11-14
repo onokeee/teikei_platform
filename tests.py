@@ -596,6 +596,49 @@ def smoke_bizmap_edit():
           and dept_other == "第二組立課" and dept_mine == "組立1課",
           f"R3-4: 職場名の変更（組立課 → 組立1課）: 前の名前は名前として独立して出てくるときだけ（後ろの役職はよい）いまの名前に直し、「第二組立課」のような長い名前の一部は直さず、その職場の枠にも入れない: {swapped} / {other} {frame_other}")
 
+    # ---- いまの職場名も、名前として独立して出てくるときだけその職場とみなす ----
+    with app.test_request_context():
+        wp_asm = app_module.Workplace.query.filter_by(name="組立課").first().id
+        wp_qa = app_module.Workplace.query.filter_by(name="検査・品質保証課").first().id
+        who4 = {s: (lambda w: (w["actor"], w["label"]))(app_module.who_of(s, "製造1課")) for s in ("第二組立課", "組立課題の整理", "組立課長", "組立課 課長", "品質保証課 課長")}
+        d_ = app_module.Diagram()
+        frames = {s: d_.nodes[app_module.recipient_node(d_, s, "製造1課", frame=("wp1", "製造1課"), task_id=1)[0]]["group"]
+                  for s in ("第二組立課", "組立課長", "組立課 課長", "品質保証課の担当", "第二品質保証課")}
+        depts = {s: app_module.dept_in_text(s, "製造1課") for s in ("第二組立課に伝えるため", "組立課題を共有するため", "組立課に伝えるため", "品質保証課に報告するため")}
+    check(who4 == {"第二組立課": ("dept", "第二組立課"), "組立課題の整理": ("", "組立課題の整理"), "組立課長": ("dept", "組立課長"), "組立課 課長": ("dept", "組立課 課長"),
+                   "品質保証課 課長": ("dept", "検査・品質保証課 課長")}
+          and frames == {"第二組立課": None, "組立課長": f"wp{wp_asm}", "組立課 課長": f"wp{wp_asm}", "品質保証課の担当": f"wp{wp_qa}", "第二品質保証課": None}
+          and depts == {"第二組立課に伝えるため": "第二組立課", "組立課題を共有するため": "", "組立課に伝えるため": "組立課", "品質保証課に報告するため": "検査・品質保証課"},
+          f"R4-2: いまの職場名も名前として独立して出てくるときだけ（後ろの役職はよい）その職場とみなす。「第二組立課」は組立課の枠に入れず、「組立課題」は組立課と読まない。「・」の後ろ（品質保証課）でも見つける: {who4} / {frames} / {depts}")
+
+    # ---- 設備モニタ・画面・端末はシステムのデータ（既定の区分の語。保存した区分は変えない） ----
+    with app.test_request_context():
+        mon = {t: app_module.medium_of(t) for t in ("設備モニタ", "モニター", "画面", "端末", "検査装置の表示器", "Webポータル")}
+        r_ = Respondent.query.filter_by(emp_id="DEMO-007").first()
+        k_mon = Task(name="不良数の集計", respondent_id=r_.id, workplace_id=r_.workplace_id, inputs="設備データ|紙の帳票", info_from="設備モニタ、端末の画面、紙の日報", output="不良集計表", steps_json="[]")
+        db.session.add(k_mon)
+        db.session.flush()
+        flow_m = app_module.build_info_flow([k_mon])
+        med = {n["text"]: n["medium"] for n in flow_m.nodes.values() if n["type"] == "info" and n["cls"] == "source"}
+        src_m = flow_m.render()
+        rows_m = {r_["name"]: r_["cls"] for r_ in app_module.source_rows([k_mon])}
+        db.session.rollback()
+    check(mon == {"設備モニタ": "system", "モニター": "system", "画面": "system", "端末": "system", "検査装置の表示器": "system", "Webポータル": "web"}
+          and med == {"設備モニタ": "system", "端末の画面": "system", "紙の日報": "paper"} and src_m.count("bi-database-fill") >= 2
+          and rows_m == {"設備モニタ": "system", "端末の画面": "system", "紙の日報": "source"},
+          f"R4-5: 設備モニタ・モニター・画面・端末はシステムのデータ（業務マップはシステムのアイコン、システム・情報源ごとの業務の表はシステムの行）: {mon} / {med} / {rows_m}")
+    with app.app_context():
+        v_now = app_module.vocab_public()
+    old_words = "システム、DB、データベース、SAP、基幹、MES、ERP、Access、サーバ、データ"
+    saved = client.post("/admin/map-vocab", json={"vocab": dict(v_now, media=[dict(x, words=old_words) if x["key"] == "system" else x for x in v_now["media"]])}).get_json()["vocab"]
+    with app.app_context():
+        kept = (next(x["words"] for x in app_module.vocab_public()["media"] if x["key"] == "system"), app_module.medium_of("設備モニタ"))
+    client.post("/admin/map-vocab", json={"reset": True})
+    with app.app_context():
+        back = app_module.medium_of("設備モニタ")
+    check(next(x["words"] for x in saved["media"] if x["key"] == "system") == old_words and kept == (old_words, "unknown") and back == "system",
+          f"R4-5: 管理画面で保存した区分の語はそのまま（既定の語を足さない）。既定に戻すとモニタ・画面・端末の語が入る: {kept} / {back}")
+
     return fails
 
 def smoke_board():
@@ -818,6 +861,34 @@ def smoke_board():
         check(not wk_edited and wk.ai_extra_dict.get("info_edited_at") and wk.ai_source == "rules" and wk.ai_at > wk_at and hours_now in (wk.ai_summary or "") and hours_now not in wk_summary
               and wk.ai_priority == app_module.rule_analyze(wk, app_module._domains(), [])["priority"] and "ルールベースの分析もやり直しました" in html_up and "業務情報を直す前の AI 分析" not in html_up,
               f"R3-10・R3-11: 業務情報を直して保存すると、前回の分析がルールならルールで分析し直し（新しい月間時間の要約・優先度）、改善チームが手を付けた印を残す: {wk.ai_summary}")
+        doms = [d.name for d in app_module._domains()]
+        wk.ai_domain = next(n for n in doms if n != "品質管理")
+        guess_wk = wk.ai_domain
+        db.session.commit()
+    code, html = page(f"/cases/{wk_id}")
+    check(f"AI推定: {guess_wk}" not in html and 'name="adopt_ai_domain"' not in html and "AI推定（" not in html,
+          f"R4-6: 案件詳細で改善チームが決めた業務領域には、別の推定（{guess_wk}）を「AI推定」として出さず、「AI推定に変更する」も出さない")
+    with app.app_context():
+        t6 = Task.query.filter(Task.id != wk_id, Task.verified.is_(False)).order_by(Task.id).first()
+        t6_id = t6.id
+        t6.domain = app_module.Domain.query.filter_by(name=doms[0]).first()
+        t6.ai_domain, t6.ai_fields = doms[1], "domain"
+        db.session.commit()
+    code, html_est = page(f"/cases/{t6_id}")
+    client.post(f"/cases/{t6_id}/verify", data={"verified_by": "推進メンバー"})
+    code, html_ok = page(f"/cases/{t6_id}")
+    client.post(f"/cases/{t6_id}/verify")
+    client.post(f"/cases/{t6_id}/verify", data={"verified_by": "推進メンバー", "adopt_ai_domain": "1"})
+    with app.app_context():
+        t6 = db.session.get(Task, t6_id)
+        adopted = (t6.domain.name, "domain" in t6.ai_fields_list)
+        t6.ai_domain = doms[0]
+        db.session.commit()
+    client.post(f"/cases/{t6_id}/verify")
+    code, html_set = page(f"/cases/{t6_id}")
+    check(f"AI推定: {doms[1]}" in html_est and 'name="adopt_ai_domain"' in html_est and f"AI推定: {doms[1]}" not in html_ok and adopted == (doms[1], False)
+          and f"AI推定: {doms[0]}" not in html_set and 'name="adopt_ai_domain"' not in html_set,
+          f"R4-6: 業務領域が推定のあいだだけ別の推定を出し、担当者確認（確認・AI推定に変更）で決めたあとは出さない（変更した領域は推定の印も外す）: {adopted}")
     client.post(f"/cases/{wk_id}/update", data=dict(form, domain_id=""))
     code, html = page(f"/cases/{wk_id}")
     check('name="adopt_ai_domain"' in html and 'name="prev_task"' in html and 'name="next_task"' in html and 'name="actors"' in html and 'name="domain_id"' in html and 'name="headcount"' in html,
@@ -1621,6 +1692,7 @@ def smoke_login_monthly():
 
     _people_checks(check)
     _people_round2_checks(check)
+    _people_round4_checks(check)
     _migration_checks(check)
     return fails
 
@@ -1870,6 +1942,95 @@ def _people_round2_checks(check):
     h6 = client.get("/survey/", query_string={"emp": "A006", "src": "monthly", "m": new_m}).data.decode("utf-8")
     check(pre_old is None and j5["stance"] is None and pre_new["self_improve"] is True and j6["stance"]["self_improve"] is True and '"self_improve": false' in h5 and '"self_improve": true' in h6,
           f"R3-1: 「一緒にやってみたい」の事前チェックの元（月次の進め方）も直近6か月の回答だけ。6か月より前の「自分で取り組みたい」ではチェックを入れない: {j5.get('stance')} {j6.get('stance')}")
+
+
+def _people_round4_checks(check):
+    import re
+    from datetime import datetime, timedelta
+
+    import app as app_module
+
+    tmpdir = tempfile.mkdtemp()
+    dbfile = os.path.join(tmpdir, "people4.sqlite3").replace("\\", "/")
+    app = create_app({"SQLALCHEMY_DATABASE_URI": "sqlite:///" + dbfile, "TESTING": True})
+    client = app.test_client()
+    client.post("/login", data={"emp_id": "admin", "password": "adminpass"})
+    cur = current_period()
+    prev = shift_period(cur, -1)
+    now = datetime.now()
+    later, review, yes = "その後の月次で依頼したい", "担当区分の見直しを", "スキルを身につけながら、一緒にやってみたい"
+    with app.app_context():
+        w1, w2, w3 = [w.id for w in app_module.Workplace.query.order_by(app_module.Workplace.sort, app_module.Workplace.id).limit(3).all()]
+        for e in ("C001", "C002", "B001", "B002", "B003"):
+            db.session.add(Employee(emp_id=e, name=f"氏名 {e}", source="answer", workplace_id=w3, work_pattern="普通勤務", created_at=now - timedelta(days=800)))
+        for e in ("C001", "C002", "B001", "B003"):
+            db.session.add(Respondent(emp_id=e, name=f"氏名 {e}", workplace_id=w3, work_pattern="普通勤務"))
+        db.session.flush()
+        rid = {r.emp_id: r.id for r in Respondent.query.all()}
+
+        def task(e, name, at, wp=w1, checked=False, **extra):
+            db.session.add(Task(respondent_id=rid[e], workplace_id=wp, name=name, frequency="毎週", duration="15分未満", wish="減らしたい",
+                                self_improve=yes if checked else "", created_at=at, **extra))
+
+        ask = json.dumps({"has": "ある", "wants": "ある", "wants_tasks": "何かの業務", "stance": "改善チームに依頼したい"}, ensure_ascii=False)
+        for e in ("C001", "C002"):
+            task(e, f"{e}の伴走中の業務", now - timedelta(days=40), assignment="自主改善", assignee="改善チーム")
+            db.session.add(MonthlyResponse(period=prev, emp_id=e, name=f"氏名 {e}", workplace_id=w1, answers_json=ask, created_at=now - timedelta(days=20)))
+        task("C001", "C001があとで登録した業務", now - timedelta(days=5), checked=True)
+        task("C002", "C002があとで登録した業務", now - timedelta(days=5))
+        task("B003", "B003の今月の業務", now, wp=w2)
+        db.session.get(Respondent, rid["B003"]).workplace_id = w2
+        Employee.query.filter_by(emp_id="B003").first().workplace_id = w2
+        survey = app_module.get_or_create_survey(cur)
+        db.session.add(MonthlySurvey(period=prev, is_active=True, questions_json=survey.questions_json))
+        db.session.commit()
+
+    # ---- R4-1: 依頼したいと答えたあとで「一緒にやってみたい」にチェックした業務を登録したら、注記を出さない ----
+    with app.test_request_context():
+        people = {p["emp_id"]: p for p in app_module.dx_people()}
+    c1, c2 = people["C001"], people["C002"]
+    html = client.get("/people/").data.decode("utf-8")
+    row_of = lambda e: next((x for x in html.split("<tr") if f">{e}<" in x), "")
+    rows = list(csv.reader(io.StringIO(client.get("/admin/export/respondents.csv").data.decode("utf-8-sig"))))
+    by_id = {x[0]: x for x in rows[1:]}
+    check(c1["wish"] == yes and (c1["wish_note"], c1["wish_hint"]) == ("", "") and c1["wish_positive"] and c1["positive"] and (c2["wish_note"], c2["wish_hint"]) == (later, review)
+          and later not in row_of("C001") and review not in row_of("C001") and f'text-bg-success">{yes}' in row_of("C001") and review in row_of("C002")
+          and by_id["C001"][5] == yes and by_id["C002"][5] == f"チェックなし（{later}・{review}）",
+          f"R4-1: 依頼したいと答えたあとに「一緒にやってみたい」にチェックした業務を登録したら、いちばん新しいのはチェックなので「{later}」「{review}」を出さない（回答者CSVも同じ）: {by_id['C001'][5]} / {by_id['C002'][5]}")
+
+    # ---- R4-3: 前の月度にあとから答えても、回答者・対象者一覧のいまの職場・勤務形態は変えない ----
+    base = {"has": "ある", "hours": list(app_module.MONTHLY_HOURS_OPTIONS)[1], "task_names": "日報の集計", "trend": "変わらない", "wants": "ない"}
+    late = dict(base, wants="ある", wants_tasks="前月の業務", stance="改善チームに依頼したい")
+    post = lambda e, period, wp, pattern, answers: client.post("/monthly/submit", json={"period": period, "emp_id": e, "workplace_id": str(wp), "work_pattern": pattern, "answers": answers})
+    codes = [post("B001", cur, w2, "交代勤務", base).status_code, post("B001", prev, w1, "普通勤務", late).status_code,
+             post("B002", prev, w1, "普通勤務", late).status_code, post("B002", cur, w2, "交代勤務", base).status_code, post("B003", prev, w1, "交代勤務", late).status_code]
+
+    def places():
+        out = {}
+        for e in ("B001", "B002", "B003"):
+            emp, r = Employee.query.filter_by(emp_id=e).first(), Respondent.query.filter_by(emp_id=e).first()
+            out[e] = ((emp.workplace_id, emp.work_pattern), (r.workplace_id, r.work_pattern) if r else None)
+        return out
+    with app.test_request_context():
+        got = places()
+        counted = {p["emp_id"]: p["workplace_id"] for p in app_module.dx_people() if p["emp_id"].startswith("B")}
+        late_row = MonthlyResponse.query.filter_by(emp_id="B001", period=prev).first()
+        late_id, late_wp = late_row.id, late_row.workplace_id
+    check(codes == [200] * 5 and got == {"B001": ((w2, "交代勤務"), (w2, "交代勤務")), "B002": ((w2, "交代勤務"), None), "B003": ((w2, "普通勤務"), (w2, "普通勤務"))}
+          and late_wp == w1 and counted == {"B001": w2, "B002": w2, "B003": w2},
+          f"R4-3: 月次の回答は、その月度がその人のいちばん新しい月度（月次の月度・業務を登録した月）以上のときだけ回答者・対象者一覧の職場・勤務形態を書き換える（回答そのものは前の月度の職場のまま残す）: {got} / {counted}")
+    html_s = client.get("/survey/", query_string={"emp": "B001", "src": "monthly", "m": late_id}).data.decode("utf-8")
+    m_cfg = re.search(r"monthly: (\{.*?\}),\n    api:", html_s, re.S)
+    cfg = json.loads(m_cfg.group(1)) if m_cfg else {}
+    j = client.post("/survey/api/respondent", json={"emp_id": "B001", "workplace_id": cfg.get("workplace_id"), "work_pattern": cfg.get("work_pattern")}).get_json()
+    with app.app_context():
+        after_handoff = places()["B001"]
+    j2 = client.post("/survey/api/respondent", json={"emp_id": "B002", "workplace_id": w3, "work_pattern": "普通勤務"}).get_json()
+    with app.app_context():
+        fresh = places()["B002"]
+    check(cfg.get("period") == prev and (cfg.get("workplace_id"), cfg.get("work_pattern")) == (w2, "交代勤務") and j["success"] and after_handoff == ((w2, "交代勤務"), (w2, "交代勤務"))
+          and j2["success"] and fresh == ((w3, "普通勤務"), (w3, "普通勤務")),
+          f"R4-3: 前の月度にあとから答えた月次から「自動化を検討」を始めると、あなたのことには、いまの職場・勤務形態を入れておき（保存しても変わらない）、あなたのことで選び直した職場・勤務形態は今月の答えとして保存する: {cfg.get('workplace_id')} {after_handoff} {fresh}")
 
 
 def _migration_checks(check):
@@ -2573,10 +2734,27 @@ def smoke_writeback():
     fe = client.get("/static/flowedit.js").data.decode("utf-8")
     check(all(c.get("checked") is True for c in cands) and "cb.checked = c.checked !== false" in fe, "候補はふつう初めから選ばれている（選ばない候補だけ checked: false）")
 
+    import app as app_module
+    from datetime import datetime
+    with app.app_context():
+        t1, t3 = db.session.get(Task, t1_id), db.session.get(Task, t3_id)
+        t1.ai_fields = "next_task|tools"
+        t3.ai_source, t3.ai_summary = "openai", "反映する前の AI の要約"
+        t1_at = t1.ai_at or datetime.min
+        edited_before = [t.ai_extra_dict.get("info_edited_at") for t in (t1, t3)]
+        db.session.commit()
     ids = [c["id"] for c in cands]
     r = client.post("/bizmap/api/writeback", json={"kind": "info", "ids": ids})
     res = r.get_json()
     check(r.status_code == 200 and res["ok"] and res["applied"] >= 7, f"apply writeback applied={res.get('applied')}")
+    with app.test_request_context():
+        t1, t3 = db.session.get(Task, t1_id), db.session.get(Task, t3_id)
+        check(edited_before == [None] * 2 and all(t.ai_extra_dict.get("info_edited_at") and app_module._team_touched(t) for t in (t1, t3))
+              and t1.ai_source == "rules" and (t1.ai_at or datetime.min) > t1_at and "next_task" not in t1.ai_fields_list and "tools" in t1.ai_fields_list
+              and t3.ai_source == "openai" and t3.ai_summary == "反映する前の AI の要約" and t3.ai_stale_note.startswith("業務情報を直す前の AI 分析") and res.get("ai_stale") == 1
+              and "案件詳細の「再分析」で新しくなります" in fe,
+              f"R4-4: 業務マップから書き戻して業務情報が変わった案件は、案件詳細で直したときと同じく、ルールの分析をやり直すか AI の分析に「直す前」の印を付け、直した項目の推定の印を外し、改善チームが手を付けた印を残す: "
+              f"{t1.ai_fields_list} / {t3.ai_stale_note} / {res.get('ai_stale')}")
     with app.app_context():
         t1 = db.session.get(Task, t1_id)
         t2 = db.session.get(Task, t2_id)
@@ -2612,7 +2790,6 @@ def smoke_writeback():
     check(r.status_code == 200 and r.get_json()["candidates"] == [], "writeback without saved map -> empty")
 
     # ---- 書き戻しと再生成（手で選んだだれの区分・書き戻した受け取り元・業務名の変更・点線の取り消し） ----
-    import app as app_module
     with app.app_context():
         t3 = db.session.get(Task, t3_id)
         t3.output_users_note = "検査・品質保証課 課長"

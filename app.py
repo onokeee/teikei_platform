@@ -555,6 +555,12 @@ class Task(db.Model):
         at = self.ai_extra_dict.get("ai_before_edit")
         return "業務情報を直す前の AI 分析（" + at + "）" if at and self.ai_source in ("openai", "claude") else ""
 
+    @property
+    def domain_guess(self):
+        if not self.ai_domain or (self.domain is not None and self.ai_domain == self.domain.name):
+            return ""
+        return self.ai_domain if self.domain is None or ("domain" in self.ai_fields_list and not self.verified) else ""
+
     def apply_ai_result(self, result):
         mask = lambda v: [mask_person_names(x) for x in v] if isinstance(v, list) else (mask_person_names(v) if isinstance(v, str) else v)
         self.ai_domain = result.get("domain")
@@ -894,6 +900,22 @@ def register_member(emp_id, name="", workplace_id=None, work_pattern=""):
         db.session.flush()
     return remember_person(emp_id, name, workplace_id, work_pattern)
 
+def newest_period(emp_id):
+    key = emp_key(emp_id)
+    if not key:
+        return ""
+    monthly = db.session.query(db.func.max(MonthlyResponse.period)).filter(db.func.lower(MonthlyResponse.emp_id) == key).scalar()
+    task_at = (db.session.query(db.func.max(Task.created_at)).join(Respondent, Task.respondent_id == Respondent.id)
+               .filter(db.func.lower(Respondent.emp_id) == key).scalar())
+    return max(monthly or "", _period_of(task_at) or "")
+
+def current_place(emp_id, fallback=None):
+    r = Respondent.query.filter(same_emp_id(Respondent.emp_id, emp_id)).order_by(Respondent.id).first()
+    for x in (r, find_employee(emp_id), fallback):
+        if x is not None and x.workplace_id:
+            return x.workplace_id, x.work_pattern or ""
+    return None, ""
+
 # ===== 集計・KPI・分析不足領域の判定・次アクション提案 =====
 # ----- KPI -----
 def kpis():
@@ -1211,8 +1233,9 @@ def dx_people(workplace_id=None, wish=None):
         recent, recent_row = latest_stance([m for m in monthly if m.period >= since])
         last_check = max((t.created_at or datetime.min for t in checked), default=None)
         asked_at = (recent_row.created_at or datetime.min) if recent in C.MONTHLY_KPI["ask_positive"] else None
-        later_ask = asked_at is not None and last_check is not None and asked_at > last_check
-        review = asked_at is not None and any(asked_at > (t.created_at or datetime.min) for t in accompanied)
+        newest_ask = asked_at is not None and (last_check is None or asked_at > last_check)
+        later_ask = newest_ask and last_check is not None
+        review = newest_ask and any(asked_at > (t.created_at or datetime.min) for t in accompanied)
         raw_skills, raw_learn = (r.skills, r.learn) if r is not None else ([], [])
         want_row = next((m for m in monthly if m.answer("wants") == "ある" and task_names(m.answer("wants_tasks"))), None) if not tasks else None
         p.update(
@@ -1588,8 +1611,8 @@ DEFAULT_MAP_VOCAB = {
         {"key": "csv", "label": "CSV", "words": "CSV", "exclude": "", "icon": "bi-filetype-csv", "shape": "doc"},
         {"key": "paper", "label": "紙・帳票", "words": "紙、帳票、伝票、用紙、手書き、印刷、プリント、チェックシート、チェック表、記録表、メモ", "exclude": "", "icon": "bi-file-earmark-text-fill", "shape": "doc"},
         {"key": "photo", "label": "写真・画像", "words": "写真、画像、スクリーンショット、スクショ", "exclude": "", "icon": "bi-file-earmark-image-fill", "shape": "doc"},
-        {"key": "system", "label": "システムのデータ", "words": "システム、DB、データベース、SAP、基幹、MES、ERP、Access、サーバ、データ", "exclude": "ファイルサーバ", "icon": "bi-database-fill", "shape": "cyl"},
-        {"key": "web", "label": "Web・画面", "words": "Web、ウェブ、ホームページ、サイト、ブラウザ、ポータル、イントラ、URL、画面", "exclude": "", "icon": "bi-globe2", "shape": "stadium"},
+        {"key": "system", "label": "システムのデータ", "words": "システム、DB、データベース、SAP、基幹、MES、ERP、Access、サーバ、データ、モニタ、モニター、画面、端末、ディスプレイ、タブレット、表示器、表示盤、パネル、HMI", "exclude": "ファイルサーバ", "icon": "bi-database-fill", "shape": "cyl"},
+        {"key": "web", "label": "Web", "words": "Web、ウェブ、ホームページ、サイト、ブラウザ、ポータル、イントラ、URL", "exclude": "", "icon": "bi-globe2", "shape": "stadium"},
         {"key": "mail", "label": "メール本文", "words": "メール本文、～メール", "exclude": "", "icon": "bi-envelope-fill", "shape": "stadium"},
         {"key": "chat", "label": "チャット", "words": "チャット、Teams、Slack", "exclude": "", "icon": "bi-chat-dots-fill", "shape": "stadium"},
         {"key": "verbal", "label": "口頭", "words": "口頭、伝言、聞いた内容、言われたこと、指示", "exclude": "指示書", "icon": "bi-chat-quote-fill", "shape": "stadium"},
@@ -1851,12 +1874,12 @@ _NAME_CHAR_RX = re.compile(r"[一-龥々〆ヵヶァ-ヴーA-Za-z0-9]")
 def _wp_followers():
     return [w for key in ("boss", "team") for w in _split_words((vocab_row("actors", key) or {}).get("words")) if not w.startswith("~") and len(w) >= 2]
 
-def _name_spans(text, name, whole=False):
+def _name_spans(text, name):
     spans, followers, i = [], None, text.find(name) if name else -1
     while i >= 0:
         j = i + len(name)
-        rest, ok = text[j:], not (whole and i and _NAME_CHAR_RX.match(text[i - 1]))
-        if whole and ok and rest and _NAME_CHAR_RX.match(rest[0]):
+        rest, ok = text[j:], not (i and _NAME_CHAR_RX.match(text[i - 1]))
+        if ok and rest and _NAME_CHAR_RX.match(rest[0]):
             followers = _wp_followers() if followers is None else followers
             ok = any(rest.startswith(w) or (name[-1] + rest).startswith(w) for w in followers)
         if ok:
@@ -1864,9 +1887,9 @@ def _name_spans(text, name, whole=False):
         i = text.find(name, i + 1)
     return spans
 
-def wp_name_in(found, w, text):
+def wp_name_in(found, text):
     nf = vnorm(found)
-    return bool(nf) and bool(_name_spans(vnorm(text), nf, whole=nf not in vnorm(w)))
+    return bool(nf) and bool(_name_spans(vnorm(text), nf))
 
 def current_wp_text(text):
     nt = vnorm(text)
@@ -1874,7 +1897,7 @@ def current_wp_text(text):
     for found, w in _workplace_names():
         nf, nw = vnorm(found), vnorm(w)
         current = nf in nw
-        for i, j in _name_spans(nt, nf, whole=not current):
+        for i, j in _name_spans(nt, nf):
             if any(i < b and a < j for a, b in taken):
                 continue
             taken.append((i, j))
@@ -1968,7 +1991,7 @@ def who_of(name, own_wp="", vocab=None):
     raw = current_wp_text(raw)
     nraw, nown = vnorm(raw), vnorm(own_wp)
     for found, w in _workplace_names():
-        if wp_name_in(found, w, nraw):
+        if wp_name_in(found, nraw):
             rest = nraw.replace(vnorm(found), " ").strip(" 　の・（）()")
             role = _HONORIFIC_RX.sub("", rest)
             mine = bool(nown) and vnorm(w) == nown
@@ -2829,14 +2852,18 @@ def _new_value(current, op):
     return current
 
 def apply_writeback(candidates, selected_ids, tasks_by_id):
-    applied = 0
+    applied, edited = 0, OrderedDict()
     for c in candidates:
         if c["id"] not in selected_ids:
             continue
         for op in c["ops"]:
             change = _op_change(op, tasks_by_id)
             if change:
-                setattr(change[0], op["field"], change[1])
+                t, new = change
+                if new != (getattr(t, op["field"]) or ""):
+                    setattr(t, op["field"], new)
+                    unmark_estimate(t, op["field"])
+                    edited[t.id] = t
                 applied += 1
                 if op["field"] == "info_from":
                     remember_written("sources", op["task_id"], mask_person_names(op["value"]))
@@ -2846,7 +2873,8 @@ def apply_writeback(candidates, selected_ids, tasks_by_id):
             remember_written("links", c["task_id"], c["link"])
         if c.get("unlink"):
             forget_written("links", c["unlink"])
-    return applied
+    refreshed = [_after_info_edit(t) for t in edited.values()]
+    return applied, refreshed.count("ai")
 
 # ----- 共通 -----
 def _wp_name(t):
@@ -3134,7 +3162,7 @@ def dept_in_text(text, own_wp="", actor="dept"):
         return ""
     if actor == "dept":
         for found, w in _workplace_names():
-            if wp_name_in(found, w, text) and w != own_wp:
+            if wp_name_in(found, text) and w != own_wp:
                 return w
     row = vocab_row("actors", actor)
     m = row["_rx"].search(_masked(text, row)) if row and row.get("_rx") else None
@@ -3224,7 +3252,7 @@ def recipient_node(d, name, own_wp="", use="", frame=None, who=None, task_id=Non
     if frame and own_wp and w["actor"] in ("team", "boss") and vnorm(w["label"]).startswith(vnorm(own_wp)):
         inside = frame
     elif frame and w["actor"] == "dept":
-        inside = next((_wp_frame(wp) for found, wp in _workplace_names() if wp_name_in(found, wp, w["label"])), None)
+        inside = next((_wp_frame(wp) for found, wp in _workplace_names() if wp_name_in(found, w["label"])), None)
     key = f"{w['label']}|{content}" if task_id is None else f"{task_id}:{name}"
     return d.node(nid("p", key), content, "work", subgraph=inside, who=w), "work"
 
@@ -5608,8 +5636,9 @@ def _monthly_context(emp, src, m=None):
     if not wants:
         return None
     stance = row.answer("stance")
+    wp, pattern = (row.workplace_id, row.work_pattern or "") if row.period >= newest_period(row.emp_id) else current_place(row.emp_id, row)
     return {"id": row.id, "period": row.period, "period_label": period_label(row.period), "wants_tasks": wants, "stance": stance,
-            "self_improve": stance in C.MONTHLY_KPI["self_positive"] and row.period >= stance_since(), "workplace_id": row.workplace_id, "work_pattern": row.work_pattern or ""}
+            "self_improve": stance in C.MONTHLY_KPI["self_positive"] and row.period >= stance_since(), "workplace_id": wp, "work_pattern": pattern}
 
 def _options():
     return {
@@ -5673,6 +5702,7 @@ def api_respondent():
         errors["work_pattern"] = "選択してください"
     if errors:
         return jsonify({"success": False, "errors": errors}), 400
+    newest = current_period() >= newest_period(emp_id)
     r = Respondent.query.filter(same_emp_id(Respondent.emp_id, emp_id)).order_by(Respondent.id).first()
     resumed = r is not None
     if r is None:
@@ -5680,9 +5710,10 @@ def api_respondent():
         db.session.add(r)
     r.emp_id = emp_id
     r.name = name or r.name or ""
-    r.workplace_id = workplace_id
-    r.work_pattern = work_pattern
-    remember_person(emp_id, name, workplace_id, work_pattern)
+    if newest or not r.workplace_id:
+        r.workplace_id = workplace_id
+        r.work_pattern = work_pattern
+    remember_person(emp_id, name, workplace_id if newest else None, work_pattern if newest else None)
     db.session.commit()
     session["respondent_id"] = r.id
     return jsonify({"success": True, "resumed": resumed, **_state(r)})
@@ -6279,12 +6310,14 @@ def toggle_hold(task_id):
 @bp_cases.post("/<int:task_id>/verify")
 def verify(task_id):
     task = _get_or_404(Task, task_id)
+    guess = task.domain_guess
     task.verified = not task.verified
     task.verified_by = (request.form.get("verified_by") or "推進メンバー").strip() if task.verified else ""
-    if task.verified and task.ai_domain and (not task.domain or task.ai_domain != task.domain.name) and request.form.get("adopt_ai_domain"):
-        d = Domain.query.filter_by(name=task.ai_domain).first()
+    if task.verified and guess and request.form.get("adopt_ai_domain"):
+        d = Domain.query.filter_by(name=guess).first()
         if d:
             task.domain = d
+            unmark_estimate(task, "domain")
     db.session.commit()
     flash("担当者確認を更新しました。" if task.verified else "担当者確認を解除しました。", "success")
     return redirect(url_for("cases.detail", task_id=task.id))
@@ -6536,9 +6569,9 @@ def api_writeback_apply():
     saved = _saved_graph(kind, workplace_id, domain_id)
     tasks_by_id = _all_tasks(saved)
     cands = writeback_candidates(saved, tasks_by_id)
-    applied = apply_writeback(cands, selected, tasks_by_id)
+    applied, ai_stale = apply_writeback(cands, selected, tasks_by_id)
     db.session.commit()
-    return jsonify({"ok": True, "applied": applied, "selected": len(selected)})
+    return jsonify({"ok": True, "applied": applied, "selected": len(selected), "ai_stale": ai_stale})
 
 # ----- 業務領域ごとのページ -----
 @bp_bizmap.route("/domain/<int:domain_id>")
@@ -7125,16 +7158,17 @@ def submit():
         flash(message, "danger")
         return redirect(url_for("monthly.form", period=period, emp=emp_id or None))
 
+    newest = period >= newest_period(emp_id)
     row = MonthlyResponse(
         period=period, emp_id=emp_id, name=name, workplace_id=workplace_id, work_pattern=work_pattern, survey_id=survey.id,
         answers_json=json.dumps(answers, ensure_ascii=False), comment=comment,
     )
     respondent = Respondent.query.filter(same_emp_id(Respondent.emp_id, emp_id)).order_by(Respondent.id).first()
     row.respondent_id = respondent.id if respondent else None
-    if respondent is not None:
+    if respondent is not None and newest:
         respondent.workplace_id = workplace_id
         respondent.work_pattern = work_pattern
-    register_member(emp_id, name, workplace_id, work_pattern)
+    register_member(emp_id, name, workplace_id if newest else None, work_pattern if newest else "")
     db.session.add(row)
     db.session.commit()
     wants = answers.get("wants") == "ある"
@@ -8512,7 +8546,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
         {% set rulef = task.ai_extra_dict.get('rule_fields') or [] %}
         {% macro mark(key) %}{% if key in aif %}<span class="badge badge-flag me-1">{{ '推定' if key in rulef else 'AI推定' }}</span>{% endif %}{% endmacro %}
         {% if task.steps %}<tr><th class="w-25">手順（聞き取り）</th><td><ol class="mb-0 ps-3 rq-steps-table">{% for x in task.steps %}<li>{{ x.action }}{% if x.system %} <span class="text-muted small">［{{ x.system }}］</span>{% endif %}{% if x.output %} <span class="small">→ {{ x.output }}</span>{% endif %}{% if x.to %} <span class="small text-muted">（{{ x.to }} へ{% if x.how %}・{{ x.how }}{% endif %}）</span>{% endif %}</li>{% endfor %}</ol></td></tr>{% endif %}
-        <tr><th class="w-25">業務領域</th><td>{{ mark('domain') }}{{ task.domain.name if task.domain else '未選択' }}{% if task.ai_domain and (not task.domain or task.ai_domain != task.domain.name) %} <span class="badge badge-flag">AI推定: {{ task.ai_domain }}</span>{% endif %}</td></tr>
+        <tr><th class="w-25">業務領域</th><td>{{ mark('domain') }}{{ task.domain.name if task.domain else '未選択' }}{% if task.domain_guess %} <span class="badge badge-flag">AI推定: {{ task.domain_guess }}</span>{% endif %}</td></tr>
         <tr><th>目的</th><td>{{ mark('purpose') }}{{ task.purpose }}{% if task.purpose_unknown %} <span class="badge text-bg-danger">目的不明</span>{% endif %}</td></tr>
         <tr><th>アウトプット</th><td>{{ mark('output') }}{{ task.output }}</td></tr>
         <tr><th>利用者</th><td>{{ mark('output_users') or mark('output_users_note') }}{{ task.output_users_list|join('・') }}{% if task.output_users_note %}<div class="small text-muted">{{ task.output_users_note }}</div>{% endif %}</td></tr>
@@ -8798,10 +8832,10 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
         <div class="mb-2">
           <input type="text" name="verified_by" class="form-control form-control-sm" placeholder="確認者名（推進メンバー）">
         </div>
-        {% if task.ai_domain and (not task.domain or task.ai_domain != task.domain.name) %}
+        {% if task.domain_guess %}
         <div class="form-check mb-2">
           <input class="form-check-input" type="checkbox" name="adopt_ai_domain" id="adopt" value="1">
-          <label class="form-check-label small" for="adopt">業務領域をAI推定（{{ task.ai_domain }}）に{{ '変更する' if task.domain else 'する' }}</label>
+          <label class="form-check-label small" for="adopt">業務領域をAI推定（{{ task.domain_guess }}）に{{ '変更する' if task.domain else 'する' }}</label>
         </div>
         {% endif %}
         <button class="btn btn-success btn-sm w-100">内容を確認した</button>
@@ -11453,9 +11487,11 @@ document.addEventListener("DOMContentLoaded", function () {
       var data = await res.json();
       if (!res.ok || !data.ok) throw new Error(data.error || res.statusText);
       wbPop.classList.remove("fe-show");
-      setMode("✅ 業務データに " + data.applied + " 件反映しました。図を再生成します");
+      var done = "✅ 業務データに " + data.applied + " 件反映しました";
+      if (data.ai_stale) done += "（AI 分析の案件 " + data.ai_stale + " 件は、案件詳細の「再分析」で新しくなります）";
+      setMode(done + "。図を再生成します");
       await load({ keepView: true });
-      setMode("✅ 業務データに " + data.applied + " 件反映しました");
+      setMode(done);
     } catch (err) {
       setMode("反映に失敗しました: " + err.message);
     }
