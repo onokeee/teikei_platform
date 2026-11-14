@@ -1079,12 +1079,13 @@ def _links_to(a, b):
 
 def related_tasks_for(task, limit=8):
     words = _word_kinds(_related_text(task))
+    output_key = normalize_text(task.output)
     scored = []
     for other in Task.query.filter(Task.id != task.id).all():
         other_words = _word_kinds(_related_text(other))
         shared = [_pair_weight(w, words, other_words) for w in words.keys() & other_words.keys()]
         link = 0
-        if normalize_text(other.output) and normalize_text(other.output) == normalize_text(task.output):
+        if output_key and normalize_text(other.output) == output_key:
             link += 5
         if _links_to(task, other) or _links_to(other, task):
             link += 4
@@ -1101,7 +1102,6 @@ def related_tasks_for(task, limit=8):
 
 _WORD_RE = re.compile(r"[一-龥々〆]{2,}|[ァ-ヶー]{2,}|[A-Za-z0-9]{2,}")
 _STOPWORDS = {"作成", "業務", "確認", "管理", "対応", "実施", "内容", "情報", "毎日", "毎週", "毎月", "前日", "翌日"}
-# 関連業務の判定で重みを1にする語（ツール・媒体・どの業務にも出る動作や相手）
 _WEAK_WORDS = {"excel", "エクセル", "csv", "pdf", "word", "ワード", "powerpoint", "パワポ", "access", "vba", "マクロ", "rpa", "メール", "システム", "データ", "ファイル", "シート", "フォルダ",
                "グラフ", "チェック", "報告", "状況", "共有", "提出", "連絡", "把握", "集計", "転記", "入力", "記録", "更新", "一覧", "資料", "会議",
                "集計表", "一覧表", "報告書", "管理表", "日次", "週次", "月次", "年次", "課長", "部長", "上司", "職場", "各職場", "各部署", "関係部署", "担当者", "ライン"}
@@ -3662,24 +3662,30 @@ def kind_icon_html(text, hint=None):
 AI_SETTING_LABELS = (("openai_api_url", "URL"), ("openai_api_key", "API キー"), ("openai_model", "モデル名"))
 
 
+def _ai_setting(key):
+    return (Setting.get(key) or "").strip()
+
 def _api_url():
-    return (Setting.get("openai_api_url") or "").strip()
+    return _ai_setting("openai_api_url")
 
 def _api_key():
-    return (Setting.get("openai_api_key") or "").strip()
+    return _ai_setting("openai_api_key")
 
 def _model():
-    return (Setting.get("openai_model") or "").strip()
+    return _ai_setting("openai_model")
 
 def ai_enabled():
-    return bool(_api_url()) and bool(_api_key()) and bool(_model())
+    return all(_ai_setting(key) for key, _label in AI_SETTING_LABELS)
+
+def _ai_stamp(at=None):
+    return (at or datetime.now()).strftime("%Y/%m/%d %H:%M")
 
 _LAST_ERROR = {"text": ""}
 _NO_TOOLS = set()
 
 
 def ai_status_text():
-    missing = [label for key, label in AI_SETTING_LABELS if not (Setting.get(key) or "").strip()]
+    missing = [label for key, label in AI_SETTING_LABELS if not _ai_setting(key)]
     if missing:
         return "ChatGPT API の " + "・".join(missing) + " が未設定（ルールベースで動作中）"
     text = f"ChatGPT API 連携 有効（モデル: {_model()}、Responses API）"
@@ -3756,6 +3762,23 @@ def _parse_response(payload):
     if not content and not calls and payload.get("output_text"):
         content = str(payload["output_text"])
     return content, calls, refusal
+
+
+def _extract_json(text, brackets="{}"):
+    if not text:
+        return None
+    text = text.strip()
+    fence = re.search(r"```(?:json)?\s*(.*?)```", text, re.S)
+    if fence:
+        text = fence.group(1).strip()
+    start = text.find(brackets[0])
+    end = text.rfind(brackets[1])
+    if start == -1 or end == -1:
+        return None
+    try:
+        return json.loads(text[start : end + 1])
+    except ValueError:
+        return None
 
 
 def _ai_turn(system, items, max_tokens=None, tools=None, tool_choice="auto"):
@@ -3876,11 +3899,11 @@ class _ToolGuard:
         return self.repeats >= self.LIMIT
 
 
-def _call_ai(system, user_text, max_tokens=None, tools=None, handlers=None, tool_choice="auto"):
+def _call_ai(system, user_input, max_tokens=None, tools=None, handlers=None, tool_choice="auto"):
     if not tools:
-        text, _ = _ai_turn(system, user_text, max_tokens)
+        text, _ = _ai_turn(system, user_input, max_tokens)
         return text
-    items = list(user_text) if isinstance(user_text, list) else [{"role": "user", "content": str(user_text)}]
+    items = list(user_input) if isinstance(user_input, list) else [{"role": "user", "content": str(user_input)}]
     guard = _ToolGuard()
     retried_empty = False
     for round_no in range(C.AI_TOOL_ROUNDS):
@@ -4007,60 +4030,66 @@ FINALIZE_PROMPT = """あなたは製造部「PC定型業務ゼロ化プロジェ
 日本語で、簡潔に。"""
 
 
+def _fill_prompt(template, **values):
+    for key, value in values.items():
+        template = template.replace("{" + key + "}", "／".join(value) if isinstance(value, list) else str(value))
+    return template
+
+
 def _intake_prompt():
-    methods = "／".join(r["label"] for r in map_vocab()["methods"] if r["kind"] == "channel" and r["key"] != "other")
-    return (INTAKE_PROMPT.replace("{frequencies}", "／".join(C.FREQUENCIES)).replace("{durations}", "／".join(C.DURATIONS))
-            .replace("{max_q}", str(C.INTAKE_MAX_QUESTIONS)).replace("{step_limit}", str(C.INTAKE_STEP_LIMIT)).replace("{methods}", methods))
+    methods = [r["label"] for r in map_vocab()["methods"] if r["kind"] == "channel" and r["key"] != "other"]
+    return _fill_prompt(INTAKE_PROMPT, frequencies=C.FREQUENCIES, durations=C.DURATIONS, max_q=C.INTAKE_MAX_QUESTIONS, step_limit=C.INTAKE_STEP_LIMIT, methods=methods)
 
 
 def _finalize_prompt():
-    return (FINALIZE_PROMPT.replace("{output_users}", "／".join(C.OUTPUT_USERS)).replace("{input_sources}", "／".join(C.INPUT_SOURCES))
-            .replace("{tools}", "／".join(C.TOOLS)).replace("{natures}", "／".join(C.NATURES)).replace("{pains}", "／".join(C.PAINS)))
+    return _fill_prompt(FINALIZE_PROMPT, output_users=C.OUTPUT_USERS, input_sources=C.INPUT_SOURCES, tools=C.TOOLS, natures=C.NATURES, pains=C.PAINS)
 
 
 def _intake_state_default():
     return {"title": "", "steps": [], "sources": [], "outputs": [], "recipients": [], "purpose": "", "frequency": None, "duration": None, "shift": None, "pains": [], "unknowns": [], "notes": [], "checked": []}
 
 
+def _masked_clip(value, limit):
+    return mask_person_names(str(value).strip())[:limit]
+
+
 def _clean_state(data):
     base = _intake_state_default()
     if not isinstance(data, dict):
         return base
-    base["title"] = mask_person_names(str(data.get("title") or "").strip())[:200]
+    base["title"] = _masked_clip(data.get("title") or "", 200)
     steps = []
     for x in data.get("steps") or []:
-        if not isinstance(x, dict):
+        if not isinstance(x, dict) or not str(x.get("action") or "").strip():
             continue
-        action = str(x.get("action") or "").strip()
-        if not action:
-            continue
-        field = lambda key, n: mask_person_names(str(x.get(key) or "").strip())[:n]
+        field = lambda key, n: _masked_clip(x.get(key) or "", n)
         steps.append({
-            "no": len(steps) + 1, "action": mask_person_names(action)[:200], "system": field("system", 100), "input": field("input", 200),
+            "no": len(steps) + 1, "action": field("action", 200), "system": field("system", 100), "input": field("input", 200),
             "output": field("output", 200), "to": field("to", 100), "how": field("how", 60), "use": field("use", 120), "how_from": field("how_from", 60),
         })
         if len(steps) >= C.INTAKE_STEP_LIMIT:
             break
     base["steps"] = steps
     for key in ("sources", "outputs", "recipients", "pains", "unknowns"):
-        base[key] = [mask_person_names(str(v).strip())[:100] for v in (data.get(key) or []) if str(v).strip()][:10]
-    base["purpose"] = mask_person_names(str(data.get("purpose") or "").strip())[:300]
+        base[key] = [_masked_clip(v, 100) for v in (data.get(key) or []) if str(v).strip()][:10]
+    base["purpose"] = _masked_clip(data.get("purpose") or "", 300)
     base["frequency"] = data.get("frequency") if data.get("frequency") in C.FREQUENCIES else None
     base["duration"] = data.get("duration") if data.get("duration") in C.DURATIONS else None
     base["shift"] = data.get("shift") if data.get("shift") in C.SHIFT_OPTIONS + ["普通勤務"] else None
-    base["notes"] = [mask_person_names(str(v).strip())[:200] for v in (data.get("notes") or []) if str(v).strip()][-12:]
+    base["notes"] = [_masked_clip(v, 200) for v in (data.get("notes") or []) if str(v).strip()][-12:]
     base["checked"] = [str(v)[:120] for v in (data.get("checked") or []) if str(v).strip()][:20]
     return base
 
 
 def ai_intake(messages, state, image=None, work_pattern="", handlers=None, tools=None, origin=""):
     recent = messages[-24:]
+    with_image = lambda text: [{"type": "input_text", "text": text}, {"type": "input_image", "image_url": image}]
     items = []
     for i, m in enumerate(recent):
         role = "assistant" if m.get("role") == "ai" else "user"
         text = str(m.get("text") or "").strip() or "（空）"
         if role == "user" and image and i == len(recent) - 1:
-            items.append({"role": "user", "content": [{"type": "input_text", "text": text}, {"type": "input_image", "image_url": image}]})
+            items.append({"role": "user", "content": with_image(text)})
         else:
             items.append({"role": role, "content": text})
     if not items:
@@ -4069,7 +4098,7 @@ def ai_intake(messages, state, image=None, work_pattern="", handlers=None, tools
             start += "この業務は、本人が月次アンケートで「なくしたい・自動化したい」と答えた業務です。最初にそのことへ一言ふれてから、最初の質問をしてください。"
         items.append({"role": "user", "content": start})
     elif image and items[-1]["role"] != "user":
-        items.append({"role": "user", "content": [{"type": "input_text", "text": "この写真の手順を読み取ってください"}, {"type": "input_image", "image_url": image}]})
+        items.append({"role": "user", "content": with_image("この写真の手順を読み取ってください")})
     if work_pattern == "交代勤務":
         pattern_note = "\n\n## 本人の勤務形態\n交代勤務（昼勤・夜勤あり）。手順が2つ以上そろったら一度だけ「この業務はいつやりますか？」と聞き、chips は必ず「昼勤」「夜勤」「昼勤・夜勤の両方」の3つ。答えを state.shift に入れる。"
     elif work_pattern:
@@ -4111,6 +4140,10 @@ def ai_finalize(state, messages, wish, domains, candidates, shift="", handlers=N
 
 
 # ----- 道具（aiagent_rag_bundle と同じ chat 形式の定義。送るときに平らな形に直す） -----
+_SEARCH_SIMILAR_TOOL = {"type": "function", "function": {
+    "name": "search_similar_tasks",
+    "description": "登録済みの業務から、名前・成果物・手順が似ているものを探す。同じ業務の二重登録や、他の人が同じ成果物を作っている重複を見つける。",
+    "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "業務名や成果物、キーワード"}}, "required": ["query"]}}}
 INTAKE_TOOLS = [
     {"type": "function", "function": {
         "name": "person_history",
@@ -4120,17 +4153,14 @@ INTAKE_TOOLS = [
         "name": "list_known_systems",
         "description": "これまでの登録に出てきたシステム・ファイル・帳票・できるものの名前と件数。手順やできるものの名前を既存の呼び方にそろえる（名寄せ）ために使う。",
         "parameters": {"type": "object", "properties": {"keyword": {"type": "string", "description": "絞り込みの語（任意）"}}}}},
-    {"type": "function", "function": {
-        "name": "search_similar_tasks",
-        "description": "登録済みの業務から、名前・成果物・手順が似ているものを探す。同じ業務の二重登録や、他の人が同じ成果物を作っている重複を見つける。",
-        "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "業務名や成果物、キーワード"}}, "required": ["query"]}}},
+    _SEARCH_SIMILAR_TOOL,
     {"type": "function", "function": {
         "name": "check_duplicate",
         "description": "本人が同じ名前の業務をすでに登録していないか確かめる。",
         "parameters": {"type": "object", "properties": {"name": {"type": "string", "description": "業務名"}}, "required": ["name"]}}},
 ]
 FINALIZE_TOOLS = [
-    INTAKE_TOOLS[2],
+    _SEARCH_SIMILAR_TOOL,
     {"type": "function", "function": {
         "name": "duplicate_outputs",
         "description": "同じできるもの（成果物）を複数の人が作っている組を返す。output を指定するとその成果物だけに絞る。",
@@ -4161,7 +4191,7 @@ def _similar_tasks(query, exclude_id=None, limit=10):
         nn = normalize_text(t.name)
         if nq and nn and (nq in nn or (len(nn) >= 3 and nn in nq)):
             score += 5
-        if nq and normalize_text(t.output) and nq == normalize_text(t.output):
+        if nq and nq == normalize_text(t.output):
             score += 5
         if score >= 2:
             scored.append((score, t))
@@ -4225,7 +4255,7 @@ def intake_handlers(r, used=None):
     def record(name, fn):
         def run(args):
             result = fn(args)
-            used.add(name if name != "check_duplicate" else "check_duplicate:" + normalize_text(args.get("name") or ""))
+            used.add(name if name != "check_duplicate" else _duplicate_check_key(args.get("name")))
             return result
         return run
 
@@ -4235,9 +4265,13 @@ def intake_handlers(r, used=None):
     }
 
 
+def _duplicate_check_key(name):
+    return "check_duplicate:" + normalize_text(name or "")
+
+
 def intake_tools_for(state):
     checked = set(state.get("checked") or [])
-    title_key = "check_duplicate:" + normalize_text(state.get("title") or "")
+    title_key = _duplicate_check_key(state.get("title"))
     out = []
     for t in INTAKE_TOOLS:
         name = t["function"]["name"]
@@ -4261,24 +4295,6 @@ def finalize_handlers(task):
         return {"同じできるものを複数人が作っている組": rows[:10]}
 
     return {"search_similar_tasks": lambda args: _search_similar_tasks(args, exclude_id=task.id, owner_id=task.respondent_id), "duplicate_outputs": duplicate_outputs}
-
-
-def _extract_json(text, brackets="{}"):
-    """AI の返答から JSON を取り出す（```json の囲みを外し、最初の開き括弧から最後の閉じ括弧まで）。配列なら brackets="[]"。読めなければ None"""
-    if not text:
-        return None
-    text = text.strip()
-    fence = re.search(r"```(?:json)?\s*(.*?)```", text, re.S)
-    if fence:
-        text = fence.group(1).strip()
-    start = text.find(brackets[0])
-    end = text.rfind(brackets[1])
-    if start == -1 or end == -1:
-        return None
-    try:
-        return json.loads(text[start : end + 1])
-    except ValueError:
-        return None
 
 # ----- 業務（案件）の分析 -----
 def task_payload(task):
@@ -4363,8 +4379,7 @@ def rule_analyze(task, domains, candidate_tasks):
         ecrs["eliminate"] = "目的が不明です。アウトプットが実際に使われているかを利用者に確認し、使われていなければ廃止を検討してください。"
         ecrs["questions"].append("このアウトプットは誰が、どの判断に使っていますか？")
     if "分からない" in users:
-        if "廃止候補" not in flags:
-            flags.append("廃止候補")
+        flags.append("廃止候補")
         ecrs["questions"].append("アウトプットの届け先と用途を確認してください。")
     if "同じ情報を何度も入力する" in pains:
         flags += ["重複入力候補", "統合候補"]
@@ -4390,6 +4405,7 @@ def rule_analyze(task, domains, candidate_tasks):
         flags.append("要ヒアリング")
         ecrs["questions"].append(f"必須項目（{'・'.join(missing)}）を担当者と確認してください。")
 
+    flags = list(dict.fromkeys(flags))
     related = [t.name for t in candidate_tasks[:5]]
     minutes = task.monthly_minutes or 0
     if minutes >= 600 or "廃止候補" in flags:
@@ -4401,15 +4417,20 @@ def rule_analyze(task, domains, candidate_tasks):
 
     summary = f"「{task.name}」は{best or '領域未定'}に属する{task.frequency or '頻度不明'}の業務で、月間約 {minutes / 60:.1f} 時間。"
     if flags:
-        summary += "検討ポイント: " + "・".join(dict.fromkeys(flags)) + "。"
+        summary += "検討ポイント: " + "・".join(flags) + "。"
     return {
         "domain": best,
         "related": related,
         "summary": summary,
         "ecrs": ecrs,
-        "flags": list(dict.fromkeys(flags)),
+        "flags": flags,
         "priority": priority,
     }
+
+def _apply_rule_analysis(task, domains):
+    result = rule_analyze(task, domains, related_tasks_for(task, limit=40))
+    result["source"] = "rules"
+    task.apply_ai_result(result)
 
 # ----- 次のアクション提案（AI） -----
 ACTION_SYSTEM_PROMPT = """あなたは製造部の「PC定型業務ゼロ化プロジェクト」のデジタル改善チームを支援するアナリストです。
@@ -4447,7 +4468,7 @@ def suggest_actions_ai(context):
                 "kind": str(item.get("kind") or "提案"),
                 "title": str(item.get("title")),
                 "detail": str(item.get("detail") or ""),
-                "generated_at": datetime.now().strftime("%Y/%m/%d %H:%M"),
+                "generated_at": _ai_stamp(),
             }
         )
     return result[:6]
@@ -5761,6 +5782,10 @@ def _ordered(values, choices):
     return [c for c in choices if c in values]
 
 
+def _matched_categories(table, texts):
+    return [cat for cat, rx in table if any(re.search(rx, t or "") for t in texts)]
+
+
 def _source_category(name, method=""):
     name = (name or "").strip()
     medium = medium_of(name) if name else "unknown"
@@ -5780,7 +5805,7 @@ def _mentions_folder(text):
 
 def _step_natures(x):
     text = (x.get("action") or "") + " " + (x.get("how") or "")
-    found = [cat for cat, rx in NATURE_WORDS if re.search(rx, text)]
+    found = _matched_categories(NATURE_WORDS, [text])
     if _SAVE_RX.search(x.get("action") or "") and _mentions_folder(text + " " + (x.get("system") or "")):
         found.append("台帳更新")
     return found
@@ -5804,7 +5829,7 @@ def _state_sources(state):
 
 
 def map_pains(texts):
-    found = [cat for cat, rx in PAIN_WORDS if any(re.search(rx, t or "") for t in texts)]
+    found = _matched_categories(PAIN_WORDS, texts)
     if not found and any(_NO_PAIN_RX.fullmatch((t or "").strip()) for t in texts):
         found = ["特になし"]
     return found
@@ -5886,19 +5911,19 @@ def api_intake():
     return jsonify({"success": True, **result})
 
 
-def _fill_from_state(task, state, only_missing=False):
-    if not (task.output or "").strip() and state["outputs"]:
-        task.output = "、".join(state["outputs"])[:500]
-    if not (task.inputs_note or "").strip() and state["sources"]:
-        task.inputs_note = "、".join(state["sources"])[:500]
-    if not (task.output_users_note or "").strip() and state["recipients"]:
-        task.output_users_note = "、".join(state["recipients"])[:500]
-    if not (task.pains_note or "").strip() and state["pains"]:
-        task.pains_note = "、".join(state["pains"])[:500]
+_STATE_TEXT_FIELDS = (("output", "outputs"), ("inputs_note", "sources"), ("output_users_note", "recipients"), ("pains_note", "pains"))
+
+
+def _fill_text_fields(task, state):
+    for field, key in _STATE_TEXT_FIELDS:
+        if not (getattr(task, field) or "").strip() and state[key]:
+            setattr(task, field, "、".join(state[key])[:500])
     if (state.get("purpose") or "").strip() and (task.purpose or "").strip() in ("", "不明"):
         task.purpose = state["purpose"].strip()[:500]
-    if only_missing:
-        return []
+
+
+def _fill_from_state(task, state):
+    _fill_text_fields(task, state)
     if not (task.purpose or "").strip():
         task.purpose = "不明"
     return _fill_categories(task, state)
@@ -5928,9 +5953,8 @@ def _finalize_task(task, state, messages, refresh=False, use_ai=True):
     fields = task.ai_fields_list if refresh else []
     rules = list(extra.get("rule_fields") or [])
 
-    def may(key):
-        current = task.domain_id if key == "domain" else getattr(task, key)
-        return not refresh or not str(current or "").strip() or (key in fields and not task.verified)
+    def replaceable(key):
+        return not refresh or not str(getattr(task, key) or "").strip() or (key in fields and not task.verified)
 
     def mark(key, by_rule):
         if key not in fields:
@@ -5945,35 +5969,33 @@ def _finalize_task(task, state, messages, refresh=False, use_ai=True):
             task.domain = d
             mark("domain", by_rule)
 
-    _fill_from_state(task, state, only_missing=True)
+    _fill_text_fields(task, state)
     data = None
     if use_ai and ai_enabled():
         cands = related_tasks_for(task, limit=40)
         data = ai_finalize(state, messages, task.wish, domains, cands, task.shift or "", handlers=finalize_handlers(task), current=task_payload(task) if refresh else None)
     if data is None:
         if any(extra.get(k) for k in C.AI_PLAN_KEYS) and not extra.get("ai_plan_at") and task.ai_source == "openai" and task.ai_at:
-            extra["ai_plan_at"] = task.ai_at.strftime("%Y/%m/%d %H:%M")
+            extra["ai_plan_at"] = _ai_stamp(task.ai_at)
         for key in _fill_from_state(task, state):
             mark(key, True)
         set_domain(rule_domain(task, domains), True)
-        result = rule_analyze(task, domains, related_tasks_for(task, limit=40))
-        result["source"] = "rules"
-        task.apply_ai_result(result)
+        _apply_rule_analysis(task, domains)
         extra.update(first_impression=extra.get("first_impression") or "受け付けました。改善チームが内容を確認して連絡します", unknowns=state.get("unknowns") or [])
     else:
         for key in ("purpose", "output", "output_users_note", "inputs_note", "info_from", "actors", "prev_task", "next_task", "pains_note"):
-            value = mask_person_names(str(data.get(key) or "").strip())[:500]
-            if value and may(key):
+            value = _masked_clip(data.get(key) or "", 500)
+            if value and replaceable(key):
                 setattr(task, key, value)
                 mark(key, False)
         for key, allowed in (("output_users", C.OUTPUT_USERS), ("inputs", C.INPUT_SOURCES), ("tools", C.TOOLS), ("nature", C.NATURES), ("pains", C.PAINS)):
             values = [v for v in (data.get(key) or []) if isinstance(v, str) and v in allowed]
-            if values and may(key):
+            if values and replaceable(key):
                 setattr(task, key, C.join_list(values))
                 mark(key, False)
         if not (task.name or "").strip() and data.get("name"):
-            task.name = mask_person_names(str(data["name"]).strip())[:200]
-        _fill_from_state(task, state, only_missing=True)
+            task.name = _masked_clip(data["name"], 200)
+        _fill_text_fields(task, state)
         for key in _fill_categories(task, state):
             mark(key, True)
         ai_domain = next((d for d in domains if d.name == data.get("domain")), None)
@@ -5994,14 +6016,13 @@ def _finalize_task(task, state, messages, refresh=False, use_ai=True):
             "source": "openai",
         })
         saving = data.get("saving_minutes_per_month")
-        clean = lambda v, n: mask_person_names(str(v).strip())[:n]
         extra.update(
-            tobe_steps=[clean(x, 200) for x in (data.get("tobe_steps") or []) if str(x).strip()][:6],
+            tobe_steps=[_masked_clip(x, 200) for x in (data.get("tobe_steps") or []) if str(x).strip()][:6],
             saving_minutes_per_month=int(saving) if isinstance(saving, (int, float)) and saving > 0 else None,
-            first_impression=clean(data.get("first_impression") or "", 120) or extra.get("first_impression") or "",
-            hearing_questions=[clean(q, 200) for q in (data.get("hearing_questions") or []) if str(q).strip()][:5],
+            first_impression=_masked_clip(data.get("first_impression") or "", 120) or extra.get("first_impression") or "",
+            hearing_questions=[_masked_clip(q, 200) for q in (data.get("hearing_questions") or []) if str(q).strip()][:5],
             unknowns=state.get("unknowns") or [],
-            ai_plan_at=datetime.now().strftime("%Y/%m/%d %H:%M"),
+            ai_plan_at=_ai_stamp(),
         )
         extra.pop("ai_plan_demo", None)
         try:
@@ -6220,15 +6241,13 @@ def _update_task_info(task, f):
 
 def _after_info_edit(task):
     extra = task.ai_extra_dict
-    extra["info_edited_at"] = datetime.now().strftime("%Y/%m/%d %H:%M")
+    extra["info_edited_at"] = _ai_stamp()
     kind = ""
     if task.ai_source in ("openai", "claude"):
-        extra.setdefault("ai_before_edit", task.ai_at.strftime("%Y/%m/%d %H:%M") if task.ai_at else "日付不明")
+        extra.setdefault("ai_before_edit", _ai_stamp(task.ai_at) if task.ai_at else "日付不明")
         kind = "ai"
     elif task.ai_source:
-        result = rule_analyze(task, _domains(), related_tasks_for(task, limit=40))
-        result["source"] = "rules"
-        task.apply_ai_result(result)
+        _apply_rule_analysis(task, _domains())
         kind = "rules"
     task.ai_extra = json.dumps(extra, ensure_ascii=False)
     return kind
