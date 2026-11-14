@@ -53,7 +53,7 @@ def split_list(value):
 def join_list(values):
     return SEP.join([v for v in values if v])
 
-# ---- パートB 業務の棚卸し ----
+# ---- パートB 検討する業務（1業務ごと） ----
 OUTPUT_USERS = ["自分", "職場内", "上司", "他部署", "顧客・社外", "分からない"]
 INPUT_SOURCES = ["生産管理システム", "品質システム", "設備データ", "紙の帳票", "メール", "他のExcel", "人から聞く", "その他"]
 FREQUENCIES = ["毎日", "週に数回", "毎週", "毎月", "四半期・年次", "不定期"]
@@ -76,8 +76,7 @@ WORK_PATTERNS = ["普通勤務", "交代勤務"]
 SHIFT_OPTIONS = ["昼勤", "夜勤", "昼勤・夜勤の両方"]
 FREQUENCY_HINTS = {"毎日": "毎日（出勤のたび）", "不定期": "不定期（月1回として計算）"}
 
-# ---- パートC 改善への参加意欲とスキル ----
-C1_OPTIONS = ["ぜひ取り組みたい", "教えてもらえれば取り組みたい", "興味はあるが時間がない", "今は考えていない"]
+# ---- 使える技術・学びたい技術（「一緒にやってみたい」にチェックした人に出すチップ） ----
 SKILLS = ["Excel関数", "ピボットテーブル", "Excel VBA", "Access", "Power Query", "Power BI", "Python", "RPA", "生成AI", "特になし"]
 SKILL_NONE = "特になし"
 
@@ -136,7 +135,6 @@ BUILD_STAGE_SELF = "伴走"
 # ---- 案件候補・改善意欲の判定 ----
 CANDIDATE_WISHES = {"なくしたい", "減らしたい", "自動化したい"}
 SELF_IMPROVE_POSITIVE = {SELF_IMPROVE_YES, "取り組みたい", "教えてもらえれば取り組みたい"}
-C1_POSITIVE = {"ぜひ取り組みたい", "教えてもらえれば取り組みたい"}
 STANCE_MONTHS = 6
 
 # ---- 分析不足領域の判定しきい値 ----
@@ -178,6 +176,7 @@ _IF_HAS = {"key": "has", "show_if": ["ある"], "required": True}
 STANCE_SELF = "自分で取り組みたい"
 STANCE_TOGETHER = "学びながら改善チームと一緒に取り組みたい"
 STANCE_ASK = "改善チームに依頼したい"
+STANCE_OPTIONS = [STANCE_SELF, STANCE_TOGETHER, STANCE_ASK]
 MONTHLY_CORE_QUESTIONS = [
     {"key": "has", "type": "choice", "text": "PCの定型・定期業務（繰り返しの手動作業）はありますか", "options": ["ある", "ない"], "required": True},
     {"key": "hours", "type": "choice", "text": "1シフト（1出勤）あたり、PCの定型・定期業務を行っている合計時間は", "options": list(MONTHLY_HOURS_OPTIONS), "required": False, "depends": dict(_IF_HAS)},
@@ -190,7 +189,7 @@ MONTHLY_CORE_QUESTIONS = [
     {"key": "wants", "type": "choice", "text": "なくしたい・自動化したいPCの定型・定期業務はありますか", "options": ["ある", "ない"], "required": False, "depends": dict(_IF_HAS, main=True)},
     {"key": "wants_tasks", "type": "list", "text": "あれば、その業務名", "required": False, "placeholder": "例：日報の実績をExcelに転記する",
      "depends": {"key": "wants", "show_if": ["ある"], "required": True}},
-    {"key": "stance", "type": "choice", "text": "どのように進めたいですか", "options": [STANCE_SELF, STANCE_TOGETHER, STANCE_ASK], "required": False,
+    {"key": "stance", "type": "choice", "text": "どのように進めたいですか", "options": STANCE_OPTIONS, "required": False,
      "depends": {"key": "wants", "show_if": ["ある"], "required": True}},
 ]
 MONTHLY_CORE_KEYS = {q["key"] for q in MONTHLY_CORE_QUESTIONS}
@@ -234,6 +233,10 @@ def _json_column(text, default):
         return json.loads(text) if text else default
     except ValueError:
         return default
+
+def _json_typed(text, default):
+    data = _json_column(text, default)
+    return data if isinstance(data, type(default)) else default
 
 
 class Workplace(db.Model):
@@ -293,10 +296,6 @@ class Respondent(db.Model):
     @property
     def wants_to_improve(self):
         return any(t.self_improve in C.SELF_IMPROVE_POSITIVE for t in self.tasks)
-
-    @property
-    def total_minutes(self):
-        return sum(t.monthly_minutes or 0 for t in self.tasks)
 
 class Task(db.Model):
     __tablename__ = "tasks"
@@ -522,13 +521,11 @@ class Task(db.Model):
 
     @property
     def steps(self):
-        data = _json_column(self.steps_json, [])
-        return [x for x in data if isinstance(x, dict) and x.get("action")] if isinstance(data, list) else []
+        return [x for x in _json_typed(self.steps_json, []) if isinstance(x, dict) and x.get("action")]
 
     @property
     def intake(self):
-        data = _json_column(self.intake_json, [])
-        return [m for m in data if isinstance(m, dict)] if isinstance(data, list) else []
+        return [m for m in _json_typed(self.intake_json, []) if isinstance(m, dict)]
 
     @property
     def ai_fields_list(self):
@@ -536,8 +533,7 @@ class Task(db.Model):
 
     @property
     def ai_extra_dict(self):
-        data = _json_column(self.ai_extra, {})
-        return data if isinstance(data, dict) else {}
+        return _json_typed(self.ai_extra, {})
 
     @property
     def ai_plan_note(self):
@@ -582,10 +578,6 @@ class StageLog(db.Model):
     note = db.Column(db.Text, default="")
 
     task = db.relationship("Task", back_populates="stage_logs")
-
-    @property
-    def stage_name(self):
-        return self.task.stage_label(self.stage) if self.task else C.STAGE_NAMES.get(self.stage, self.stage)
 
 class Setting(db.Model):
     __tablename__ = "settings"
@@ -641,8 +633,7 @@ class MonthlySurvey(db.Model):
 
     @property
     def questions(self):
-        data = _json_column(self.questions_json, [])
-        return data if isinstance(data, list) else []
+        return _json_typed(self.questions_json, [])
 
     def set_questions(self, questions):
         self.questions_json = json.dumps(questions, ensure_ascii=False)
@@ -673,8 +664,7 @@ class MonthlyResponse(db.Model):
 
     @property
     def answers(self):
-        data = _json_column(self.answers_json, {})
-        return data if isinstance(data, dict) else {}
+        return _json_typed(self.answers_json, {})
 
     def answer(self, key):
         return self.answers.get(key) or ""
@@ -682,10 +672,6 @@ class MonthlyResponse(db.Model):
     @property
     def hours_shift(self):
         return C.MONTHLY_HOURS_VALUE.get(self.answer("hours"), 0.0)
-
-    @property
-    def period_label(self):
-        return period_label(self.period)
 
 def period_label(period):
     try:
@@ -789,8 +775,8 @@ def _assign_id(mapper, connection, target):
     connection.execute(text(f"UPDATE settings SET value = CAST(MAX(CAST(value AS INTEGER), (SELECT COALESCE(MAX(id), 0) FROM {table})) + 1 AS TEXT) WHERE key = :k"), {"k": key})
     target.id = int(connection.execute(text("SELECT value FROM settings WHERE key = :k"), {"k": key}).scalar())
 
-for _table, _model in ID_SEQ_TABLES:
-    db.event.listen(_model, "before_insert", _assign_id)
+for _seq_table, _seq_model in ID_SEQ_TABLES:
+    db.event.listen(_seq_model, "before_insert", _assign_id)
 
 def _referenced_ids():
     top = {table: 0 for table, _ in ID_SEQ_TABLES}
@@ -798,8 +784,7 @@ def _referenced_ids():
         m = re.match(r"wp:(\d+)\|dom:(\d+)", scope or "")
         if m:
             top["workplaces"], top["domains"] = max(top["workplaces"], int(m.group(1))), max(top["domains"], int(m.group(2)))
-        graph = _json_column(data, {})
-        graph = graph if isinstance(graph, dict) else {}
+        graph = _json_typed(data, {})
         refs = [str(x) for x in (graph.get("suppressed_nodes") or [])]
         refs += [part for x in (graph.get("suppressed_edges") or []) for part in str(x).split("->")]
         for n in graph.get("nodes") or []:
@@ -848,17 +833,16 @@ def norm_emp_id(value):
     return unicodedata.normalize("NFKC", str(value or "")).strip()
 
 def find_employee(emp_id):
-    emp_id = norm_emp_id(emp_id)
-    if not emp_id:
+    if not norm_emp_id(emp_id):
         return None
-    return Employee.query.filter(db.func.lower(Employee.emp_id) == emp_id.lower()).first()
+    return Employee.query.filter(same_emp_id(Employee.emp_id, emp_id)).first()
 
 def lookup(emp_id):
     emp_id = norm_emp_id(emp_id)
     if not emp_id:
         return None
     info = ldap_auth.lookup_directory(emp_id)
-    emp = find_employee(info["emp_id"] if info else emp_id) or (find_employee(emp_id) if info else None)
+    emp = (find_employee(info["emp_id"]) if info else None) or find_employee(emp_id)
     if info is None and emp is None:
         return None
     info = info or {}
@@ -869,8 +853,6 @@ def lookup(emp_id):
     return {
         "emp_id": emp.emp_id if emp else (info.get("emp_id") or emp_id),
         "name": name or (emp.name if emp else "") or "",
-        "source": emp.source if emp else "ldap",
-        "member": emp is not None,
         "active": emp is None or emp.active is not False,
     }
 
@@ -901,12 +883,11 @@ def register_member(emp_id, name="", workplace_id=None, work_pattern=""):
     return remember_person(emp_id, name, workplace_id, work_pattern)
 
 def newest_period(emp_id):
-    key = emp_key(emp_id)
-    if not key:
+    if not emp_key(emp_id):
         return ""
-    monthly = db.session.query(db.func.max(MonthlyResponse.period)).filter(db.func.lower(MonthlyResponse.emp_id) == key).scalar()
+    monthly = db.session.query(db.func.max(MonthlyResponse.period)).filter(same_emp_id(MonthlyResponse.emp_id, emp_id)).scalar()
     task_at = (db.session.query(db.func.max(Task.created_at)).join(Respondent, Task.respondent_id == Respondent.id)
-               .filter(db.func.lower(Respondent.emp_id) == key).scalar())
+               .filter(same_emp_id(Respondent.emp_id, emp_id)).scalar())
     return max(monthly or "", _period_of(task_at) or "")
 
 def current_place(emp_id, fallback=None):
@@ -917,13 +898,12 @@ def current_place(emp_id, fallback=None):
     return None, ""
 
 # ===== 集計・KPI・分析不足領域の判定・次アクション提案 =====
-# ----- KPI -----
+# ----- KPI・ダッシュボードのグラフ -----
 def kpis():
     tasks = Task.query.all()
     people = dx_people()
-    m_rows = member_rows()
     m_periods = member_periods()[-1:]
-    latest = member_stats(m_rows, m_periods)[m_periods[0]] if m_periods else None
+    latest = member_stats(member_rows(), m_periods)[m_periods[0]] if m_periods else None
 
     total_minutes = sum(t.monthly_minutes or 0 for t in tasks)
     saved_minutes = sum(t.saved_minutes for t in tasks)
@@ -940,7 +920,6 @@ def kpis():
     return {
         "task_count": len(tasks),
         "respondent_count": len(people),
-        "member_count": len([r for r in m_rows if r["emp"].active]),
         "response_rate": latest["rate"] if latest else None,
         "response_period": period_label(m_periods[0]) if m_periods else "",
         "response_answered": latest["answered"] if latest else 0,
@@ -959,6 +938,29 @@ def kpis():
         "sufficient_rate": (len(sufficient) / len(tasks) * 100.0) if tasks else 0.0,
         "domain_rows": domain_rows,
         "insufficient_domains": [d for d in domain_rows if d["level"] <= 1],
+    }
+
+def dashboard_chart_data():
+    wp = workplace_stats()
+    tasks = Task.query.all()
+    wish_counter = Counter(t.wish or "未回答" for t in tasks)
+    pain_counter = Counter(p for t in tasks for p in t.pains_list if p != "特になし")
+    wish_labels = [w for w in C.WISHES + ["未回答"] if wish_counter.get(w)]
+    pain_counts = pain_counter.most_common()
+    return {
+        "workplace": {
+            "labels": [w["workplace"].name for w in wp],
+            "tasks": [w["tasks"] for w in wp],
+            "hours": [round(w["minutes"] / 60.0, 1) for w in wp],
+        },
+        "wish": {
+            "labels": wish_labels,
+            "values": [wish_counter[w] for w in wish_labels],
+        },
+        "pains": {
+            "labels": [p for p, _ in pain_counts],
+            "values": [n for _, n in pain_counts],
+        },
     }
 
 # ----- 職場別・領域別 -----
@@ -1031,7 +1033,7 @@ def normalize_text(value):
     value = (value or "").strip().lower()
     return _NORMALIZE_RE.sub("", value)
 
-def duplicate_output_groups(min_size=2):
+def duplicate_output_groups():
     groups = defaultdict(list)
     for t in Task.query.all():
         key = normalize_text(t.output)
@@ -1040,7 +1042,7 @@ def duplicate_output_groups(min_size=2):
     result = [
         {"output": tasks[0].output, "tasks": tasks, "minutes": sum(x.monthly_minutes or 0 for x in tasks)}
         for tasks in groups.values()
-        if len(tasks) >= min_size and len({x.respondent_id for x in tasks}) >= 2
+        if len({x.respondent_id for x in tasks}) >= 2
     ]
     result.sort(key=lambda g: g["minutes"], reverse=True)
     return result
@@ -1053,15 +1055,9 @@ def duplicate_input_tasks():
             rows[key].append(t)
     return sorted(rows.items(), key=lambda kv: -len(kv[1]))
 
-def flow_rows(domain_id=None):
-    q = Task.query
-    if domain_id:
-        q = q.filter_by(domain_id=domain_id)
-    rows = []
-    for t in q.order_by(Task.domain_id, Task.name).all():
-        if (t.prev_task or "").strip() or (t.next_task or "").strip():
-            rows.append(t)
-    return rows
+def flow_rows():
+    tasks = Task.query.order_by(Task.domain_id, Task.name).all()
+    return [t for t in tasks if (t.prev_task or "").strip() or (t.next_task or "").strip()]
 
 RELATED_MIN_OVERLAP = 3
 
@@ -1079,12 +1075,13 @@ def _links_to(a, b):
 
 def related_tasks_for(task, limit=8):
     words = _word_kinds(_related_text(task))
+    output = normalize_text(task.output)
     scored = []
     for other in Task.query.filter(Task.id != task.id).all():
         other_words = _word_kinds(_related_text(other))
         shared = [_pair_weight(w, words, other_words) for w in words.keys() & other_words.keys()]
         link = 0
-        if normalize_text(other.output) and normalize_text(other.output) == normalize_text(task.output):
+        if output and normalize_text(other.output) == output:
             link += 5
         if _links_to(task, other) or _links_to(other, task):
             link += 4
@@ -1182,10 +1179,9 @@ def stance_since():
     return shift_period(current_period(), 1 - C.STANCE_MONTHS)
 
 def person_stance(emp_id):
-    key = emp_key(emp_id)
-    if not key:
+    if not emp_key(emp_id):
         return "", None
-    rows = (MonthlyResponse.query.filter(db.func.lower(MonthlyResponse.emp_id) == key, MonthlyResponse.period >= stance_since())
+    rows = (MonthlyResponse.query.filter(same_emp_id(MonthlyResponse.emp_id, emp_id), MonthlyResponse.period >= stance_since())
             .order_by(MonthlyResponse.period.desc(), MonthlyResponse.id.desc()).all())
     return latest_stance(rows)
 
@@ -1198,8 +1194,7 @@ def skills_summary(people=None):
         learn.update(p["learn"])
     return have, learn
 
-def _positive(checked, stance, stance_row):
-    last_check = max((t.created_at or datetime.min for t in checked), default=None)
+def _positive(last_check, stance, stance_row):
     if last_check is not None and (stance_row is None or last_check >= (stance_row.created_at or datetime.min)):
         return True
     return stance in C.MONTHLY_KPI["self_positive"]
@@ -1220,8 +1215,7 @@ def dx_people(workplace_id=None, wish=None):
     names = {emp_key(e.emp_id): e.name for e in Employee.query.all() if e.name}
     places = {w.id: w for w in Workplace.query.all()}
     wish_rank = {opt: i for i, opt in enumerate(C.DX_WISH_OPTIONS)}
-    stance_options = next((q["options"] for q in C.MONTHLY_CORE_QUESTIONS if q["key"] == "stance"), [])
-    stance_rank = {opt: i for i, opt in enumerate(stance_options)}
+    stance_rank = {opt: i for i, opt in enumerate(C.STANCE_OPTIONS)}
     since = stance_since()
     rows = []
     for p in answered_people().values():
@@ -1253,7 +1247,7 @@ def dx_people(workplace_id=None, wish=None):
             stance_latest=stance, stance_label=period_label(stance_row.period) if stance_row else "",
             stance_old=stance_row is not None and stance_row.period < since,
             self_positive_count=sum(1 for m in monthly if m.answer("stance") in C.MONTHLY_KPI["self_positive"]),
-            positive=_positive(checked, recent, recent_row) or bool(accompanied),
+            positive=_positive(last_check, recent, recent_row) or bool(accompanied),
             monthly_wants=monthly_task_names(want_row.answer("wants_tasks")) if want_row else [],
             monthly_wants_id=want_row.id if want_row else None, monthly_wants_label=period_label(want_row.period) if want_row else "",
         )
@@ -1429,7 +1423,6 @@ def monthly_summary():
             answered = [r for r in rs if r.answer(key)]
             return (len([r for r in answered if r.answer(key) in positive]) / len(answered) * 100.0) if answered else 0.0
 
-        hours_month = sum(r.hours_shift * C.shifts_per_month(r.work_pattern) for r in rs)
         pattern_counts = Counter((r.work_pattern or "未設定") for r in rs)
         rows.append(
             {
@@ -1440,8 +1433,8 @@ def monthly_summary():
                 "member_answered": member[p]["answered"],
                 "members": member[p]["members"],
                 "has_rate": rate("has", kpi["has_positive"]),
-                "hours_month": hours_month,
-                "pattern_counts": {p: pattern_counts[p] for p in list(C.WORK_PATTERNS) + ["未設定"] if pattern_counts.get(p)},
+                "hours_month": _hours_month(rs),
+                "pattern_counts": {k: pattern_counts[k] for k in list(C.WORK_PATTERNS) + ["未設定"] if pattern_counts.get(k)},
                 "decreased_rate": rate("trend", kpi["trend_decreased"]),
                 "increased_rate": rate("trend", kpi["trend_increased"]),
                 "wants_rate": rate("wants", kpi["wants_positive"]),
@@ -1460,6 +1453,9 @@ def _responses_by_period():
     periods = sorted({r.period for r in responses})
     return periods, {p: [r for r in responses if r.period == p] for p in periods}
 
+def _hours_month(responses):
+    return sum(r.hours_shift * C.shifts_per_month(r.work_pattern) for r in responses)
+
 def monthly_question_trends():
     periods, by_period = _responses_by_period()
     trends = []
@@ -1476,7 +1472,7 @@ def monthly_question_trends():
         series = []
         for opt in (list(group) if group else q["options"]):
             counts = [c.get(opt, 0) for c in counters]
-            series.append({"option": opt, "counts": counts, "percents": [round(c / n * 100) if n else 0 for c, n in zip(counts, n_list)]})
+            series.append({"option": opt, "percents": [round(c / n * 100) if n else 0 for c, n in zip(counts, n_list)]})
         note = "以前の区切り（30分・1時間・2時間・4時間）にまとめて表示。細かい区分は月度の詳細で見られます" if group else ""
         trends.append({"q": q, "label": C.MONTHLY_KPI_LABELS.get(q["key"], ""), "note": note, "periods": periods, "labels": [period_label(p) for p in periods], "n": n_list, "series": series})
     return trends
@@ -1491,28 +1487,25 @@ def _trend_cells(periods, by_period, match):
             {
                 "n": n,
                 "has_rate": (len([r for r in sub if r.answer("has") in kpi["has_positive"]]) / n * 100.0) if n else None,
-                "hours_month": sum(r.hours_shift * C.shifts_per_month(r.work_pattern) for r in sub) if n else None,
+                "hours_month": _hours_month(sub) if n else None,
             }
         )
     return cells
 
-def monthly_workplace_trends():
+def _trend_table(name, items, match):
     periods, by_period = _responses_by_period()
     rows = []
-    for wp in Workplace.query.order_by(Workplace.sort, Workplace.id).all():
-        cells = _trend_cells(periods, by_period, lambda r: r.workplace_id == wp.id)
+    for item in items:
+        cells = _trend_cells(periods, by_period, lambda r: match(r, item))
         if any(c["n"] for c in cells):
-            rows.append({"workplace": wp, "cells": cells})
-    return {"periods": periods, "labels": [period_label(p) for p in periods], "rows": rows}
+            rows.append({name: item, "cells": cells})
+    return {"labels": [period_label(p) for p in periods], "rows": rows}
+
+def monthly_workplace_trends():
+    return _trend_table("workplace", Workplace.query.order_by(Workplace.sort, Workplace.id).all(), lambda r, wp: r.workplace_id == wp.id)
 
 def monthly_pattern_trends():
-    periods, by_period = _responses_by_period()
-    rows = []
-    for pattern in list(C.WORK_PATTERNS) + ["未設定"]:
-        cells = _trend_cells(periods, by_period, lambda r: (r.work_pattern or "未設定") == pattern)
-        if any(c["n"] for c in cells):
-            rows.append({"pattern": pattern, "cells": cells})
-    return {"periods": periods, "labels": [period_label(p) for p in periods], "rows": rows}
+    return _trend_table("pattern", list(C.WORK_PATTERNS) + ["未設定"], lambda r, pattern: (r.work_pattern or "未設定") == pattern)
 
 def monthly_question_stats(survey, responses):
     stats = []
@@ -1536,29 +1529,6 @@ def monthly_question_stats(survey, responses):
             items = [(r.name, r.workplace.name if r.workplace else "", r.answer(key)) for r in responses if r.answer(key).strip()]
             stats.append({"q": q, "n": len(items), "items": items})
     return stats
-
-def dashboard_chart_data():
-    wp = workplace_stats()
-    tasks = Task.query.all()
-    wish_counter = Counter(t.wish or "未回答" for t in tasks)
-    pain_counter = Counter(p for t in tasks for p in t.pains_list if p != "特になし")
-    wish_labels = [w for w in C.WISHES + ["未回答"] if wish_counter.get(w)]
-    pain_counts = pain_counter.most_common()
-    return {
-        "workplace": {
-            "labels": [w["workplace"].name for w in wp],
-            "tasks": [w["tasks"] for w in wp],
-            "hours": [round(w["minutes"] / 60.0, 1) for w in wp],
-        },
-        "wish": {
-            "labels": wish_labels,
-            "values": [wish_counter[w] for w in wish_labels],
-        },
-        "pains": {
-            "labels": [p for p, _ in pain_counts],
-            "values": [n for _, n in pain_counts],
-        },
-    }
 
 # ----- 活動状況（開始 → 要求定義 → 要件定義 → 作成/伴走 → テスト → 確認 → 完了） -----
 def board_data(tasks, done_limit=8):
