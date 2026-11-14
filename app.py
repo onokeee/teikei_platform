@@ -8098,7 +8098,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
 ''',
     'bizmap/index.html': r'''{% extends "base.html" %}
 {% block title %}業務マップ{% endblock %}
-{% macro flow_panel(key, title, desc, legend, definition, empty_msg) -%}
+{% macro flow_panel(key, title, desc, definition, empty_msg) -%}
 <div class="card"><div class="card-body">
   <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
     <div>
@@ -8106,7 +8106,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
         {% if saved_at[key] %}<span class="badge text-bg-warning align-middle" title="編集画面で直した配置・名前・追加・削除を反映しています">手修正あり（{{ saved_at[key] }}）</span>{% endif %}
       </h5>
       <p class="small text-muted mb-1">{{ desc }}</p>
-      <div>{{ legend|safe }}{{ kind_legends.get(key, '')|safe }}</div>
+      <div>{{ kind_legends.get(key, '')|safe }}</div>
     </div>
     <div class="d-flex flex-column align-items-end gap-1">
       <a class="btn btn-sm btn-primary" href="{{ url_for('bizmap.edit', kind=key, workplace_id=args.get('workplace_id') or None, domain_id=args.get('domain_id') or None) }}">✎ この図を編集する</a>
@@ -8162,7 +8162,6 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
   <div id="tab-info">
     {{ flow_panel('info', '業務マップ',
        '取り出し元の情報 → 業務 → できるもの → 渡す相手の作業。箱は作業（四角・だれつき）と情報（媒体の形とアイコン）の2種類、線は仕事の流れ（太い灰）と情報の流れ（細い青）の2種類です。聞き取りで答えた名前で描き、同じ名前は1つの箱にまとめます。職場ごとの枠に業務を置き、点線は名前から推定したつながり（ある業務のできるものを別の業務が使っている、前後の業務）です。灰色の点線の箱は、月次アンケートで挙がったものの、まだ流れを登録していない業務です。保留中の業務は点線の枠に「（保留）」、廃止した業務は薄い色に「（廃止済み）」を付けます。',
-       '',
        flows.info, '業務が登録されると図が描かれます。') }}
 
     <div class="row g-3 mt-1">
@@ -8391,24 +8390,24 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
 {% endif %}
 
 <section>
-  <h2 class="pb-section">進行中 <span class="pb-n">{{ b.active|length }}</span></h2>
+  <h2 class="pb-section">進行中 <span class="pb-n">{{ n_active }}</span></h2>
   {% for t in b.active %}{{ row(t, show_names) }}{% else %}<div class="pb-empty">進行中の案件はありません</div>{% endfor %}
 </section>
 
 {% if b.hold %}
 <section>
-  <h2 class="pb-section">保留中 <span class="pb-n">{{ b.hold|length }}</span></h2>
+  <h2 class="pb-section">保留中 <span class="pb-n">{{ n_hold }}</span></h2>
   {% for t in b.hold %}{{ row(t, show_names) }}{% endfor %}
 </section>
 {% endif %}
 
 <section>
-  <h2 class="pb-section">完了 <span class="pb-n">{{ b.done|length }}</span>{% if b.done and current_user %}<a class="pb-link" href="{{ url_for('cases.index', stage='done') }}">完了した案件を見る</a>{% endif %}</h2>
+  <h2 class="pb-section">完了 <span class="pb-n">{{ n_done }}</span>{% if n_done and current_user %}<a class="pb-link" href="{{ url_for('cases.index', stage='done') }}">完了した案件を見る</a>{% endif %}</h2>
   {% for t in b.done_shown %}{{ row(t, show_names) }}{% else %}<div class="pb-empty">完了した案件はまだありません</div>{% endfor %}
 </section>
 
 <section>
-  <h2 class="pb-section">順番待ち <span class="pb-n">{{ b.waiting_total }}</span>{% if b.waiting_total and current_user %}<a class="pb-link" href="{{ url_for('cases.index', status='受付') }}">一覧で見る</a>{% endif %}</h2>
+  <h2 class="pb-section">順番待ち <span class="pb-n">{{ n_wait }}</span>{% if n_wait and current_user %}<a class="pb-link" href="{{ url_for('cases.index', status='受付') }}">一覧で見る</a>{% endif %}</h2>
   {% if b.waiting %}
   <ul class="pb-waiting">
     {% for t in b.waiting %}
@@ -11662,7 +11661,8 @@ document.addEventListener("DOMContentLoaded", function () {
 }
 .flow-canvas {
   overflow: auto;
-  border: 1px solid #dee2e6;
+  border: 1px solid var(--ui-line);
+  border-radius: var(--ui-radius-sm);
   background: #fff;
   min-height: 240px;
   max-height: 72vh;
@@ -11740,23 +11740,6 @@ body.flow-max-open { overflow: hidden; }
 .fe-sep { width: 1px; height: 1.4rem; background: #dee2e6; margin: 0 0.2rem; }
 .fe-status { font-size: 0.8rem; margin-left: 0.6rem; }
 .fe-hint { font-size: 0.78rem; color: #6c757d; margin-bottom: 0.3rem; }
-.mv-move { display: flex; gap: 2px; }
-.mv-move .btn { padding: 0 0.4rem; line-height: 1.3; font-size: 0.7rem; }
-.mv-words { min-width: 16rem; }
-.mv-table td:nth-child(2) { min-width: 11rem; }
-.mv-table td:nth-child(4) { min-width: 7rem; }
-.mv-icon { font-size: 1.15rem; width: 1.3rem; text-align: center; }
-.mv-savebar { position: sticky; bottom: 0; z-index: 5; display: flex; gap: 0.5rem; align-items: center; padding: 0.75rem 0; background: linear-gradient(to top, #f5f6f8 70%, rgba(245, 246, 248, 0)); }
-.member-wrap { overflow: auto; max-height: 72vh; }
-.member-table th, .member-table td { white-space: nowrap; }
-.member-table thead th { position: sticky; top: 0; z-index: 1; background: #fff; }
-.member-month { font-size: 0.78rem; line-height: 1.15; }
-.member-cell { min-width: 2.6rem; }
-.member-yes { color: var(--ui-green-text); font-size: 1.05rem; }
-.member-before { color: #ced4da; }
-.member-table tr.is-excluded td { color: #adb5bd; background: #f8f9fa; }
-.member-table tr.is-excluded .member-yes { color: #adb5bd; }
-.member-table tfoot th, .member-table tfoot td { background: #f8f9fa; font-size: 0.8rem; line-height: 1.2; }
 .fe-mode { display: none; font-size: 0.85rem; background: #e7f1ff; color: #052c65; border: 1px solid #b6d4fe; border-radius: 0.4rem; padding: 0.25rem 0.6rem; margin-bottom: 0.3rem; }
 .fe-container { position: relative; flex: 1; overflow: hidden; border: 1px solid #dee2e6; border-radius: 0.5rem; background: #fff;
   background-image: linear-gradient(#f1f3f5 1px, transparent 1px), linear-gradient(90deg, #f1f3f5 1px, transparent 1px); background-size: 24px 24px; cursor: grab; }
@@ -11808,7 +11791,6 @@ body.flow-max-open { overflow: hidden; }
 .fe-cls-done { --fe-fill: #d1e7dd; --fe-stroke: #198754; color: #0f5132; }
 .fe-cls-source { --fe-fill: #fff3cd; --fe-stroke: #e0a800; color: #664d03; }
 .fe-cls-output { --fe-fill: #fff; --fe-stroke: #0d6efd; color: #052c65; }
-.fe-cls-dupout { --fe-fill: #ffe5d0; --fe-stroke: #fd7e14; }
 .fe-cls-warn { --fe-fill: #f8d7da; --fe-stroke: #dc3545; color: #842029; }
 .fe-cls-pending { --fe-fill: #f8f9fa; --fe-stroke: #adb5bd; border-style: dashed; color: #6c757d; }
 .fe-cls-hold { --fe-fill: #e7f1ff; --fe-stroke: #0d6efd; border-style: dashed; color: #052c65; }
@@ -11840,30 +11822,48 @@ body.flow-max-open { overflow: hidden; }
 .fe-color[data-color="blue"] { background: #dbeafe; }
 .fe-color[data-color="purple"] { background: #e9d5ff; }
 .fe-color[data-color="pink"] { background: #fce7f3; }
+/* ---- 管理: 業務マップの区分・対象者一覧 ---- */
+.mv-move { display: flex; gap: 2px; }
+.mv-move .btn { padding: 0 0.4rem; line-height: 1.3; font-size: 0.7rem; }
+.mv-words { min-width: 16rem; }
+.mv-table td:nth-child(2) { min-width: 11rem; }
+.mv-table td:nth-child(4) { min-width: 7rem; }
+.mv-icon { font-size: 1.15rem; width: 1.3rem; text-align: center; }
+.mv-savebar { position: sticky; bottom: 0; z-index: 5; display: flex; gap: 0.5rem; align-items: center; padding: 0.75rem 0; background: linear-gradient(to top, #f5f6f8 70%, rgba(245, 246, 248, 0)); }
+.member-wrap { overflow: auto; max-height: 72vh; }
+.member-table th, .member-table td { white-space: nowrap; }
+.member-table thead th { position: sticky; top: 0; z-index: 1; background: #fff; }
+.member-month { font-size: 0.78rem; line-height: 1.15; }
+.member-cell { min-width: 2.6rem; }
+.member-yes { color: var(--ui-green-text); font-size: 1.05rem; }
+.member-before { color: #ced4da; }
+.member-table tr.is-excluded td { color: #adb5bd; background: #f8f9fa; }
+.member-table tr.is-excluded .member-yes { color: #adb5bd; }
+.member-table tfoot th, .member-table tfoot td { background: #f8f9fa; font-size: 0.8rem; line-height: 1.2; }
 /* ---- 進捗掲示板 ---- */
 .pb-head { margin: 0.25rem 0 0.75rem; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 0.75rem 1.5rem; }
 .pb-head-main { flex: 1 1 420px; min-width: 0; }
 .pb-link { color: var(--ui-accent); text-decoration: none; font-size: 0.9rem; white-space: nowrap; }
 .pb-link:hover { text-decoration: underline; }
 .pb-scope-form { display: inline-block; max-width: 100%; }
-.pb-h1 { font-weight: 700; margin: 0; white-space: nowrap; display: flex; align-items: baseline; gap: 0.1em; flex-wrap: wrap; }
+.pb-h1 { font-size: 2rem; font-weight: 700; letter-spacing: -0.03em; margin: 0; white-space: nowrap; display: flex; align-items: baseline; gap: 0.1em; flex-wrap: wrap; }
 .pb-scope-select { font: inherit; font-weight: 700; letter-spacing: inherit; color: var(--ui-accent); background: transparent; border: 0; border-bottom: 3px solid rgba(0, 113, 227, 0.3); border-radius: 0; padding: 0 1.15em 0 0; margin: 0; appearance: none; -webkit-appearance: none; cursor: pointer; max-width: 80vw; background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='none' stroke='%230071e3' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round' d='M3 6l5 5 5-5'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 0.05em center; background-size: 0.6em; field-sizing: content; }
 .pb-scope-select:hover { border-bottom-color: var(--ui-accent); }
 .pb-scope-select:focus { outline: none; border-bottom-color: var(--ui-accent); }
-.pb-section { display: flex; align-items: baseline; gap: 0.4rem; }
+.pb-section { display: flex; align-items: baseline; gap: 0.4rem; font-size: 1.1rem; font-weight: 700; color: var(--ui-text); letter-spacing: -0.02em; margin: 1.75rem 0 0.7rem; }
 .pb-section .pb-link { margin-left: auto; font-weight: 400; letter-spacing: 0; }
 .pb-row { display: grid; grid-template-columns: 170px minmax(220px, 1fr) minmax(460px, 2.2fr); gap: 1.25rem; align-items: center;
-  background: #fff; padding: 1rem 1.25rem; margin-bottom: 0.6rem; }
+  background: #fff; padding: 1rem 1.25rem; margin-bottom: 0.6rem; box-shadow: var(--ui-shadow); border-radius: var(--ui-radius); }
 .pb-wp { font-weight: 600; font-size: 0.95rem; }
 .pb-name { color: #6c757d; font-size: 0.9rem; }
-.pb-title { font-weight: 600; line-height: 1.35; }
+.pb-title { font-weight: 600; font-size: 1.08rem; line-height: 1.35; }
 .pb-title a { color: inherit; text-decoration: none; }
 .pb-title a:hover { text-decoration: underline; }
 .pb-note { color: #6c757d; font-size: 0.88rem; margin-top: 0.2rem; }
 .pb-pill { display: inline-block; vertical-align: middle; font-size: 0.72rem; font-weight: 600; padding: 0.1rem 0.5rem; border-radius: 999px; background: #fff3cd; color: #997404; margin-left: 0.4rem; }
 .pb-empty { color: #adb5bd; font-size: 0.9rem; padding: 0.5rem 0; }
 /* 順番待ち */
-.pb-waiting { list-style: none; margin: 0 0 1rem; padding: 0; background: #fff; }
+.pb-waiting { list-style: none; margin: 0 0 1rem; padding: 0; background: #fff; box-shadow: var(--ui-shadow); border-radius: var(--ui-radius); }
 .pb-waiting li { display: flex; justify-content: space-between; gap: 1rem; padding: 0.65rem 1.25rem; border-top: 1px solid #f1f3f5; font-size: 0.95rem; }
 .pb-waiting li:first-child { border-top: 0; }
 .pb-waiting a { color: inherit; text-decoration: none; }
@@ -11929,7 +11929,6 @@ body {
 pre, code, kbd, samp, input, textarea, select, .fe-node { font-feature-settings: normal; }
 h1, h2, h3, h4, h5, h6, .h1, .h2, .h3, .h4, .h5, .h6 { font-weight: 700; letter-spacing: -0.02em; color: var(--ui-text); line-height: 1.3; }
 h2 { font-size: 1.65rem; }
-h4 { font-size: 1.2rem; }
 h5, .card-title { font-size: 1.05rem; font-weight: 700; letter-spacing: -0.01em; }
 h6 { font-size: 0.95rem; font-weight: 700; }
 a { color: var(--ui-accent); text-decoration: none; }
@@ -12018,7 +12017,6 @@ hr { border-color: var(--ui-line); opacity: 1; }
 .form-control, .form-select { border-radius: var(--ui-radius-sm); border: 1px solid transparent; background-color: var(--ui-fill); color: var(--ui-text); padding: 0.55rem 0.85rem; }
 .form-control:hover, .form-select:hover { background-color: #ececf0; }
 .form-control:focus, .form-select:focus { background-color: #fff; border-color: var(--ui-accent); box-shadow: 0 0 0 4px rgba(0, 113, 227, 0.15); }
-.form-control.is-invalid, .form-select.is-invalid { border-color: var(--c-red); background-color: #fff; }
 .form-control-sm, .form-select-sm { border-radius: 8px; padding: 0.35rem 0.65rem; }
 .form-control[readonly] { background-color: #fafafc; color: var(--ui-text-2); }
 .form-control::placeholder { color: var(--ui-text-3); }
@@ -12064,16 +12062,10 @@ td.heat-0, td.heat-1, td.heat-2, td.heat-3 { background: transparent; }
 .heat-1 { background: var(--ui-red-soft); color: var(--ui-red-text); }
 .heat-2 { background: var(--ui-yellow-soft); color: var(--ui-yellow-text); }
 .heat-3 { background: var(--ui-green-soft); color: var(--ui-green-text); }
-.flow-canvas { border-color: var(--ui-line); border-radius: var(--ui-radius-sm); }
 .btn-close:focus { box-shadow: none; }
 
 /* 進捗掲示板（見出しの強弱） */
-.pb-h1 { font-size: 2rem; letter-spacing: -0.03em; }
-.pb-section { font-size: 1.1rem; font-weight: 700; color: var(--ui-text); letter-spacing: -0.02em; margin: 1.75rem 0 0.7rem; }
 .pb-section .pb-n { color: var(--ui-text-3); font-weight: 600; font-size: 1rem; }
-.pb-row { box-shadow: var(--ui-shadow); border-radius: var(--ui-radius); }
-.pb-title { font-size: 1.08rem; }
-.pb-waiting { box-shadow: var(--ui-shadow); border-radius: var(--ui-radius); }
 @media (max-width: 575.98px) {
   .pb-h1 { font-size: 1.6rem; }
 }
@@ -12300,7 +12292,6 @@ summary { transition: color 0.15s ease; }
 .mq-emp-ok { color: var(--ui-green-text); font-weight: 600; }
 .mq-emp-ng { color: #dc3545; }
 .mq-q { padding: 1.1rem 0; border-bottom: 1px solid var(--ui-line); }
-.mq-q:last-of-type { border-bottom: 0; }
 .mq-q-head { display: flex; align-items: baseline; gap: 0.6rem; margin-bottom: 0.7rem; }
 .mq-no { display: inline-flex; align-items: center; justify-content: center; min-width: 1.7rem; height: 1.7rem; background: var(--ui-text); color: #fff; font-size: 0.8rem; font-weight: 700; flex: 0 0 auto; align-self: center; }
 .mq-text { font-weight: 600; font-size: 1.02rem; line-height: 1.4; }
@@ -12446,7 +12437,7 @@ summary { transition: color 0.15s ease; }
 
 /* ---- 業務マップ: 同じアウトプット（統合候補） ---- */
 .lg-dupout { background: #fff3cd; border-color: #fd7e14; border-style: dashed; border-width: 2px; }
-.fe-cls-dupout { background: #fff3cd; border-color: #fd7e14; border-style: dashed; color: #664d03; transform: skewX(-6deg); }
+.fe-cls-dupout { --fe-fill: #ffe5d0; --fe-stroke: #fd7e14; background: #fff3cd; border-color: #fd7e14; border-style: dashed; color: #664d03; transform: skewX(-6deg); }
 .fe-cls-dupout .fe-text { transform: skewX(6deg); }
 
 /* ---- 自動化を検討: 業務の選択・月次アンケートからの続き・AI との聞き取り ---- */
