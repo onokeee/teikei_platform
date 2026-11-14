@@ -11953,8 +11953,8 @@ a:hover { color: var(--ui-accent-hover); text-decoration: underline; }
 .text-green { color: var(--ui-green) !important; }
 .text-blue { color: var(--ui-accent) !important; }
 main.container { padding-top: 2rem !important; padding-bottom: 4rem !important; }
-/* 横幅に追従する（Bootstrap の段階的な固定幅をやめ、1480px まで可変） */
-.container { width: 100%; max-width: 1480px; padding-left: clamp(16px, 2.5vw, 40px); padding-right: clamp(16px, 2.5vw, 40px); }
+/* 画面の幅いっぱいに使う（Bootstrap の段階的な固定幅をやめ、左右の余白は画面幅に合わせて 16〜40px） */
+.container { width: 100%; max-width: none; padding-left: clamp(16px, 2.5vw, 40px); padding-right: clamp(16px, 2.5vw, 40px); }
 .breadcrumb { font-size: 0.85rem; }
 .breadcrumb-item + .breadcrumb-item::before { color: var(--ui-text-3); }
 hr { border-color: var(--ui-line); opacity: 1; }
@@ -12306,7 +12306,7 @@ summary { transition: color 0.15s ease; }
 .login-title { font-size: 1.5rem; text-align: center; margin-bottom: 0.25rem; }
 .login-sub { color: var(--ui-text-2); font-size: 0.9rem; text-align: center; margin-bottom: 1.25rem; }
 /* ---- 月次アンケート（回答） ---- */
-.mq-wrap { max-width: 720px; margin: 0 auto; }
+.mq-wrap { max-width: 1040px; margin: 0 auto; }
 .mq-head { text-align: center; margin: 0.5rem 0 1.25rem; }
 .mq-badge { display: inline-block; padding: 0.2rem 0.8rem; border-radius: 999px; background: var(--ui-accent-soft); color: var(--ui-accent-text); font-weight: 600; font-size: 0.85rem; }
 .mq-title { font-size: 1.9rem; letter-spacing: -0.03em; margin: 0.5rem 0 0.35rem; }
@@ -12363,7 +12363,7 @@ summary { transition: color 0.15s ease; }
 .qe-q { border: 1px solid var(--ui-line); box-shadow: none; }
 .qe-handle { min-width: 1.6rem; font-weight: 700; }
 /* ---- 自動化を検討（1画面） ---- */
-.rq { max-width: 1080px; margin: 0 auto; }
+.rq { margin: 0 auto; }
 .rq-top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.75rem 1.5rem; margin-bottom: 1rem; }
 .rq-title { font-size: 1.6rem; margin: 0; }
 .rq-no { display: inline-flex; align-items: center; justify-content: center; width: 1.5rem; height: 1.5rem; border-radius: 50%; background: #fff; color: var(--ui-text-2); font-size: 0.78rem; font-weight: 700; }
@@ -12488,6 +12488,7 @@ summary { transition: color 0.15s ease; }
 .rq-pick-row { display: flex; gap: 0.5rem; }
 .rq-pick-row .btn { white-space: nowrap; }
 .rq-intake { display: grid; grid-template-columns: 1.1fr 1fr; gap: 1rem; align-items: start; }
+@media (min-width: 1600px) { .rq-intake { grid-template-columns: 1fr 1.35fr; gap: 1.5rem; } }
 .rq-flowpane { position: sticky; top: 72px; background: var(--ui-fill); border-radius: var(--ui-radius); padding: 0.75rem; min-height: 16rem; transition: box-shadow 0.4s; }
 .rq-flowpane.is-done { box-shadow: 0 0 0 3px var(--ui-green-soft), 0 0 0 5px var(--ui-green); }
 .rq-flowhead { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.5rem; }
