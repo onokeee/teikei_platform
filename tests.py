@@ -2260,15 +2260,14 @@ def smoke_request():
     client.post("/survey/api/respondent", json={"emp_id": "T001", "workplace_id": 1, "work_pattern": "交代勤務"})
     r1 = client.post("/survey/api/tasks", json={"emp_id": "T002", "name": "別人の業務", "state": {}, "messages": []})
     r2 = client.post("/survey/api/intake", json={"emp_id": "T002", "title": "x", "messages": [], "state": {}})
-    r3 = client.delete("/survey/api/tasks/999999", json={"emp_id": "T002"})
     r4 = client.post("/survey/api/tasks", json={"emp_id": "", "name": "x", "state": {}, "messages": []})
-    check(all(x.status_code == 409 and "基本情報" in x.get_json()["message"] and x.get_json()["errors"]["_"] == "respondent" for x in (r1, r2, r3, r4)),
-          "P1: 画面のユーザーID（emp_id）が保存した回答者と違えば、聞き取り・登録・取り消しは 409 で「基本情報」を入れ直すよう返す")
+    check(all(x.status_code == 409 and "基本情報" in x.get_json()["message"] and x.get_json()["errors"]["_"] == "respondent" for x in (r1, r2, r4)),
+          "P1: 画面のユーザーID（emp_id）が保存した回答者と違えば、聞き取り・登録は 409 で「基本情報」を入れ直すよう返す")
     r = client.post("/survey/api/tasks", json={"emp_id": "ｔ００１", "name": "", "state": {}, "messages": []})
     check(r.status_code == 400 and "name" in r.get_json()["errors"], "P1: 全角・小文字でも同じ社員IDなら同じ人として通す（入力チェックへ進む）")
     js_rq = client.get("/static/survey.js").data.decode("utf-8")
-    check("function forgetPerson()" in js_rq and "clearSelects();" in js_rq and "api(\"POST\", CFG.api.reset)" in js_rq and js_rq.count("emp_id: empNow()") >= 3 and "respondentLost(j)" in js_rq,
-          "P1: 社員IDを打ち替えた・見つからないときは回答者・登録一覧・候補・職場・勤務形態を消してリセットし、聞き取り・登録・取り消しに社員IDを付けて送る")
+    check("function forgetPerson()" in js_rq and "clearSelects();" in js_rq and "api(\"POST\", CFG.api.reset)" in js_rq and js_rq.count("emp_id: empNow()") >= 2 and "respondentLost(j)" in js_rq,
+          "P1: ユーザーIDを打ち替えた・見つからないときは回答者・登録一覧・候補・Gr・役割・勤務形態を消してリセットし、聞き取り・登録にユーザーIDを付けて送る")
     check("confirmedId && confirmedId !== key" in js_rq and js_rq.index("forgetPerson();\n      confirmedId = key;") < js_rq.index("if (v.workplace_id && v.work_pattern) debounce"),
           "P2: 別の人の社員IDが見つかったときは、前の人の職場・勤務形態を消してから（自動保存はしない）")
     check("resetPage();" in js_rq and "function resetPage()" in js_rq and "history.replaceState" in js_rq and js_rq.index("await api(\"POST\", CFG.api.reset);\n    resetPage();") > 0,
@@ -2276,7 +2275,8 @@ def smoke_request():
     check("if (j.respondent) S.respondent = j.respondent;" in js_rq, "P18: 登録のあと S.respondent を新しい値にして、技術の欄の事前選択に使う")
     check("O.skill_none" in js_rq and "S.stance" in js_rq and "conv.origin === \"monthly\" && CFG.monthly && CFG.monthly.self_improve" not in js_rq,
           "P20・P22: 技術の「特になし」は他と同時に選べない。「一緒にやってみたい」の事前チェックは月次からに限らず直近の進め方から")
-    check("t.can_delete" in js_rq and "t.stage" in js_rq and "j.duplicate.can_delete" in js_rq, "P15: 登録一覧に段階を出し、取り消せないときは「取り消す」を出さない")
+    check("can_delete" not in js_rq and "withdrawTask" not in js_rq and '"取り消す"' not in js_rq and "前の登録を取り消して" not in js_rq and "t.stage" in js_rq and "改善チームに連絡してください" in js_rq,
+          "P15: 登録一覧に段階を出し、本人の「取り消す」は出さない（二重登録のときは、前の登録の取り消しは改善チームに連絡するよう案内）")
 
     calls, script = [], []
 
@@ -2392,7 +2392,7 @@ def smoke_request():
         b = calls[-1]["body"]
         check(r.status_code == 200 and j["success"] and j["first_impression"] == finalize["first_impression"] and len(j["tasks"]) == 1 and j["suggested"] == ["出勤簿の転記"], "登録: AI の一言が返り、候補から登録した業務が消える")
         check(j["respondent"]["c2_skills"] == ["Excel関数"] and j["respondent"]["c3_learn"] == ["Python"], f"P18・P20: 登録の応答に新しい技術が入り、「特になし」は他の技術と一緒には残らない: {j['respondent']['c2_skills']}")
-        check(j["tasks"][0]["stage"] == "開始" and j["tasks"][0]["can_delete"] is True, f"P15: 登録した業務に段階と取り消せるかが付く: {j['tasks'][0].get('stage')}")
+        check(j["tasks"][0]["stage"] == "開始" and "can_delete" not in j["tasks"][0], f"P15: 登録した業務に段階が付く（取り消せるかは返さない）: {j['tasks'][0].get('stage')}")
         with app.app_context():
             e_t1 = Employee.query.filter_by(emp_id="T001").first()
             t_new = Task.query.filter_by(name="日報の集計").first()
@@ -2423,8 +2423,9 @@ def smoke_request():
         j = r.get_json()
         outs = {i["call_id"]: json.loads(i["output"]) for i in calls[-1]["body"]["input"] if i.get("type") == "function_call_output"}
         check(r.status_code == 200 and j["success"] and len(j["tasks"]) == 2 and outs["call_sim"]["found"] >= 1 and any(row["業務名"] == "日報の集計" for row in outs["call_sim"]["業務"]) and "同じできるものを複数人が作っている組" in outs["call_do"], "force なら別の業務として登録し、分析の道具（類似業務・重複成果物）が実行される")
-        r = client.delete(f"/survey/api/tasks/{j['task']['id']}")
-        check(r.status_code == 200 and len(r.get_json()["tasks"]) == 1, "重複分を取り消す")
+        with app.app_context():
+            db.session.delete(db.session.get(Task, j["task"]["id"]))
+            db.session.commit()
         script.append(message(dict(finalize, name="相談の業務", hearing_questions=["いまの帳票は誰が見ていますか？", "数字を使う会議はありますか？"], wish="まずは相談したい")))
         r = client.post("/survey/api/tasks", json={"name": "相談したい業務", "state": state(title="相談したい業務", steps=[step1, step2]), "messages": [], "frequency": "毎週", "duration": "15分未満", "wish": "まずは相談したい", "shift": "昼勤"})
         check(r.status_code == 200 and r.get_json()["success"], "「まずは相談したい」でも登録できる")
@@ -2434,22 +2435,18 @@ def smoke_request():
             check(not Task(wish="まずは相談したい", pains="特になし").is_candidate and Task(wish="まずは相談したい", pains="時間がかかる").is_candidate and Task(wish="減らしたい").is_candidate and Task(wish="自動化したい").is_candidate,
                   "案件候補は「なくしたい・減らしたい」か本当の困りごと（「まずは相談したい」だけでは候補にしない）")
             t2_id = t2.id
-        refused = []
-        for change in ({"decision": "廃止"}, {"status": "保留"}, {"stage": "request", "status": "対応中"}):
-            with app.app_context():
-                t2 = db.session.get(Task, t2_id)
-                t2.decision, t2.status, t2.stage = "未定", "受付", "start"
-                for k_, v_ in change.items():
-                    setattr(t2, k_, v_)
-                db.session.commit()
-            r = client.delete(f"/survey/api/tasks/{t2_id}", json={"emp_id": "T001"})
-            refused.append(r.status_code == 409 and r.get_json()["message"] == "改善チームが対応を始めているため取り消せません")
+        with app.app_context():
+            t2 = db.session.get(Task, t2_id)
+            t2.decision, t2.status, t2.stage = "未定", "対応中", "request"
+            db.session.commit()
+        r = client.delete(f"/survey/api/tasks/{t2_id}", json={"emp_id": "T001"})
+        no_api = r.status_code in (404, 405)
         r = client.post("/survey/api/tasks", json={"emp_id": "T001", "name": "相談したい業務", "state": state(title="相談したい業務", steps=[step1]), "messages": [], "frequency": "毎週", "duration": "15分未満", "wish": "まずは相談したい", "shift": "昼勤"})
         dup = r.get_json()
         with app.app_context():
             st2 = next(x for x in app_module._state(db.session.get(Task, t2_id).respondent)["tasks"] if x["id"] == t2_id)
-            check(all(refused) and db.session.get(Task, t2_id) is not None and r.status_code == 409 and dup["duplicate"]["can_delete"] is False and st2["can_delete"] is False and st2["stage"] == "要求定義",
-                  f"P15: 方針を決めた・保留・段階が進んだ案件は、本人は取り消せない（409）。二重登録の警告でも「前の登録を取り消す」は出さない: {refused}")
+            check(no_api and db.session.get(Task, t2_id) is not None and r.status_code == 409 and "can_delete" not in dup["duplicate"] and "can_delete" not in st2 and st2["stage"] == "要求定義",
+                  "P15: 本人は登録を取り消せない（取り消しの API はない）。二重登録の警告にも「前の登録を取り消す」は出さない")
             t2 = db.session.get(Task, t2_id)
             t2.stage, t2.status = "start", "受付"
             db.session.commit()
@@ -2549,11 +2546,13 @@ def smoke_request():
         client.post("/logout")
         with client.session_transaction() as sess:
             left = dict(sess)
-        r = client.delete(f"/survey/api/tasks/{tid}", json={"emp_id": "T001"})
+        r = client.post("/survey/api/intake", json={"emp_id": "T001", "title": "x", "messages": [], "state": {}})
         check(r.status_code == 400 and "user" not in left and "respondent_id" not in left, f"P12: ログアウトでセッションを丸ごと消す（回答者も残らない）: {sorted(left)}")
-        client.post("/survey/api/respondent", json={"emp_id": "T001", "workplace_id": 1, "work_pattern": "交代勤務"})
-        r = client.delete(f"/survey/api/tasks/{tid}", json={"emp_id": "T001"})
-        check(r.status_code == 200 and r.get_json()["success"] and "日報の集計" in r.get_json()["suggested"], "取り消すと候補に戻る")
+        client.post("/login", data={"emp_id": "admin", "password": "adminpass"})
+        client.post(f"/cases/{tid}/delete")
+        client.post("/logout")
+        r = client.post("/survey/api/respondent", json={"emp_id": "T001", "workplace_id": 1, "work_pattern": "交代勤務"})
+        check(r.status_code == 200 and "日報の集計" in r.get_json()["suggested"] and all(x["id"] != tid for x in r.get_json()["tasks"]), "管理者が案件詳細から取り消すと、本人の候補に戻る")
         check(not script, "用意した応答をすべて使った")
         check("確か<br/>" not in app_module.wrap("棚の在庫数を確かめて台帳に記入する") and "まと<br/>" not in app_module.wrap("集めた数字を資料にまとめて課長に渡す"), "流れ図の改行は語の途中（確か／める、まと／める）で切らない")
     finally:
@@ -2692,7 +2691,7 @@ def _survey_round2_checks(check):
         t = db.session.get(Task, tid)
         payload = app_module.task_payload(t)
         stored = t.self_improve
-    check(r.status_code == 200 and stored == "" and payload["自分で改善"] == "チェックなし" and r.get_json()["task"]["can_delete"] is True,
+    check(r.status_code == 200 and stored == "" and payload["自分で改善"] == "チェックなし" and "can_delete" not in r.get_json()["task"],
           "R2-3: 「一緒にやってみたい」にチェックしなければ空で保存し（改善チームに任せたいとは書かない）、AI に渡すときは「チェックなし」")
     client.post("/login", data={"emp_id": "admin", "password": "adminpass"})
     html_d = client.get(f"/cases/{tid}").data.decode("utf-8")
@@ -2702,41 +2701,27 @@ def _survey_round2_checks(check):
     row = next(x for x in rows[1:] if x[0] == str(tid))
     check("<th>自分で改善</th><td>チェックなし</td>" in html_d and ">チェックなし</td>" in html_l and row[col] == "チェックなし" and "改善チームに任せたい" not in html_d,
           "R2-3: 案件詳細・案件一覧・案件CSV では空を「チェックなし」と出す")
-    client.post("/logout")
-    client.post("/survey/api/respondent", json={"emp_id": "S003", "workplace_id": 1, "work_pattern": "普通勤務"})
-    touches = [("verified", True), ("assignee", "改善チーム"), ("ecrs_combine", "まとめる"), ("result_note", "済み"), ("progress_note", "確認中"),
-               ("after_minutes", 10.0), ("steps_done", "1"), ("assignment", "改善チーム主導"), ("stage_log", None)]
-    refused = []
-    for field, value in touches:
-        with app.app_context():
-            t = db.session.get(Task, tid)
-            if field == "stage_log":
-                t.set_stage("request")
-                t.set_stage("start")
-            else:
-                setattr(t, field, value)
-            db.session.commit()
-        r = client.delete(f"/survey/api/tasks/{tid}", json={"emp_id": "S003"})
-        with app.app_context():
-            t = db.session.get(Task, tid)
-            refused.append((field, r.status_code == 409 and r.get_json()["message"] == "改善チームが対応を始めているため取り消せません" and app_module._task_json(t)["can_delete"] is False))
-            t.verified, t.assignee, t.ecrs_combine, t.result_note, t.progress_note, t.after_minutes, t.steps_done, t.assignment = False, "", "", "", "", None, "", "未定"
-            StageLog.query.filter_by(task_id=tid).delete()
-            db.session.commit()
-    client.post("/login", data={"emp_id": "admin", "password": "adminpass"})
-    client.post(f"/cases/{tid}/update", data={"purpose": "日報の数字を課長会議で使うため"})
-    client.post("/logout")
-    client.post("/survey/api/respondent", json={"emp_id": "S003", "workplace_id": 1, "work_pattern": "普通勤務"})
+
+    # ---- 取り消しは管理者だけ（案件詳細から）。本人の取り消しの API はない ----
     r = client.delete(f"/survey/api/tasks/{tid}", json={"emp_id": "S003"})
+    check(r.status_code in (404, 405) and "この登録を取り消す" in html_d and f'action="/cases/{tid}/delete"' in html_d and "data-confirm=" in html_d,
+          "本人は登録を取り消せない（取り消しの API はない）。案件詳細に管理者用の「この登録を取り消す」（確認つき）を出す")
+    client.post(f"/cases/{tid}/update", data={"purpose": "日報の数字を課長会議で使うため"})
     with app.app_context():
         t = db.session.get(Task, tid)
-        info_refused = (r.status_code == 409 and t is not None and t.purpose == "日報の数字を課長会議で使うため" and bool(t.ai_extra_dict.get("info_edited_at"))
-                        and app_module._task_json(t)["can_delete"] is False and t.stage_key == "start" and not t.stage_logs)
-        t.ai_extra = json.dumps({k: v for k, v in t.ai_extra_dict.items() if k != "info_edited_at"}, ensure_ascii=False)
+        touched = app_module._team_touched(t) and t.stage_key == "start" and not t.stage_logs and bool(t.ai_extra_dict.get("info_edited_at"))
+        t.verified, t.assignee = True, "改善チーム"
+        t.set_stage("request")
         db.session.commit()
-    check(info_refused, "R3-11: 改善チームが案件詳細の業務情報（目的など）を直して保存した案件は、開始のままでも本人は取り消せない")
-    r = client.delete(f"/survey/api/tasks/{tid}", json={"emp_id": "S003"})
-    check(all(ok for _, ok in refused) and r.status_code == 200, f"R2-16: 開始の段階でも改善チームが手を付けた案件（確認・担当者・ECRSメモ・改善内容・ひとこと・段階の記録など）は本人が取り消せない: {refused}")
+        tname = t.name
+    check(touched, "R3-11: 改善チームが案件詳細の業務情報（目的など）を直して保存した案件は、開始のままでも改善チームが手を付けた案件として扱う")
+    r = client.post(f"/cases/{tid}/delete", follow_redirects=True)
+    with app.app_context():
+        gone = db.session.get(Task, tid) is None and StageLog.query.filter_by(task_id=tid).count() == 0
+    check(gone and f"「{tname}」の登録を取り消しました" in r.data.decode("utf-8"), "管理者は改善チームが手を付けた案件も案件詳細から取り消せ、段階の記録も一緒に消える")
+    client.post("/logout")
+    r = client.post(f"/cases/{tid}/delete")
+    check(r.status_code == 302 and "/login" in r.headers["Location"], "未ログインでは取り消せない（ログインへ）")
 
     client.post("/survey/api/respondent", json={"emp_id": "S002", "workplace_id": 1, "work_pattern": "普通勤務"})
     with app.app_context():

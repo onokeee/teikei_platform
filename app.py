@@ -3933,7 +3933,7 @@ INTAKE_PROMPT = """あなたは製造部「PC定型業務ゼロ化プロジェ�
 使える道具（function tools）:
 - person_history: 聞き取りの最初に1回だけ呼び、本人の登録済み業務・月次アンケートの答え・勤務形態を見てから質問を始める。
 - list_known_systems: 手順にシステム・ファイル・帳票・できるものの名前が出たら1回呼び、既存の呼び方があればそれにそろえる（名寄せ）。できるもの（outputs と steps の output）も、同じものが登録済みならその呼び方にそろえる。
-- check_duplicate: 業務名が決まったら1回呼ぶ。本人が同じ名前を登録済みなら、そのことを伝えて「前の登録を取り消して続けるか、別の業務として続けるか」を聞く。
+- check_duplicate: 業務名が決まったら1回呼ぶ。本人が同じ名前を登録済みなら、そのことを伝えて「別の業務として続けるか」を聞く。本人は登録を取り消せないので取り消しは勧めず、取り消したいと言われたら改善チームに連絡するよう伝える。
 - search_similar_tasks: 手順が2つそろったら1回呼び、他の人が同じ成果物を作っていれば「同じGr・役割で同じものを作っている人がいます。同じ流れですか？」と確かめる。
 - 道具の結果は事実として使い、結果に無いことは言わない。同じ道具を同じ引数で2回呼ばない。道具を呼んだ往復でも、最後は必ず上の JSON だけで返す。
 - 道具の結果は次のターンでは見えない。分かったこと（例: 二重登録なし、Gr・役割の常用システムは生産管理システム、同じ成果物を同じGr・役割の別の人も作成）は state.notes に短く残し、notes にあることは調べ直さない。渡されていない道具はもう調べ済み。
@@ -5593,11 +5593,7 @@ def _task_json(t):
         "shift": t.shift or "",
         "monthly_name": t.monthly_name or "",
         "stage": t.stage_name + ("（保留中）" if t.is_on_hold else ""),
-        "can_delete": _withdrawable(t),
     }
-
-def _withdrawable(t):
-    return t.stage_key == "start" and not t.is_on_hold and not _team_touched(t)
 
 def monthly_task_names(text, vocab=None):
     vocab = vocab or map_vocab()
@@ -6070,8 +6066,7 @@ def api_task_create():
     if dup is not None and not data.get("force"):
         return jsonify({
             "success": False, "message": f"同じ名前の業務「{dup.name}」を登録済みです",
-            "duplicate": {"id": dup.id, "name": dup.name, "hours": round((dup.monthly_minutes or 0) / 60, 1), "created_at": dup.created_at.strftime("%Y/%m/%d") if dup.created_at else "",
-                          "can_delete": _withdrawable(dup)},
+            "duplicate": {"id": dup.id, "name": dup.name, "hours": round((dup.monthly_minutes or 0) / 60, 1), "created_at": dup.created_at.strftime("%Y/%m/%d") if dup.created_at else ""},
         }), 409
     headcount = max(1, _int_or(data.get("headcount") or 1, 1))
     task = Task(
@@ -6092,21 +6087,6 @@ def api_task_create():
         register_member(r.emp_id, r.name, r.workplace_id, r.work_pattern)
     db.session.commit()
     return jsonify({"success": True, "task": _task_json(task), "first_impression": task.ai_extra_dict.get("first_impression") or "", **_state(r)})
-
-
-@bp_survey.delete("/api/tasks/<int:task_id>")
-def api_task_delete(task_id):
-    r, err = _need_respondent((request.get_json(silent=True) or {}).get("emp_id"))
-    if err:
-        return err
-    task = db.session.get(Task, task_id)
-    if task is None or task.respondent_id != r.id:
-        abort(404)
-    if not _withdrawable(task):
-        return jsonify({"success": False, "message": "改善チームが対応を始めているため取り消せません"}), 409
-    db.session.delete(task)
-    db.session.commit()
-    return jsonify({"success": True, **_state(r)})
 
 
 # ===== 画面: 改善案件 =====
@@ -6338,6 +6318,15 @@ def reanalyze(task_id):
     else:
         flash("AI分析を更新しました（" + ("ChatGPT API" if task.ai_source == "openai" else "ルールベース") + "）。", "success")
     return redirect(url_for("cases.detail", task_id=task.id))
+
+@bp_cases.post("/<int:task_id>/delete")
+def withdraw_task(task_id):
+    task = _get_or_404(Task, task_id)
+    name = task.name
+    db.session.delete(task)
+    db.session.commit()
+    flash(f"「{name}」の登録を取り消しました。", "info")
+    return redirect(url_for("cases.index"))
 
 def _csv_response(buf, filename):
     return Response(buf.getvalue().encode("utf-8-sig"), mimetype="text/csv", headers={"Content-Disposition": "attachment; filename=" + filename})
@@ -9070,6 +9059,12 @@ document.getElementById("test-btn").addEventListener("click", async function () 
         {% endif %}
         <button class="btn btn-success btn-sm w-100">内容を確認した</button>
       {% endif %}
+    </div></form>
+
+    <form method="post" action="{{ url_for('cases.withdraw_task', task_id=task.id) }}" class="card mt-3 case-withdraw" data-confirm="「{{ task.name }}」の登録を取り消しますか？AI の聞き取りの記録・流れ図・段階の記録も消え、元に戻せません。"><div class="card-body">
+      <h5 class="card-title">登録の取り消し（管理者）</h5>
+      <p class="small text-muted">間違えて登録された業務や、同じ業務の二重登録を消します。本人は「自動化アイテム登録」の画面から取り消せません。取り消すと活動状況・ダッシュボード・業務マップからも消え、元に戻せません。続けるか迷うときは「保留」にしてください。</p>
+      <button class="btn btn-outline-danger btn-sm w-100">この登録を取り消す</button>
     </div></form>
   </div>
 </div>
@@ -12893,21 +12888,8 @@ summary { transition: color 0.15s ease; }
       var row = el("div", "rq-reg");
       row.appendChild(el("span", "rq-reg-name", t.name));
       row.appendChild(el("span", "rq-reg-meta", "月 " + t.hours + " h・" + (t.wish || "") + (t.stage ? "・" + t.stage : "")));
-      if (t.can_delete) {
-        row.appendChild(button("btn btn-link btn-sm text-danger", "取り消す", async function () {
-          if (!confirm("「" + t.name + "」の登録を取り消しますか？")) return;
-          var j = await withdrawTask(t.id);
-          if (j._ok) takeTasks(j);
-        }));
-      }
       box.appendChild(row);
     });
-  }
-  // 登録の取り消し。取り消せなかったときの知らせもここで出す
-  async function withdrawTask(id) {
-    var j = await api("DELETE", CFG.api.tasks + "/" + id, { emp_id: empNow() });
-    if (!j._ok && !respondentLost(j)) toast(j.message || "取り消せませんでした");
-    return j;
   }
   function renderSuggest() {
     renderMonthlyBanner();
@@ -13122,7 +13104,7 @@ summary { transition: color 0.15s ease; }
     box.innerHTML = "";
     box.appendChild(el("div", null, "同じ名前の業務「" + task.name + "」を登録済みです（月 " + task.hours + " h）。このまま始めると別の案件になります。"));
     box.appendChild(button("btn btn-sm btn-outline-dark", "別の業務として続ける", function () { box.classList.add("d-none"); startIntake(true, origin, monthlyName); }));
-    box.appendChild(button("btn btn-sm btn-outline-secondary", "やめる（下の一覧で取り消せます）", function () { box.classList.add("d-none"); }));
+    box.appendChild(button("btn btn-sm btn-outline-secondary", "やめる", function () { box.classList.add("d-none"); }));
     box.classList.remove("d-none");
   }
   async function startIntake(skipDup, origin, monthlyName) {
@@ -13261,17 +13243,9 @@ summary { transition: color 0.15s ease; }
     box.classList.add("d-none");
     if (!j._ok && j.duplicate) {
       box.innerHTML = "";
-      box.appendChild(el("div", null, "同じ名前の業務「" + j.duplicate.name + "」を " + j.duplicate.created_at + " に登録済みです（月 " + j.duplicate.hours + " h）。どうしますか？" + (j.duplicate.can_delete ? "" : "（前の登録は改善チームが対応を始めているため取り消せません）")));
-      var replace = button("btn btn-sm btn-primary", "前の登録を取り消して、この内容で登録", async function () {
-        var d = await withdrawTask(j.duplicate.id);
-        if (!d._ok) return;
-        S.tasks = d.tasks || S.tasks;
-        renderRegistered();
-        registerTask(Object.assign({}, body, { force: true }), btn);
-      });
+      box.appendChild(el("div", null, "同じ名前の業務「" + j.duplicate.name + "」を " + j.duplicate.created_at + " に登録済みです（月 " + j.duplicate.hours + " h）。別の業務として登録しますか？前の登録を取り消したいときは、改善チームに連絡してください。"));
       var both = button("btn btn-sm btn-outline-dark", "別の業務として登録", function () { registerTask(Object.assign({}, body, { force: true }), btn); });
       var cancel = button("btn btn-sm btn-outline-secondary", "やめる", function () { box.classList.add("d-none"); });
-      if (j.duplicate.can_delete) box.appendChild(replace);
       box.appendChild(both);
       box.appendChild(cancel);
       box.classList.remove("d-none");
