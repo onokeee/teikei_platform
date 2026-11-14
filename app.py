@@ -1783,25 +1783,53 @@ COMMON_SURNAMES = frozenset((
     "内藤、黒田、尾崎、永田、川村、望月、田辺、松岡、本間、荒井").split("、"))
 
 
+WORKPLACE_ALIASES_KEY = "workplace_aliases"
+
+
+def workplace_aliases():
+    try:
+        data = _json_column(Setting.get(WORKPLACE_ALIASES_KEY, ""), {})
+    except Exception:
+        data = {}
+    return data if isinstance(data, dict) else {}
+
+def remember_workplace_name(workplace_id, old, new):
+    data = workplace_aliases()
+    names = [n for n in data.get(str(workplace_id)) or [] if isinstance(n, str) and vnorm(n).strip() != vnorm(new).strip()]
+    if (old or "").strip() and vnorm(old).strip() != vnorm(new).strip() and old not in names:
+        names.append(old)
+    data[str(workplace_id)] = names
+    Setting.set(WORKPLACE_ALIASES_KEY, json.dumps(data, ensure_ascii=False))
+
 def _workplace_names():
     """[(見つける名前, 職場名)] 長い順。「検査・品質保証課」は「品質保証課」でも見つける。1回のリクエストの中では使い回す"""
     if has_request_context() and "wp_names" in g:
         return g.wp_names
     pairs = []
     try:
-        for w in Workplace.query.all():
-            if not w.name:
-                continue
-            pairs.append((w.name, w.name))
-            alias = w.name.split("・")[-1].strip() if "・" in w.name else ""
-            if len(alias) >= 3:
-                pairs.append((alias, w.name))
+        rows = [w for w in Workplace.query.all() if w.name]
+        current, aliases = {vnorm(w.name).strip() for w in rows}, workplace_aliases()
+        for w in rows:
+            olds = [n for n in aliases.get(str(w.id)) or [] if isinstance(n, str) and n.strip() and vnorm(n).strip() not in current]
+            for name in [w.name] + olds:
+                pairs.append((name, w.name))
+                alias = name.split("・")[-1].strip() if "・" in name else ""
+                if len(alias) >= 3:
+                    pairs.append((alias, w.name))
     except Exception:
         pairs = []
     pairs.sort(key=lambda p: len(p[0]), reverse=True)
     if has_request_context():
         g.wp_names = pairs
     return pairs
+
+def current_wp_text(text):
+    nt = vnorm(text)
+    for found, w in _workplace_names():
+        nf = vnorm(found)
+        if nf in nt:
+            return text if nf in vnorm(w) else nt.replace(nf, vnorm(w))
+    return text
 
 def _person_names():
     """社員名簿の氏名 {"full": 3文字以上の氏名（長い順）, "surnames": 名字}。1回のリクエストの中では使い回す"""
@@ -1884,6 +1912,7 @@ def who_of(name, own_wp="", vocab=None):
         return {"actor": "", "label": "", "state": "unconfirmed"}
     if raw == "担当者":
         return {"actor": "", "label": "担当者", "state": "unconfirmed"}
+    raw = current_wp_text(raw)
     nraw, nown = vnorm(raw), vnorm(own_wp)
     for found, w in _workplace_names():
         if vnorm(found) in nraw:
@@ -2517,10 +2546,9 @@ def remove_text(existing, value, exact=False):
     return existing if len(kept) == len(parts) else "、".join(kept)
 
 def rename_text(existing, old, new):
-    parts, out = task_names(existing), []
+    parts, out, key = task_names(existing), [], pending_key(old)
     for p in parts:
-        if _mentions(p, old):
-            p = p.replace(old, new) if old in p and normalize_text(p) != normalize_text(old) else new
+        p = new if pending_key(p) == key else p
         if p not in out:
             out.append(p)
     return (existing or "").strip() if out == parts else "、".join(out)
@@ -2546,6 +2574,17 @@ def remember_written(kind, task_id, value):
     if value and value not in names:
         names.append(value)
         Setting.set(MAP_WRITTEN_KEY, json.dumps(data, ensure_ascii=False))
+
+def forget_written(kind, value):
+    data = _map_written()
+    lists = [names for names in (data.get(kind) or {}).values() if isinstance(names, list) and value in names]
+    for names in lists:
+        names.remove(value)
+    if lists:
+        Setting.set(MAP_WRITTEN_KEY, json.dumps(data, ensure_ascii=False))
+
+def written_links():
+    return {v for ids in (_map_written().get("links") or {}).values() if isinstance(ids, list) for v in ids}
 
 def task_aliases(task_id):
     return list((_map_written().get("names") or {}).get(str(task_id)) or []) if task_id else []
@@ -2579,7 +2618,17 @@ def writeback_candidates(saved, tasks_by_id):
             t = task_of(n["id"])
             new = (n.get("text") or "").strip()
             if t and new and new != t.name:
-                refs = [(o, f) for o in tasks_by_id.values() if o.id != t.id for f in ("prev_task", "next_task") if mentions_task(getattr(o, f), t.name)]
+                key, refs, partial = pending_key(t.name), [], []
+                for o in tasks_by_id.values():
+                    if o.id == t.id:
+                        continue
+                    for f in ("prev_task", "next_task"):
+                        for p in task_names(getattr(o, f)):
+                            if pending_key(p) == key:
+                                refs.append((o, f))
+                            elif _mentions(p, t.name):
+                                partial.append((o, f, p))
+                refs = list(dict.fromkeys(refs))
                 text = f"業務名「{t.name}」を「{new}」に変更"
                 if refs:
                     text += "（" + "、".join(dict.fromkeys(f"「{o.name}」" for o, _ in refs)) + f"の前後の業務に書いた「{t.name}」も直す）"
@@ -2590,6 +2639,16 @@ def writeback_candidates(saved, tasks_by_id):
                                + [{"task_id": o.id, "field": f, "action": "rename", "old": t.name, "value": new} for o, f in refs],
                     }
                 )
+                for o, f, p in partial:
+                    to = p.replace(t.name, new) if t.name in p else new
+                    side = "前の業務" if f == "prev_task" else "後の業務"
+                    cands.append(
+                        {
+                            "id": f"rename:{t.id}:{o.id}:{f}:{nid('r', p)}", "task_id": o.id, "checked": False,
+                            "text": f"「{o.name}」の{side}に書いた「{p}」を「{to}」に直す（業務名「{t.name}」と名前の一部だけが同じなので、選んだときだけ直す）",
+                            "ops": [{"task_id": o.id, "field": f, "action": "rename", "old": p, "value": to}],
+                        }
+                    )
 
     for e in saved.get("edges", []):
         if e.get("source") != "manual":
@@ -2600,7 +2659,7 @@ def writeback_candidates(saved, tasks_by_id):
         if ta and tb and ta.id != tb.id and a.startswith("t") and b.startswith("t"):
             cands.append(
                 {
-                    "id": f"seq:{ta.id}:{tb.id}", "task_id": ta.id,
+                    "id": f"seq:{ta.id}:{tb.id}", "task_id": ta.id, "link": f"{a}->{b}",
                     "text": f"「{ta.name}」の後の業務に「{tb.name}」、「{tb.name}」の前の業務に「{ta.name}」を追加",
                     "ops": [
                         {"task_id": ta.id, "field": "next_task", "action": "append", "value": tb.name, "name_of": tb.id},
@@ -2622,7 +2681,7 @@ def writeback_candidates(saved, tasks_by_id):
             elif na.get("cls") == "pending":
                 name = _pending_name(src)
                 if name:
-                    cands.append({"id": f"prev:{tb.id}:{a}", "task_id": tb.id, "text": f"「{tb.name}」の前の業務に「{name}」を追加",
+                    cands.append({"id": f"prev:{tb.id}:{a}", "task_id": tb.id, "link": f"{a}->{b}", "text": f"「{tb.name}」の前の業務に「{name}」を追加",
                                   "ops": [{"task_id": tb.id, "field": "prev_task", "action": "append", "value": name}]})
             elif na.get("cls") != "warn":
                 who = (na.get("who") or "").strip()
@@ -2639,7 +2698,7 @@ def writeback_candidates(saved, tasks_by_id):
             if nb.get("cls") == "pending":
                 name = _pending_name(content)
                 if name:
-                    cands.append({"id": f"next:{ta.id}:{b}", "task_id": ta.id, "text": f"「{ta.name}」の後の業務に「{name}」を追加",
+                    cands.append({"id": f"next:{ta.id}:{b}", "task_id": ta.id, "link": f"{a}->{b}", "text": f"「{ta.name}」の後の業務に「{name}」を追加",
                                   "ops": [{"task_id": ta.id, "field": "next_task", "action": "append", "value": name}]})
             elif who:
                 actor = nb.get("actor") or ""
@@ -2663,7 +2722,7 @@ def writeback_candidates(saved, tasks_by_id):
             if mentions_task(ta.next_task, tb.name) or mentions_task(tb.prev_task, ta.name):
                 cands.append(
                     {
-                        "id": f"unseq:{ta.id}:{tb.id}", "task_id": ta.id,
+                        "id": f"unseq:{ta.id}:{tb.id}", "task_id": ta.id, "unlink": f"{a}->{b}",
                         "text": f"「{ta.name}」の後の業務から「{tb.name}」、「{tb.name}」の前の業務から「{ta.name}」を外す",
                         "ops": [
                             {"task_id": ta.id, "field": "next_task", "action": "remove", "value": tb.name, "name_of": tb.id},
@@ -2673,11 +2732,11 @@ def writeback_candidates(saved, tasks_by_id):
                 )
         elif ta and a.startswith("t") and node_of(b).get("cls") == "pending" and _pending_name(text_of(b)):
             name = _pending_name(text_of(b))
-            cands.append({"id": f"unnext:{ta.id}:{b}", "task_id": ta.id, "text": f"「{ta.name}」の後の業務から「{name}」を外す",
+            cands.append({"id": f"unnext:{ta.id}:{b}", "task_id": ta.id, "unlink": f"{a}->{b}", "text": f"「{ta.name}」の後の業務から「{name}」を外す",
                           "ops": [{"task_id": ta.id, "field": "next_task", "action": "remove", "value": name, "exact": True}]})
         elif tb and b.startswith("t") and node_of(a).get("cls") == "pending" and _pending_name(text_of(a)):
             name = _pending_name(text_of(a))
-            cands.append({"id": f"unprev:{tb.id}:{a}", "task_id": tb.id, "text": f"「{tb.name}」の前の業務から「{name}」を外す",
+            cands.append({"id": f"unprev:{tb.id}:{a}", "task_id": tb.id, "unlink": f"{a}->{b}", "text": f"「{tb.name}」の前の業務から「{name}」を外す",
                           "ops": [{"task_id": tb.id, "field": "prev_task", "action": "remove", "value": name, "exact": True}]})
 
     return [c for c in cands if any(_op_change(op, tasks_by_id) for op in c["ops"])]
@@ -2730,6 +2789,10 @@ def apply_writeback(candidates, selected_ids, tasks_by_id):
                     remember_written("sources", op["task_id"], mask_person_names(op["value"]))
                 elif op["field"] == "name" and op.get("old"):
                     remember_written("names", op["task_id"], op["old"])
+        if c.get("link"):
+            remember_written("links", c["task_id"], c["link"])
+        if c.get("unlink"):
+            forget_written("links", c["unlink"])
     return applied
 
 # ----- 共通 -----
@@ -2833,6 +2896,17 @@ def _parts(name):
 def same_thing(a, b):
     pa, pb = _parts(a), _parts(b)
     return same_name(a, b) or bool(pa and pb and (pa <= pb or pb <= pa))
+
+def _bare_medium(part):
+    return any(r["key"] not in ("doc", "unknown") and part in {normalize_text(w) for w in [r["label"]] + _split_words(r.get("words")) if not w.startswith("~")}
+               for r in map_vocab()["media"])
+
+def same_info_box(a, b):
+    na, pa, pb = normalize_text(a), _parts(a), _parts(b)
+    if na and na == normalize_text(b):
+        return True
+    sub = pa if pa <= pb else pb if pb <= pa else None
+    return bool(sub) and not all(_bare_medium(p) for p in sub)
 
 def _is_destination(system, action):
     action = action or ""
@@ -3086,7 +3160,7 @@ def recipient_node(d, name, own_wp="", use="", frame=None, who=None, task_id=Non
     if frame and own_wp and w["actor"] in ("team", "boss") and vnorm(w["label"]).startswith(vnorm(own_wp)):
         inside = frame
     elif frame and w["actor"] == "dept":
-        inside = next((_wp_frame(wp) for found, wp in _workplace_names() if found in w["label"]), None)
+        inside = next((_wp_frame(wp) for found, wp in _workplace_names() if vnorm(found) in vnorm(w["label"])), None)
     key = f"{w['label']}|{content}" if task_id is None else f"{task_id}:{name}"
     return d.node(nid("p", key), content, "work", subgraph=inside, who=w), "work"
 
@@ -3155,12 +3229,13 @@ def build_info_flow(tasks):
             outs.append((t, oid))
     for t in tasks:
         _add_task_info(d, t, f"t{t.id}", outs, dups, frame=(_wp_key(t), _wp_name(t)))
+    written = written_links()
     for t in tasks:
         tid = f"t{t.id}"
         for other in _match_tasks(t.next_task, tasks, exclude=t):
-            d.edge(tid, f"t{other.id}", "work", handoff=_task_handoff(t, other, d), inferred=True)
+            d.edge(tid, f"t{other.id}", "work", handoff=_task_handoff(t, other, d), inferred=f"{tid}->t{other.id}" not in written)
         for other in _match_tasks(t.prev_task, tasks, exclude=t):
-            d.edge(f"t{other.id}", tid, "work", handoff=_task_handoff(other, t, d), inferred=True)
+            d.edge(f"t{other.id}", tid, "work", handoff=_task_handoff(other, t, d), inferred=f"t{other.id}->{tid}" not in written)
         if (t.output or "").strip():
             for other in tasks:
                 if other is not t and same_name(t.output, other.prev_task):
@@ -3199,6 +3274,7 @@ def add_pending_tasks(d, workplace_id=None, tasks=()):
     names = {w.id: w.name for w in Workplace.query.all()}
     pending, vocab = pending_task_names(workplace_id), map_vocab()
     links = {t.id: ({pending_key(v, vocab) for v in task_names(t.next_task)}, {pending_key(v, vocab) for v in task_names(t.prev_task)}) for t in tasks} if pending else {}
+    written = written_links() if pending else set()
     for p in pending:
         n = len(p["people"])
         wp = names.get(p["workplace_id"], "職場未設定")
@@ -3209,9 +3285,9 @@ def add_pending_tasks(d, workplace_id=None, tasks=()):
             if t.workplace_id != p["workplace_id"]:
                 continue
             if key in links[t.id][0]:
-                d.edge(f"t{t.id}", node, "work", inferred=True)
+                d.edge(f"t{t.id}", node, "work", inferred=f"t{t.id}->{node}" not in written)
             if key in links[t.id][1]:
-                d.edge(node, f"t{t.id}", "work", inferred=True)
+                d.edge(node, f"t{t.id}", "work", inferred=f"{node}->t{t.id}" not in written)
     return d
 
 # ----- 図に添える表: 職場・部署の間の受け渡し、システム・情報源ごとの業務 -----
@@ -3270,6 +3346,9 @@ def build_steps_flow(steps, own_wp="", purpose=""):
     def find(v):
         return next((nd for text, nd in reversed(seen) if same_name(v, text, 2)), None) if v else None
 
+    def same_box(v, outputs=False):
+        return next((nd for text, nd in seen if same_info_box(v, text) or (outputs and d.nodes[nd]["cls"] == "output" and same_thing(v, text))), None) if v else None
+
     def info(name, hint=None, key=None, cls="source"):
         node = d.node(key or nid("s", name), name, cls, hint=hint)
         if all(nd != node for _, nd in seen):
@@ -3284,7 +3363,7 @@ def build_steps_flow(steps, own_wp="", purpose=""):
         sid = f"st{x['no']}"
         action = mask_person_names(x.get("action") or "")
         d.node(sid, f"{_circled(x['no'])} {action}", "task", width=14, who=me)
-        system, inp, to, how = [(x.get(k) or "").strip() for k in ("system", "input", "to", "how")]
+        system, inp, to, how, out = [(x.get(k) or "").strip() for k in ("system", "input", "to", "how", "output")]
         recv = method_of(x.get("how_from") or "")
         role, m = field_role(system) if system else ("box", "")
         src = find(inp)
@@ -3294,9 +3373,9 @@ def build_steps_flow(steps, own_wp="", purpose=""):
         else:
             sys_node, dest = None, False
             if system and role != "line":
-                dest = _is_destination(system, action)
+                dest = _is_destination(system, action) or same_info_box(out, system)
                 if dest:
-                    sys_node = info(system)
+                    sys_node = same_box(system) or info(system)
                     d.info_edge(sid, sys_node, m, info_node=sys_node)
                 else:
                     sys_node = find(system) or info(system)
@@ -3308,12 +3387,13 @@ def build_steps_flow(steps, own_wp="", purpose=""):
                 d.info_edge(node, sid, recv)
         if prev:
             d.edge(prev, sid, "work", handoff="none")
-        out, oid = (x.get("output") or "").strip(), None
+        oid = None
         if out:
-            oid = next((nd for text, nd in seen if d.nodes[nd]["cls"] == "output" and same_thing(out, text)), None)
+            oid = same_box(out, outputs=True)
             if oid is None:
                 oid = d.node(f"o{x['no']}", out, "output")
                 seen.append((out, oid))
+            d.nodes[oid]["cls"] = "output"
             d.edge(sid, oid, "info")
             latest = oid
         if to:
@@ -3346,6 +3426,17 @@ def _task_ref(name, t, hit=None):
         return {"actor": "team" if wp == _own_wp(t) else "dept", "label": wp, "state": "ok"}
     return who_of(name, _own_wp(t))
 
+def _category_step(d, medium, steps):
+    for x in steps:
+        sid, system, to = f"st{x['no']}", (x.get("system") or "").strip(), (x.get("to") or "").strip()
+        role, m = field_role(system) if system else ("box", "")
+        recv = method_of(x.get("how_from") or "") or (m if role == "line" and not to else "")
+        row = vocab_row("methods", recv) if recv else None
+        if row and row["medium"] == medium:
+            covered = any(b == sid and e["type"] == "info" and (e["method"] == recv or d.nodes[a]["medium"] == medium) for (a, b), e in d.edges.items())
+            return (None, "") if covered else (sid, recv)
+    return None, ""
+
 def _extra_case_links(d, t, steps):
     """手順に出てこない業務レベルの取り出し元・渡す相手（アンケートや登録で答えたもの・業務マップから書き戻したもの）を、案件の流れ図に足す。手順の箱と同じもの（same_thing）はその箱にまとめる"""
     own, purpose = _own_wp(t), _purpose(t)
@@ -3354,8 +3445,11 @@ def _extra_case_links(d, t, steps):
     for s_ in task_sources(t):
         if any(same_thing(s_["name"], v) for v in texts):
             continue
+        into, method = (first, s_["method"]) if s_["shared"] else _category_step(d, s_["hint"], steps)
+        if not into:
+            continue
         node = d.node(nid("s", s_["name"]), s_["name"], "source", hint=s_["hint"])
-        d.info_edge(node, first, s_["method"])
+        d.info_edge(node, into, method)
     users = task_users(t)
     step_to = any(u["step"] for u in users)
     extra = [u for u in users if not u["step"]]
@@ -3379,7 +3473,7 @@ def build_task_flow(t):
         d = build_steps_flow(steps, own, t.purpose or "")
         _extra_case_links(d, t, steps)
         first, last = "st1", f"st{steps[-1]['no']}"
-        if cls in STATUS_MARKS:
+        if cls != "task":
             for x in steps:
                 d.nodes[f"st{x['no']}"]["cls"] = cls
     else:
@@ -3390,17 +3484,18 @@ def build_task_flow(t):
     others = Task.query.filter(Task.id != t.id).all() if t.id else []
     boxes = []
 
-    def neighbor(name, side):
-        hit = next(iter(_match_tasks(name, others, exclude=t, limit=1)), None)
+    def neighbor(name, side, hit=None):
+        hit = hit if hit is not None else next(iter(_match_tasks(name, others, exclude=t, limit=1)), None)
         w = _task_ref(name, t, hit)
         node = next((nd for text, tid, nd in boxes if (hit is not None and tid == hit.id) or same_thing(name, text)), None)
         if node is None and side == "next":
+            named = current_wp_text(name)
             node = next((i for i, n in d.nodes.items() if n["cls"] == "work" and n["text"] not in PLACEHOLDER_TEXTS and same_thing(name, n["text"])), None)
             if node is None and w["state"] == "ok" and w["actor"] != "team":
-                node = next((i for i, n in d.nodes.items() if n["cls"] == "work" and n["who_state"] == "ok" and n["who"] and (n["who"] == w["label"] or name.startswith(n["who"]))), None)
+                node = next((i for i, n in d.nodes.items() if n["cls"] == "work" and n["who_state"] == "ok" and n["who"] and (n["who"] == w["label"] or named.startswith(n["who"]))), None)
             if node is not None:
                 who = d.nodes[node]["who"]
-                d.nodes[node]["text"] = (name.replace(who, "", 1).strip(" 　の") if who else "") or name
+                d.nodes[node]["text"] = (named.replace(who, "", 1).strip(" 　の") if who else "") or name
         if node is None:
             node = d.node(f"{side}{len(boxes)}", name, "work", who=w)
         boxes.append((name, hit.id if hit is not None else None, node))
@@ -3412,6 +3507,14 @@ def build_task_flow(t):
     for name in task_names(t.next_task):
         node, hit = neighbor(name, "next")
         d.edge(last, node, "work", handoff=_task_handoff(t, hit, d) if hit is not None else handoff_of(steps[-1].get("action") if steps else "", name))
+    every, written = others + [t], written_links()
+    for o in others:
+        if mentions_task(o.prev_task, t.name) and t in _match_tasks(o.prev_task, every, exclude=o):
+            node, _ = neighbor(o.name, "next", o)
+            d.edge(last, node, "work", handoff=_task_handoff(t, o, d), inferred=f"t{t.id}->t{o.id}" not in written)
+        if mentions_task(o.next_task, t.name) and t in _match_tasks(o.next_task, every, exclude=o):
+            node, _ = neighbor(o.name, "prev", o)
+            d.edge(node, first, "work", handoff=_task_handoff(o, t, d), inferred=f"t{o.id}->t{t.id}" not in written)
     return d.derive_roles()
 
 # ----- 凡例・閲覧と編集画面に渡すもの -----
@@ -4928,7 +5031,7 @@ def seed_demo():
         state = _demo_state(row)
         t = Task(
             respondent=r, workplace_id=r.workplace_id, is_demo=True, name=row["name"], frequency=row["freq"], duration=row["dur"], headcount=row["head"],
-            wish=row["wish"], self_improve=C.SELF_IMPROVE_YES if row["self"] else C.SELF_IMPROVE_NO, prev_task=row["prev"], next_task=row["next"],
+            wish=row["wish"], self_improve=C.SELF_IMPROVE_YES if row["self"] else "", prev_task=row["prev"], next_task=row["next"],
             shift=("普通勤務" if r.work_pattern != "交代勤務" else C.SHIFT_OPTIONS[i % 3]),
             steps_json=json.dumps(state["steps"], ensure_ascii=False), intake_json=json.dumps(DEMO_INTAKE.get(row["name"], []), ensure_ascii=False),
             created_at=base + timedelta(days=i % 15, hours=i),
@@ -6318,7 +6421,7 @@ def api_writeback_candidates():
     kind, workplace_id, domain_id = _kind_and_scope()
     saved = _saved_graph(kind, workplace_id, domain_id)
     cands = writeback_candidates(saved, _all_tasks(saved))
-    return jsonify({"candidates": [{"id": c["id"], "task_id": c["task_id"], "text": c["text"]} for c in cands]})
+    return jsonify({"candidates": [{"id": c["id"], "task_id": c["task_id"], "text": c["text"], "checked": c.get("checked", True)} for c in cands]})
 
 @bp_bizmap.route("/api/writeback", methods=["POST"])
 def api_writeback_apply():
@@ -6492,9 +6595,10 @@ def update_workplace(workplace_id):
     elif Workplace.query.filter(Workplace.name == name, Workplace.id != w.id).first():
         flash("同じ名前の職場があります。", "warning")
     elif name != w.name:
+        remember_workplace_name(w.id, w.name, name)
         w.name = name
         db.session.commit()
-        flash("職場名を変更しました。", "success")
+        flash("職場名を変更しました。前の名前で書かれた業務の相手・前後の業務・受け取り元も、業務マップではこの職場として扱います。", "success")
     return redirect(url_for("admin.index"))
 
 @bp_admin.post("/workplace/<int:workplace_id>/delete")
@@ -11219,7 +11323,7 @@ document.addEventListener("DOMContentLoaded", function () {
         var row = document.createElement("label");
         row.className = "fe-wb-item";
         var cb = document.createElement("input");
-        cb.type = "checkbox"; cb.checked = true; cb.value = c.id; cb.className = "form-check-input me-1";
+        cb.type = "checkbox"; cb.checked = c.checked !== false; cb.value = c.id; cb.className = "form-check-input me-1";
         row.appendChild(cb);
         row.appendChild(document.createTextNode(c.text));
         wbList.appendChild(row);
