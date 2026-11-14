@@ -1651,6 +1651,9 @@ def vnorm(text):
 def _split_words(value):
     return [w.strip() for w in re.split(r"[、,，\n]+", vnorm(value)) if w.strip() and w.strip() != "~"]
 
+def _plain_words(row):
+    return [w for w in _split_words((row or {}).get("words")) if not w.startswith("~")]
+
 def _word_pattern(word):
     suffix = word.startswith("~")
     w = word[1:].strip() if suffix else word
@@ -1663,8 +1666,9 @@ def _word_pattern(word):
         p = r"(?<=.)" + p + _SUFFIX_AFTER
     return p
 
-def _row_pattern(row):
-    return "|".join(p for p in (_word_pattern(w) for w in _split_words(row.get("words"))) if p)
+def _row_rx(row):
+    pat = "|".join(p for p in (_word_pattern(w) for w in _split_words(row.get("words"))) if p)
+    return re.compile(pat, re.I) if pat else None
 
 def _default_vocab():
     return json.loads(json.dumps(DEFAULT_MAP_VOCAB))
@@ -1681,7 +1685,6 @@ def _clean_vocab(data):
     for group in VOCAB_GROUPS:
         rows = data.get(group) if isinstance(data.get(group), list) else []
         defaults = {r["key"]: r for r in base[group]}
-        # 1回目: 行に付いてきたキーを先に確保する（並べ替えや追加でキーが変わらないように）
         incoming, taken = [], set()
         for r in rows:
             if not isinstance(r, dict):
@@ -1694,7 +1697,6 @@ def _clean_vocab(data):
             else:
                 key = ""
             incoming.append((r, key))
-        # 2回目: キーのない行（追加した行）に、まだ一度も使っていないキーを付ける
         seen, clean = set(), []
         for r, key in incoming:
             if not key:
@@ -1735,12 +1737,9 @@ def _clean_vocab(data):
 def _compile_vocab(vocab):
     for group in VOCAB_GROUPS:
         for row in vocab[group]:
-            pat = _row_pattern(row)
-            row["_rx"] = re.compile(pat, re.I) if pat else None
-            row["_ex"] = _split_words(row.get("exclude"))
+            row["_rx"], row["_ex"] = _row_rx(row), _split_words(row.get("exclude"))
     for row in vocab["handoff"].values():
-        pat = _row_pattern(row)
-        row["_rx"] = re.compile(pat, re.I) if pat else None
+        row["_rx"] = _row_rx(row)
     return vocab
 
 def map_vocab():
@@ -1769,11 +1768,14 @@ def _masked(text, row):
         t = t.replace(ex, " " * len(ex))
     return t
 
+def _row_search(row, text):
+    return row["_rx"].search(_masked(text, row)) if row and row["_rx"] else None
+
 def vocab_match(group, text, vocab=None):
     if not str(text or "").strip():
         return None
     for row in (vocab or map_vocab())[group]:
-        if row["_rx"] and row["_rx"].search(_masked(text, row)):
+        if _row_search(row, text):
             return row["key"]
     return None
 
@@ -1790,8 +1792,11 @@ def medium_of(name, hint=None, vocab=None):
 def method_of(text, vocab=None):
     return vocab_match("methods", text, vocab) or ""
 
+def _method_medium(method):
+    row = vocab_row("methods", method) if method else None
+    return row["medium"] if row else None
+
 def field_role(text, vocab=None):
-    """手順の system・渡し方の欄を、線の方法（line）・箱と方法（both）・箱だけ（box）のどれにするか"""
     m = method_of(text, vocab)
     if not m:
         return "box", ""
@@ -1813,7 +1818,8 @@ def handoff_of(*texts, side="", method="", vocab=None):
     return row["direction"] if row else ""
 
 # ----- 氏名の置き換えと作業のだれ（社員名簿・職場マスタ・区分の語を使う） -----
-_HONORIFIC_RX = re.compile(r"(さん|様|さま|氏|くん|君|ちゃん)$")
+_HONORIFICS = "さん|様|さま|氏|くん|君|ちゃん"
+_HONORIFIC_RX = re.compile("(" + _HONORIFICS + ")$")
 _NAME_HONORIFIC_RX = re.compile(r"((?:お|ご)?(?:[一-龥々]{1,4}|[ァ-ヶー]{2,8}|[A-Za-z]{2,12}))[ 　]?(さん|さま|くん|ちゃん|(?:様|氏|君)(?![一-龥々]))")
 _NAME_SEP_RX = re.compile(r"([、,，／/\n・]|[ 　]+)")
 _NOT_PERSON_WORDS = {"皆", "お客", "客", "先方", "相手", "先様", "お得意", "各", "副", "前", "元", "新", "旧", "当", "同", "全", "直", "現場", "職場"}
@@ -1846,10 +1852,17 @@ def remember_workplace_name(workplace_id, old, new):
     data[str(workplace_id)] = names
     Setting.set(WORKPLACE_ALIASES_KEY, json.dumps(data, ensure_ascii=False))
 
+def _per_request(load):
+    def cached():
+        if not has_request_context():
+            return load()
+        if load.__name__ not in g:
+            setattr(g, load.__name__, load())
+        return g.get(load.__name__)
+    return cached
+
+@_per_request
 def _workplace_names():
-    """[(見つける名前, 職場名)] 長い順。「検査・品質保証課」は「品質保証課」でも見つける。1回のリクエストの中では使い回す"""
-    if has_request_context() and "wp_names" in g:
-        return g.wp_names
     pairs = []
     try:
         rows = [w for w in Workplace.query.all() if w.name]
@@ -1864,8 +1877,6 @@ def _workplace_names():
     except Exception:
         pairs = []
     pairs.sort(key=lambda p: len(p[0]), reverse=True)
-    if has_request_context():
-        g.wp_names = pairs
     return pairs
 
 _WP_OTHER_BEFORE_RX = re.compile(r"(?:第?[一二三四五六七八九十]+|[A-Za-z0-9])$")
@@ -1883,9 +1894,9 @@ def _name_spans(text, name):
         i = text.find(name, i + 1)
     return spans
 
-def wp_name_in(found, text):
-    nf = vnorm(found)
-    return bool(nf) and bool(_name_spans(vnorm(text), nf))
+def _workplaces_in(text):
+    nt = vnorm(text)
+    return ((found, w) for found, w in _workplace_names() if _name_spans(nt, vnorm(found)))
 
 def current_wp_text(text):
     nt = vnorm(text)
@@ -1903,10 +1914,8 @@ def current_wp_text(text):
         nt = nt[:i] + nw + nt[j:]
     return nt if swaps else text
 
+@_per_request
 def _person_names():
-    """社員名簿の氏名 {"full": 3文字以上の氏名（長い順）, "surnames": 名字}。1回のリクエストの中では使い回す"""
-    if has_request_context() and "person_names" in g:
-        return g.person_names
     full, surnames = set(), set()
     try:
         for (name,) in db.session.query(Employee.name).all():
@@ -1918,17 +1927,13 @@ def _person_names():
                 surnames.add(parts[0])
     except Exception:
         pass
-    out = {"full": sorted((n for n in full if len(n) >= 3), key=len, reverse=True), "surnames": surnames}
-    if has_request_context():
-        g.person_names = out
-    return out
+    return {"full": sorted((n for n in full if len(n) >= 3), key=len, reverse=True), "surnames": surnames}
 
 def _role_only(text, vocab=None):
     row = vocab_row("actors", "boss", vocab)
     return bool(row) and vnorm(text).strip() in set(_split_words(row.get("words")))
 
 def _not_person(word, vocab=None):
-    """敬称がついても人の名前ではない語（営業さん、お客様、検査員さん、品質保証課さん など）"""
     w = vnorm(word).strip()
     if not w or w in _NOT_PERSON_WORDS:
         return True
@@ -1937,7 +1942,6 @@ def _not_person(word, vocab=None):
     return any(found in w or (len(w) >= 2 and w in found) for found, _ in _workplace_names())
 
 def mask_person_names(text, vocab=None):
-    """氏名を置き換える。社員名簿の氏名・「〇〇さん」・単独の名字 → 担当者、「佐藤課長」→ 課長。「課長さん」は課長、「営業さん」「お客様」はそのまま"""
     text = str(text or "")
     if not text.strip():
         return text
@@ -1945,9 +1949,9 @@ def mask_person_names(text, vocab=None):
     people = _person_names()
     for name in people["full"]:
         if name in text:
-            text = re.sub(re.escape(name) + r"[ 　]?(さん|様|さま|氏|くん|君|ちゃん)?", "担当者", text)
+            text = re.sub(re.escape(name) + "[ 　]?(" + _HONORIFICS + ")?", "担当者", text)
     surnames = COMMON_SURNAMES | people["surnames"]
-    roles = [r for r in _split_words((vocab_row("actors", "boss", vocab) or {}).get("words")) if not r.startswith("~")]
+    roles = _plain_words(vocab_row("actors", "boss", vocab))
     if roles:
         rx = re.compile(r"([一-龥々]+?)[ 　]?(" + "|".join(re.escape(r) for r in sorted(roles, key=len, reverse=True)) + ")")
 
@@ -1973,11 +1977,9 @@ def mask_person_names(text, vocab=None):
     return "".join("担当者" if p.strip() in surnames else p for p in _NAME_SEP_RX.split(text))
 
 def _mask_destination(text):
-    """「課長へ提出する日報作成」の「課長へ」のように、後ろに続きがある行き先の語は、だれの判定に使わない"""
     return re.sub(r"[^\s　、。をがはでとも]+(への|へ|宛て|宛に)(?=\S)", lambda m: " " * len(m.group(0)), text)
 
 def who_of(name, own_wp="", vocab=None):
-    """作業のだれ {actor, label, state}。職場マスタ → 区分の語 → 未確認 の順。氏名は担当者に置き換え、だれは未確認にする"""
     vocab = vocab or map_vocab()
     raw = mask_person_names(str(name or "").strip(), vocab).strip()
     if not raw:
@@ -1986,16 +1988,15 @@ def who_of(name, own_wp="", vocab=None):
         return {"actor": "", "label": "担当者", "state": "unconfirmed"}
     raw = current_wp_text(raw)
     nraw, nown = vnorm(raw), vnorm(own_wp)
-    for found, w in _workplace_names():
-        if wp_name_in(found, nraw):
-            rest = nraw.replace(vnorm(found), " ").strip(" 　の・（）()")
-            role = _HONORIFIC_RX.sub("", rest)
-            mine = bool(nown) and vnorm(w) == nown
-            if rest and _role_only(role, vocab):
-                return {"actor": "boss" if mine else "dept", "label": f"{w} {role}", "state": "ok"}
-            if mine:
-                return {"actor": "team", "label": f"{w}の人" if not rest or vocab_match("actors", rest, vocab) == "team" else raw, "state": "ok"}
-            return {"actor": "dept", "label": raw, "state": "ok"}
+    for found, w in _workplaces_in(nraw):
+        rest = nraw.replace(vnorm(found), " ").strip(" 　の・（）()")
+        role = _HONORIFIC_RX.sub("", rest)
+        mine = bool(nown) and vnorm(w) == nown
+        if rest and _role_only(role, vocab):
+            return {"actor": "boss" if mine else "dept", "label": f"{w} {role}", "state": "ok"}
+        if mine:
+            return {"actor": "team", "label": f"{w}の人" if not rest or vocab_match("actors", rest, vocab) == "team" else raw, "state": "ok"}
+        return {"actor": "dept", "label": raw, "state": "ok"}
     bare = _HONORIFIC_RX.sub("", raw).strip()
     if _role_only(bare, vocab):
         return {"actor": "boss", "label": f"{own_wp} {bare}".strip() if own_wp else bare, "state": "ok"}
@@ -2111,7 +2112,6 @@ def info_shape(medium):
     return shape if shape in ("doc", "cyl", "stadium") else "doc"
 
 def node_icon(n):
-    """箱のアイコン（クラス, 色の印）。情報は媒体、作業はだれ、登録済みの業務は付けない（完了は ✓）"""
     if n.get("type") == "info":
         medium = n.get("medium") or "unknown"
         row = vocab_row("media", medium) or vocab_row("media", "unknown")
@@ -2119,7 +2119,7 @@ def node_icon(n):
     cls = n.get("cls")
     if cls == "done":
         return "bi-check-circle-fill", "done"
-    if cls in ("task", "hold", "abolished"):
+    if cls in TASK_CLASSES:
         return "", ""
     if cls == "pending":
         return "bi-hourglass-split", "pending"
@@ -2150,7 +2150,6 @@ def edge_label(e):
     return ""
 
 def show_method_for(method, medium):
-    """媒体から分かる方法（システムのデータをシステムで見る、メール本文をメールで受け取る）はラベルに書かない"""
     row = vocab_row("methods", method) if method else None
     return bool(row) and row.get("medium") != (medium or "unknown")
 
@@ -2194,14 +2193,12 @@ class Diagram:
             old.update(method=new["method"], show_method=new["show_method"])
 
     def info_edge(self, a, b, method, info_node=None, inferred=False):
-        """情報の流れの線。方法が情報の箱（info_node。省くと a）の媒体から分かるときはラベルに書かない"""
         self.edge(a, b, "info", method=method, show_method=show_method_for(method, self.nodes[info_node or a]["medium"]), inferred=inferred)
 
     def click(self, node_id, url, tooltip=""):
         self.clicks[node_id] = (url, tooltip)
 
     def derive_roles(self):
-        """情報の箱の色を線の向きから決める（登録済みの業務が作る＝できるもの、それ以外＝取り出し元）"""
         made = {b for (a, b), e in self.edges.items() if e["type"] == "info" and self.nodes.get(a, {}).get("cls") in TASK_CLASSES}
         for i, n in self.nodes.items():
             if n["type"] == "info" and n["cls"] in ("source", "output"):
@@ -2279,11 +2276,9 @@ class Diagram:
         return {"schema": 2, "nodes": nodes, "edges": edges, "suppressed_nodes": [], "suppressed_edges": [], "view": None}
 
 def _node_type(n):
-    """箱の種類（work / info）。type が無ければ色の区分から"""
     return n.get("type") if n.get("type") in ("work", "info") else CLS_TYPE.get(n.get("cls"), "work")
 
 def _cls_for(cls, ntype):
-    """箱の種類に合う色の区分。合わなければ、情報は取り出し元、作業は他の人・部署の作業"""
     return cls if CLS_TYPE.get(cls) == ntype else ("source" if ntype == "info" else "work")
 
 def graph_to_diagram(graph, direction="LR"):
@@ -2306,7 +2301,6 @@ def graph_to_diagram(graph, direction="LR"):
     return d.derive_roles()
 
 def upgrade_graph(saved):
-    """保存済みの手修正を新しい形（作業・情報・2種類の線）に読み替える。ID は変えない"""
     if not isinstance(saved, dict) or saved.get("schema") == 2:
         return saved
     out = dict(saved)
@@ -2322,7 +2316,6 @@ def upgrade_graph(saved):
             m["type"] = "info" if medium_of(m.get("text")) != "unknown" else "work"
             m["cls"] = "source" if m["type"] == "info" else "work"
         if old in ("wp", "ext", "person", "warn"):
-            # 昔の人・部署の箱は、名前をだれにした作業の箱にする
             m["who"] = m.get("who") or m.get("text") or ""
             w = who_of(m["who"], m.get("group_title") or "") if old != "warn" else {"actor": "unknown", "state": "unknown"}
             m["actor"], m["who_state"] = w["actor"], w["state"]
@@ -2363,25 +2356,19 @@ def upgrade_graph(saved):
     return out
 
 def _exact_method(label):
-    """ラベル全体が方法の名前か語の1つと同じなら、その方法のキー（昔の線のラベルを方法に読み替えるとき）"""
     v = vnorm(label).strip().lower()
     for r in map_vocab()["methods"]:
-        if v == vnorm(r["label"]).strip().lower() or v in {w.lower() for w in _split_words(r.get("words")) if not w.startswith("~")}:
+        if v == vnorm(r["label"]).strip().lower() or v in {w.lower() for w in _plain_words(r)}:
             return r["key"]
     return ""
 
 PLACEHOLDER_TEXTS = {"使いみち未確認", "使う人が分からない", "（渡すもの未確認）", "新しい作業", "新しい情報"}
 
 def _same_box(a, b):
-    if a.get("type") != b.get("type"):
-        return False
-    if a.get("type") == "info":
-        return normalize_text(a.get("text")) == normalize_text(b.get("text"))
-    return normalize_text(a.get("text")) == normalize_text(b.get("text")) and normalize_text(a.get("who")) == normalize_text(b.get("who"))
+    return (a.get("type") == b.get("type") and normalize_text(a.get("text")) == normalize_text(b.get("text"))
+            and (a.get("type") == "info" or normalize_text(a.get("who")) == normalize_text(b.get("who"))))
 
 def _ghost_twin(sn, nodes, saved_edges, auto_edges):
-    """手で足した箱・昔の箱が、再生成した自動の箱と同じものか。名前とだれが同じ、またはだれが同じ（「課長」は渡す業務の職場名つきでも比べる）で同じ業務から渡されている。
-    未登録の業務は、同じ職場で登録された同じ名前の業務"""
     if sn.get("cls") == "pending":
         vocab = map_vocab()
         key = pending_key(_pending_name(sn.get("text")), vocab)
@@ -2391,10 +2378,11 @@ def _ghost_twin(sn, nodes, saved_edges, auto_edges):
     if twin is not None or sn.get("type") != "work" or not normalize_text(sn.get("who")):
         return twin
     feeders = {se.get("from") for se in saved_edges if se.get("to") == sn.get("id")}
-    tids = {_task_id_of(f) for f in feeders if _task_id_of(f)}
-    feeders |= {f"t{i}" for i in tids} | {f"o{i}" for i in tids}
+    tids = {i for i in map(_task_id_of, feeders) if i}
+    task_boxes = {f"t{i}" for i in tids}
+    feeders |= task_boxes | {f"o{i}" for i in tids}
     fed = {e["to"] for e in auto_edges if e["from"] in feeders}
-    own = {x.get("who") for x in nodes if x["id"] in {f"t{i}" for i in tids} and x.get("who")}
+    own = {x.get("who") for x in nodes if x["id"] in task_boxes and x.get("who")}
     whos = {normalize_text(sn.get("who"))} | {normalize_text(recipient_who(sn.get("who"), wp)["label"]) for wp in own}
     return next((x for x in nodes if x.get("source") == "auto" and x.get("type") == "work" and x["id"] in fed
                  and normalize_text(x.get("who")) in whos), None)
@@ -2491,7 +2479,6 @@ def merge_graph(auto, saved):
             if se.get("label_edited"):
                 m["label"] = se.get("label") or ""
                 m["label_edited"] = True
-            # 手で選んだ方法。「なし」はそのまま、消された区分のキーなら自動に戻す
             if se.get("method_edited") and (not se.get("method") or vocab_row("methods", se.get("method"))):
                 m["method"] = se.get("method") or ""
                 m["show_method"], m["method_edited"] = bool(m["method"]), True
@@ -2504,7 +2491,7 @@ def merge_graph(auto, saved):
     for e in edges:
         if _task_id_of(e["from"]):
             fed[_task_id_of(e["from"])].add(e["to"])
-    for se in saved.get("edges", []):
+    for se in saved_edges:
         if se.get("source") != "manual" or se.get("id") in seen:
             continue
         a, b = redirect.get(se.get("from"), se.get("from")), redirect.get(se.get("to"), se.get("to"))
@@ -2517,9 +2504,7 @@ def merge_graph(auto, saved):
         if m.get("method") and not vocab_row("methods", m["method"]):
             m["method"], m["show_method"], m["method_edited"] = "", False, False
         ta, tb = by_id[a].get("type"), by_id[b].get("type")
-        m["type"] = m.get("type") if m.get("type") in ("work", "info") else ("work" if ta == "work" and tb == "work" else "info")
-        if m["type"] == "info" and ta == "work" and tb == "work":
-            m["type"] = "work"
+        m["type"] = "work" if ta == "work" and tb == "work" else (m.get("type") if m.get("type") in ("work", "info") else "info")
         edges.append(m)
         seen.add(m["id"])
         pairs.add((a, b))
@@ -2594,7 +2579,6 @@ def _task_id_of(node_id):
     return int(node_id[1:])
 
 def _pending_name(text):
-    """未登録の業務の箱の名前から「（2人）」を外す"""
     return re.sub(r"[（(]\d+人[）)]\s*$", "", (text or "").strip()).strip()
 
 def append_text(existing, value):
@@ -2628,17 +2612,13 @@ def rename_text(existing, old, new):
 MAP_WRITTEN_KEY = "map_written"
 
 
+@_per_request
 def _map_written():
-    if has_request_context() and "map_written" in g:
-        return g.map_written
     try:
         data = _json_column(Setting.get(MAP_WRITTEN_KEY, ""), {})
     except Exception:
         data = {}
-    data = data if isinstance(data, dict) else {}
-    if has_request_context():
-        g.map_written = data
-    return data
+    return data if isinstance(data, dict) else {}
 
 def remember_written(kind, task_id, value):
     data = _map_written()
@@ -2817,7 +2797,6 @@ WRITEBACK_FIELDS = {"name", "next_task", "prev_task", "inputs", "info_from", "ac
 
 
 def _op_change(op, tasks_by_id):
-    """書き戻しの1操作で変わる (業務, 新しい値)。業務がない・対象外の項目・値が変わらないなら None（受け取り元は、書き戻した印がまだなければ変わるものとする）"""
     t = tasks_by_id.get(op["task_id"])
     if t is None or op["field"] not in WRITEBACK_FIELDS:
         return None
@@ -2876,8 +2855,8 @@ def apply_writeback(candidates, selected_ids, tasks_by_id):
 def _wp_name(t):
     return t.workplace.name if t.workplace else "職場未設定"
 
-def _wp_key(t):
-    return f"wp{t.workplace_id or 0}"
+def _frame(workplace_id, name):
+    return f"wp{workplace_id or 0}", name
 
 def _own_wp(t):
     return t.workplace.name if t is not None and t.workplace else ""
@@ -2889,10 +2868,20 @@ def task_cls(t):
 
 def _task_node(d, t):
     tid = f"t{t.id}"
-    d.node(tid, t.name, task_cls(t), subgraph=(_wp_key(t), _wp_name(t)),
+    d.node(tid, t.name, task_cls(t), subgraph=_frame(t.workplace_id, _wp_name(t)),
            who={"actor": "team", "label": _own_wp(t), "state": "ok"})
     d.click(tid, url_for("cases.detail", task_id=t.id), "案件詳細を開く")
     return tid
+
+def _task_output(d, t, tid, dups=None):
+    oid = d.node(f"o{t.id}", t.output, "dupout" if dups and normalize_text(t.output) in dups else "output")
+    d.edge(tid, oid, "info")
+    return oid
+
+def _output_box(d, node_id, after, text=""):
+    node = d.node(node_id, text or "（渡すもの未確認）", "output", medium=None if text.strip() else "unknown")
+    d.edge(after, node, "info")
+    return node
 
 _TASK_NAMES_RX = re.compile(r"[\n、,，]+")
 
@@ -2927,11 +2916,9 @@ def _match_tasks(text, tasks, exclude=None, limit=3):
     return [t for _, t in hits[:limit]]
 
 _SPLIT_NAMES_RX = re.compile(r"[、,，／/\n]+")
-MAX_PENDING = 40
 
 
 def _names(value, dots=False):
-    """「、」「／」などで区切った名前。dots=True なら「A・B」も分ける（かっこの中と職場名の「・」は分けない）"""
     names = [v.strip() for v in _SPLIT_NAMES_RX.split(value or "") if v.strip()]
     if not dots:
         return names
@@ -2994,17 +2981,14 @@ def _is_destination(system, action):
             return True
     return False
 
-def _purpose(t):
-    p = (t.purpose or "").strip() if t is not None else ""
-    return "" if p in ("", "不明") else p
+def _purpose(text):
+    text = (text or "").strip()
+    return "" if text in ("", "不明") else text
 
 def _task_outputs(t, steps):
-    """業務のできるもの（手順の output と業務の output。空は除く）"""
     return [m for m in [x.get("output") or "" for x in steps] + [t.output or ""] if m.strip()]
 
 def _raw_task_sources(t):
-    """業務の取り出し元 [{name, hint, method, shared, fixed}]。手順 → 具体名 → 受け取り元 → 区分の順に見て、同じものは1つにまとめる。
-    業務マップから書き戻した受け取り元（fixed）は、言い換えとしてまとめたり省いたりせず必ず描く（同じもの＝same_thing のときだけ1つにする）"""
     items = []
     written = written_sources(t)
 
@@ -3030,10 +3014,10 @@ def _raw_task_sources(t):
     for x in steps:
         system, inp, action, to = [(x.get(k) or "").strip() for k in ("system", "input", "action", "to")]
         recv = method_of(x.get("how_from") or "")
-        role, m = field_role(system) if system else ("box", "")
+        role, m = field_role(system)
         if system and role == "line":
             if not to and inp and not internal(inp):
-                add(inp, hint=vocab_row("methods", m)["medium"], method=m)
+                add(inp, hint=_method_medium(m), method=m)
             continue
         if system and not internal(system) and not _is_destination(system, action):
             add(system, method=m or recv)
@@ -3048,7 +3032,6 @@ def _raw_task_sources(t):
     rows = [INPUT_SOURCE_MAP[c] for c in cats if c in INPUT_SOURCE_MAP and c != "その他"]
 
     def category_of(v):
-        """名前に合う回答の区分（媒体が同じもの。1つしかなければそれ）"""
         medium = medium_of(v)
         hit = next((r for r in rows if r[0] == medium), None)
         return hit or (rows[0] if len(rows) == 1 and medium == "unknown" else None)
@@ -3090,7 +3073,6 @@ def task_sources(t):
     return [s if s["shared"] else dict(s, method=tied[id(s)]) for s in items if s["shared"] or id(s) in tied]
 
 def task_destinations(t):
-    """手順で入力・登録している置き場（業務 → 情報）"""
     made = _task_outputs(t, t.steps)
     out = []
     for x in t.steps:
@@ -3104,8 +3086,6 @@ def task_destinations(t):
     return out
 
 def task_recipients(t):
-    """渡す相手 [{name, how, use, who, step}]。手順の to と利用者の具体名を、1人・1部署ずつ。
-    だれ（職場名つきの名前）が同じものだけ1つにする（「課長」と「製造1課 課長」は同じ、「検査・品質保証課 課長」は別）"""
     own, out, vocab = _own_wp(t), [], map_vocab()
 
     def add(name, how="", use="", step=False):
@@ -3126,7 +3106,7 @@ def task_recipients(t):
         to, system = (x.get("to") or "").strip(), (x.get("system") or "").strip()
         if not to:
             continue
-        line = field_role(system) if system else ("box", "")
+        line = field_role(system)
         how = method_of(x.get("how") or "") or (line[1] if line[0] == "line" else "")
         for n in _names(to):
             add(n, how, (x.get("use") or "").strip(), step=True)
@@ -3152,16 +3132,15 @@ def recipient_who(name, own_wp="", vocab=None):
     return w
 
 def dept_in_text(text, own_wp="", actor="dept"):
-    """業務の目的などの文から、相手の部署・社外の名前を探す（「翌日の残業人員を総務に伝えるため」→ 総務）。なければ空"""
     text = str(text or "")
     if not text.strip():
         return ""
     if actor == "dept":
-        for found, w in _workplace_names():
-            if wp_name_in(found, text) and w != own_wp:
+        for _found, w in _workplaces_in(text):
+            if w != own_wp:
                 return w
     row = vocab_row("actors", actor)
-    m = row["_rx"].search(_masked(text, row)) if row and row.get("_rx") else None
+    m = _row_search(row, text)
     if not m:
         return ""
     word = m.group(0)
@@ -3170,23 +3149,28 @@ def dept_in_text(text, own_wp="", actor="dept"):
     return word[:20] if len(word) >= 2 else ""
 
 def category_recipient(u, t):
-    """利用者の区分（アンケートの選択肢）しか分からない相手のだれ。他部署・社外は業務の目的の文から名前を探す"""
     own = _own_wp(t)
     w = category_who(u, own)
     if w and w["actor"] in ("dept", "external"):
-        found = dept_in_text(_purpose(t), own, w["actor"])
+        found = dept_in_text(_purpose(t.purpose), own, w["actor"])
         if found:
             return dict(w, label=found)
     return w
+
+def _system_recipient(name, w):
+    return w["state"] == "unconfirmed" and medium_of(name) == "system"
+
+def _user_category(w):
+    return actor_user(w["actor"]) if w["actor"] else "職場内"
 
 def task_users(t):
     named = task_recipients(t)
     out, covered = [], set()
     for r in named:
-        system = r["who"]["state"] == "unconfirmed" and medium_of(r["name"]) == "system"
+        system = _system_recipient(r["name"], r["who"])
         out.append(dict(r, system=system, category=False))
         if not system:
-            covered.add(actor_user(r["who"]["actor"]) if r["who"]["actor"] else "職場内")
+            covered.add(_user_category(r["who"]))
     if named:
         covered.add("分からない")
     for u in t.output_users_list:
@@ -3196,13 +3180,12 @@ def task_users(t):
     return out
 
 def users_from_names(names, own_wp=""):
-    """渡す相手の名前から、利用者の区分（職場内・上司・他部署・顧客・社外）を決める"""
     cats = []
     for n in names:
         w = who_of(n, own_wp)
-        if w["state"] == "unconfirmed" and medium_of(n) == "system":
+        if _system_recipient(n, w):
             continue
-        c = actor_user(w["actor"]) if w["actor"] else "職場内"
+        c = _user_category(w)
         if c and c not in cats:
             cats.append(c)
     return cats
@@ -3221,7 +3204,6 @@ def category_who(u, own_wp=""):
     return None
 
 def same_info(a, b):
-    """業務をまたいで同じ情報とみなすか。名前の完全一致か、片方が「名前（媒体など）」でもう片方が「名前」"""
     na, nb = normalize_text(a), normalize_text(b)
     if not na or not nb:
         return False
@@ -3233,13 +3215,11 @@ def same_info(a, b):
 
 def _wp_frame(name):
     w = Workplace.query.filter_by(name=name).first() if name else None
-    return (f"wp{w.id}", w.name) if w else None
+    return _frame(w.id, w.name) if w else None
 
 def recipient_node(d, name, own_wp="", use="", frame=None, who=None, task_id=None):
-    """渡す相手の箱。システムなら書き込み先の情報、それ以外は相手の作業（だれ＋使いみち）。(node_id, 'work'|'info')
-    task_id を渡すと、業務と答えた名前（区分だけの相手は区分）で箱の ID を決める（区分の語・目的・相手の数を変えても手修正が残るように）"""
     w = who or recipient_who(name, own_wp)
-    if w["state"] == "unconfirmed" and medium_of(name) == "system":
+    if _system_recipient(name, w):
         return d.node(nid("s", name), name, "source", medium="system"), "info"
     if w["state"] == "unknown":
         return d.node(nid("p", f"{task_id}:unknown") if task_id is not None else "p_unknown", "使う人が分からない", "warn", who=dict(w, label="")), "work"
@@ -3248,13 +3228,12 @@ def recipient_node(d, name, own_wp="", use="", frame=None, who=None, task_id=Non
     if frame and own_wp and w["actor"] in ("team", "boss") and vnorm(w["label"]).startswith(vnorm(own_wp)):
         inside = frame
     elif frame and w["actor"] == "dept":
-        inside = next((_wp_frame(wp) for found, wp in _workplace_names() if wp_name_in(found, w["label"])), None)
+        inside = next((_wp_frame(wp) for _found, wp in _workplaces_in(w["label"])), None)
     key = f"{w['label']}|{content}" if task_id is None else f"{task_id}:{name}"
     return d.node(nid("p", key), content, "work", subgraph=inside, who=w), "work"
 
 def task_user_nodes(d, t, frame=None):
-    """利用者の箱 [{id, type, how}]。具体名を優先し、区分（職場内・上司・他部署・社外・分からない）は具体名で表せないものだけ。箱は業務ごと"""
-    own, purpose = _own_wp(t), _purpose(t)
+    own, purpose = _own_wp(t), _purpose(t.purpose)
     users = task_users(t)
     named = [u for u in users if not u["category"]]
     cats = [u for u in t.output_users_list if u != "自分"]
@@ -3266,7 +3245,6 @@ def task_user_nodes(d, t, frame=None):
     return out
 
 def _add_task_info(d, t, tid, outs=None, dups=None, frame=None):
-    """1つの業務の取り出し元・書き込む置き場・できるもの・渡す相手を描く。outs があれば、別の業務のできるものとの一致をつなぐ"""
     for s in task_sources(t):
         prev = None
         if outs and s["shared"] and medium_of(s["name"], s["hint"]) != "system":
@@ -3280,20 +3258,14 @@ def _add_task_info(d, t, tid, outs=None, dups=None, frame=None):
     for dst in task_destinations(t):
         node = d.node(nid("s", dst["name"]), dst["name"], "source")
         d.info_edge(tid, node, dst["method"], info_node=node)
-    target = None
-    if (t.output or "").strip():
-        target = f"o{t.id}"
-        d.node(target, t.output, "dupout" if dups and normalize_text(t.output) in dups else "output")
-        d.edge(tid, target, "info")
+    target = _task_output(d, t, tid, dups) if (t.output or "").strip() else None
     for u in task_user_nodes(d, t, frame):
         if u["type"] == "info":
             d.edge(tid, u["id"], "info", method="system")
             continue
         if target is None:
-            target = d.node(f"o{t.id}", "（渡すもの未確認）", "output", medium="unknown")
-            d.edge(tid, target, "info")
+            target = _output_box(d, f"o{t.id}", tid)
         d.info_edge(target, u["id"], u["how"])
-    return target or tid
 
 def _task_handoff(a, b, d):
     if a.respondent_id and a.respondent_id == b.respondent_id:
@@ -3303,6 +3275,9 @@ def _task_handoff(a, b, d):
     first = (b.steps[0].get("action") if b.steps else "") or ""
     return handoff_of(last, first, method=e["method"] if e else "")
 
+def _name_link(d, a, b, written, handoff=""):
+    d.edge(a, b, "work", handoff=handoff, inferred=f"{a}->{b}" not in written)
+
 # ----- 業務マップ全体（登録済みの業務と、月次アンケートで挙がった未登録の業務） -----
 def build_info_flow(tasks):
     d = Diagram("LR")
@@ -3311,19 +3286,16 @@ def build_info_flow(tasks):
     for t in tasks:
         tid = _task_node(d, t)
         if (t.output or "").strip():
-            oid = f"o{t.id}"
-            d.node(oid, t.output, "dupout" if normalize_text(t.output) in dups else "output")
-            d.edge(tid, oid, "info")
-            outs.append((t, oid))
+            outs.append((t, _task_output(d, t, tid, dups)))
     for t in tasks:
-        _add_task_info(d, t, f"t{t.id}", outs, dups, frame=(_wp_key(t), _wp_name(t)))
+        _add_task_info(d, t, f"t{t.id}", outs, dups, frame=_frame(t.workplace_id, _wp_name(t)))
     written = written_links()
     for t in tasks:
         tid = f"t{t.id}"
         for other in _match_tasks(t.next_task, tasks, exclude=t):
-            d.edge(tid, f"t{other.id}", "work", handoff=_task_handoff(t, other, d), inferred=f"{tid}->t{other.id}" not in written)
+            _name_link(d, tid, f"t{other.id}", written, _task_handoff(t, other, d))
         for other in _match_tasks(t.prev_task, tasks, exclude=t):
-            d.edge(f"t{other.id}", tid, "work", handoff=_task_handoff(other, t, d), inferred=f"t{other.id}->{tid}" not in written)
+            _name_link(d, f"t{other.id}", tid, written, _task_handoff(other, t, d))
         if (t.output or "").strip():
             for other in tasks:
                 if other is not t and same_name(t.output, other.prev_task):
@@ -3331,11 +3303,10 @@ def build_info_flow(tasks):
     return d
 
 PENDING_MONTHS = 6
+MAX_PENDING = 40
 
 
 def pending_task_names(workplace_id=None):
-    """月次アンケート（1-3・3-2）で挙がったが、まだ流れを登録していない業務名。各人の最新の回答（6か月以内・対象外の人を除く）から、回答の職場ごとに。
-    名前は1行・「、」ごとに分け（「・」では分けない）、全角・半角と記号をそろえて完全に同じものだけを登録済みとみなす（「月報の作成」と「週報の作成」は別）"""
     vocab = map_vocab()
     since = shift_period(current_period(), 1 - PENDING_MONTHS)
     excluded = {norm_emp_id(e.emp_id).lower() for e in Employee.query.filter(Employee.active.is_(False)).all()}
@@ -3367,15 +3338,15 @@ def add_pending_tasks(d, workplace_id=None, tasks=()):
         n = len(p["people"])
         wp = names.get(p["workplace_id"], "職場未設定")
         node = d.node(nid("u", f"{p['workplace_id']}:{p['name']}"), p["name"] + (f"（{n}人）" if n >= 2 else ""), "pending",
-                      subgraph=(f"wp{p['workplace_id'] or 0}", wp), who={"actor": "team", "label": wp, "state": "ok"})
+                      subgraph=_frame(p["workplace_id"], wp), who={"actor": "team", "label": wp, "state": "ok"})
         key = name_key(p["name"])
         for t in tasks:
             if t.workplace_id != p["workplace_id"]:
                 continue
             if key in links[t.id][0]:
-                d.edge(f"t{t.id}", node, "work", inferred=f"t{t.id}->{node}" not in written)
+                _name_link(d, f"t{t.id}", node, written)
             if key in links[t.id][1]:
-                d.edge(node, f"t{t.id}", "work", inferred=f"{node}->t{t.id}" not in written)
+                _name_link(d, node, f"t{t.id}", written)
     return d
 
 # ----- 図に添える表: 職場・部署の間の受け渡し、システム・情報源ごとの業務 -----
@@ -3383,11 +3354,10 @@ def handoff_rows(tasks):
     agg = defaultdict(lambda: {"info": 0, "involve": 0})
     for t in tasks:
         wp, own = _wp_name(t), _own_wp(t)
-        inputs = t.inputs_list
         if (t.info_from or "").strip():
             for v in _names(t.info_from, dots=True):
                 agg[(who_of(v, own)["label"] or v, wp)]["info"] += 1
-        elif "人から聞く" in inputs:
+        elif "人から聞く" in t.inputs_list:
             agg[("口頭での聞き取り", wp)]["info"] += 1
         for u in task_users(t):
             w = u["who"]
@@ -3427,7 +3397,7 @@ def _circled(n):
 def build_steps_flow(steps, own_wp="", purpose=""):
     d = Diagram("LR")
     me = {"actor": "team", "label": own_wp or "本人", "state": "ok"}
-    purpose = "" if (purpose or "").strip() in ("", "不明") else purpose.strip()
+    purpose = _purpose(purpose)
     total = sum(len(_names(x.get("to"))) for x in steps)
     seen, latest, prev = [], None, None
 
@@ -3443,20 +3413,16 @@ def build_steps_flow(steps, own_wp="", purpose=""):
             seen.append((name, node))
         return node
 
-    def method_medium(method):
-        row = vocab_row("methods", method) if method else None
-        return row["medium"] if row else None
-
     for x in steps:
         sid = f"st{x['no']}"
         action = mask_person_names(x.get("action") or "")
-        d.node(sid, f"{_circled(x['no'])} {action}", "task", width=14, who=me)
+        d.node(sid, f"{_circled(x['no'])} {action}", "task", who=me)
         system, inp, to, how, out = [(x.get(k) or "").strip() for k in ("system", "input", "to", "how", "output")]
         recv = method_of(x.get("how_from") or "")
-        role, m = field_role(system) if system else ("box", "")
+        role, m = field_role(system)
         src = find(inp)
         if system and role == "line" and not to:
-            node = src or (info(inp, hint=method_medium(m)) if inp else info(f"{vocab_label('methods', m)}で受け取る内容", hint=method_medium(m), key=nid("s", f"{x['no']}:{m}")))
+            node = src or (info(inp, hint=_method_medium(m)) if inp else info(f"{vocab_label('methods', m)}で受け取る内容", hint=_method_medium(m), key=nid("s", f"{x['no']}:{m}")))
             d.info_edge(node, sid, m)
         else:
             sys_node, dest = None, False
@@ -3471,7 +3437,7 @@ def build_steps_flow(steps, own_wp="", purpose=""):
             if src and src != sys_node:
                 d.info_edge(src, sid, recv)
             elif inp and not src and not to and (not system or dest) and not same_name(inp, system, 2):
-                node = info(inp, hint=method_medium(recv))
+                node = info(inp, hint=_method_medium(recv))
                 d.info_edge(node, sid, recv)
         if prev:
             d.edge(prev, sid, "work", handoff="none")
@@ -3493,22 +3459,17 @@ def build_steps_flow(steps, own_wp="", purpose=""):
                     d.edge(sid, target, "info", method=meth or "system")
                     continue
                 if deliver is None:
-                    # 渡すもの: この手順のできるもの → この手順の input → 直前までのできるもの → 「渡すもの未確認」
                     deliver = oid or src
                     if deliver is None and inp:
-                        deliver = info(inp, hint=method_medium(recv))
+                        deliver = info(inp, hint=_method_medium(recv))
                         d.edge(deliver, sid, "info")
-                    deliver = deliver or latest
-                    if deliver is None:
-                        deliver = d.node(f"o{x['no']}", "（渡すもの未確認）", "output", medium="unknown")
-                        d.edge(sid, deliver, "info")
+                    deliver = deliver or latest or _output_box(d, f"o{x['no']}", sid)
                 d.info_edge(deliver, target, meth)
                 d.edge(sid, target, "work", handoff=handoff_of(action, how, side="push", method=meth))
         prev = sid
     return d
 
 def _task_ref(name, t, hit=None):
-    """前後の業務の名前が登録済みの業務（hit）なら、その業務の職場をだれにする"""
     wp = _own_wp(hit) if hit is not None else ""
     if wp:
         return {"actor": "team" if wp == _own_wp(t) else "dept", "label": wp, "state": "ok"}
@@ -3517,7 +3478,7 @@ def _task_ref(name, t, hit=None):
 def _category_step(d, medium, steps):
     for x in steps:
         sid, system, to = f"st{x['no']}", (x.get("system") or "").strip(), (x.get("to") or "").strip()
-        role, m = field_role(system) if system else ("box", "")
+        role, m = field_role(system)
         recv = method_of(x.get("how_from") or "") or (m if role == "line" and not to else "")
         row = vocab_row("methods", recv) if recv else None
         if row and row["medium"] == medium:
@@ -3540,8 +3501,7 @@ def _tie_case_sources(d, steps, sources):
     return tied
 
 def _extra_case_links(d, t, steps):
-    """手順に出てこない業務レベルの取り出し元・渡す相手（アンケートや登録で答えたもの・業務マップから書き戻したもの）を、案件の流れ図に足す。手順の箱と同じもの（same_thing）はその箱にまとめる"""
-    own, purpose = _own_wp(t), _purpose(t)
+    own, purpose = _own_wp(t), _purpose(t.purpose)
     last = f"st{steps[-1]['no']}"
     _tie_case_sources(d, steps, _raw_task_sources(t))
     users = task_users(t)
@@ -3554,10 +3514,10 @@ def _extra_case_links(d, t, steps):
             d.edge(last, node, "info", method="system")
             continue
         if deliver is None:
-            deliver = d.node(f"o{t.id}", t.output or "（渡すもの未確認）", "output", medium=None if (t.output or "").strip() else "unknown")
-            d.edge(last, deliver, "info")
-        d.info_edge(deliver, node, method_of(r["how"]))
-        d.edge(last, node, "work", handoff=handoff_of(steps[-1].get("action") or "", r["how"], side="push", method=method_of(r["how"])))
+            deliver = _output_box(d, f"o{t.id}", last, t.output or "")
+        how = method_of(r["how"])
+        d.info_edge(deliver, node, how)
+        d.edge(last, node, "work", handoff=handoff_of(steps[-1].get("action") or "", r["how"], side="push", method=how))
 
 def build_task_flow(t):
     own = _own_wp(t)
@@ -6384,12 +6344,14 @@ KINDS = ("info",)
 KIND_LABELS = {"info": "業務マップ"}
 
 
+def _domain_ids(domain_id):
+    d = db.session.get(Domain, domain_id)
+    return [domain_id] + ([c.id for c in d.children] if d else [])
+
 def _filtered_tasks(domain_id, workplace_id):
     q = Task.query
     if domain_id:
-        d = db.session.get(Domain, domain_id)
-        ids = [domain_id] + ([c.id for c in d.children] if d else [])
-        q = q.filter(Task.domain_id.in_(ids))
+        q = q.filter(Task.domain_id.in_(_domain_ids(domain_id)))
     if workplace_id:
         q = q.filter(Task.workplace_id == workplace_id)
     tasks = q.order_by(Task.workplace_id, Task.created_at).all()
@@ -6409,6 +6371,9 @@ def _scope_label(workplace_id, domain_id):
         parts.append(d.name if d else f"領域 {domain_id}")
     return "／".join(parts) if parts else "製造部全体"
 
+def _flow_row(kind, scope):
+    return FlowMap.query.filter_by(kind=kind, scope=scope).first()
+
 def _graph_data(row):
     if not row:
         return None
@@ -6421,7 +6386,7 @@ def _merged_graph(kind, workplace_id, domain_id):
     tasks, truncated = _filtered_tasks(domain_id, workplace_id)
     auto = _build(tasks, workplace_id, domain_id).to_graph()
     scope = scope_key(workplace_id, domain_id)
-    row = FlowMap.query.filter_by(kind=kind, scope=scope).first()
+    row = _flow_row(kind, scope)
     merged = merge_graph(auto, _graph_data(row))
     merged["meta"] = {
         "kind": kind,
@@ -6438,25 +6403,23 @@ def _merged_graph(kind, workplace_id, domain_id):
     }
     return merged
 
+def _graph_view(merged):
+    return flow_view(graph_to_diagram(merged) if merged["nodes"] else None)
+
 @bp_bizmap.route("/")
 def index():
     domain_id = request.args.get("domain_id", type=int)
     workplace_id = request.args.get("workplace_id", type=int)
     tasks, truncated = _filtered_tasks(domain_id, workplace_id)
-
-    flows, saved_at, kind_legends = {}, {}, {}
-    for kind in KINDS:
-        merged = _merged_graph(kind, workplace_id, domain_id)
-        flows[kind], kind_legends[kind] = flow_view(graph_to_diagram(merged) if merged["nodes"] else None)
-        saved_at[kind] = merged["meta"]["saved_at"]
-        pending_count = len([n for n in merged["nodes"] if n.get("cls") == "pending"])
+    merged = _merged_graph("info", workplace_id, domain_id)
+    flow, legend = _graph_view(merged)
     rows = domain_analysis()
     return render_template(
         "bizmap/index.html",
-        flows=flows,
-        kind_legends=kind_legends,
-        pending_count=pending_count,
-        saved_at=saved_at,
+        flows={"info": flow},
+        kind_legends={"info": legend},
+        pending_count=len([n for n in merged["nodes"] if n.get("cls") == "pending"]),
+        saved_at={"info": merged["meta"]["saved_at"]},
         task_count=len(tasks),
         flow_info_count=len([t for t in tasks if t.has_flow_info or t.steps]),
         source_rows=source_rows(tasks),
@@ -6524,7 +6487,7 @@ def api_graph_save():
     except ValueError as e:
         return jsonify({"ok": False, "error": str(e)}), 400
     scope = scope_key(workplace_id, domain_id)
-    row = FlowMap.query.filter_by(kind=kind, scope=scope).first()
+    row = _flow_row(kind, scope)
     if row is None:
         row = FlowMap(kind=kind, scope=scope)
         db.session.add(row)
@@ -6537,24 +6500,21 @@ def api_graph_save():
 @bp_bizmap.route("/api/graph", methods=["DELETE"])
 def api_graph_reset():
     kind, workplace_id, domain_id = _kind_and_scope()
-    row = FlowMap.query.filter_by(kind=kind, scope=scope_key(workplace_id, domain_id)).first()
+    row = _flow_row(kind, scope_key(workplace_id, domain_id))
     if row:
         db.session.delete(row)
         db.session.commit()
     return jsonify({"ok": True})
 
 # ----- 手修正の業務データへの書き戻し -----
-def _saved_graph(kind, workplace_id, domain_id):
-    return _graph_data(FlowMap.query.filter_by(kind=kind, scope=scope_key(workplace_id, domain_id)).first())
-
-def _all_tasks(saved):
-    return {t.id: t for t in Task.query.all()} if saved else {}
+def _writeback_state(kind, workplace_id, domain_id):
+    saved = _graph_data(_flow_row(kind, scope_key(workplace_id, domain_id)))
+    tasks_by_id = {t.id: t for t in Task.query.all()} if saved else {}
+    return writeback_candidates(saved, tasks_by_id), tasks_by_id
 
 @bp_bizmap.route("/api/writeback", methods=["GET"])
 def api_writeback_candidates():
-    kind, workplace_id, domain_id = _kind_and_scope()
-    saved = _saved_graph(kind, workplace_id, domain_id)
-    cands = writeback_candidates(saved, _all_tasks(saved))
+    cands, _tasks = _writeback_state(*_kind_and_scope())
     return jsonify({"candidates": [{"id": c["id"], "task_id": c["task_id"], "text": c["text"], "checked": c.get("checked", True)} for c in cands]})
 
 @bp_bizmap.route("/api/writeback", methods=["POST"])
@@ -6562,9 +6522,7 @@ def api_writeback_apply():
     payload = request.get_json(silent=True) or {}
     kind, workplace_id, domain_id = _kind_and_scope(payload)
     selected = set(str(x) for x in (payload.get("ids") or []))
-    saved = _saved_graph(kind, workplace_id, domain_id)
-    tasks_by_id = _all_tasks(saved)
-    cands = writeback_candidates(saved, tasks_by_id)
+    cands, tasks_by_id = _writeback_state(kind, workplace_id, domain_id)
     applied, ai_stale = apply_writeback(cands, selected, tasks_by_id)
     db.session.commit()
     return jsonify({"ok": True, "applied": applied, "selected": len(selected), "ai_stale": ai_stale})
@@ -6574,11 +6532,9 @@ def api_writeback_apply():
 def domain(domain_id):
     d = _get_or_404(Domain, domain_id)
     row = next((r for r in domain_analysis() if r["domain"].id == d.id), None)
-    ids = [d.id] + [c.id for c in d.children]
-    tasks = Task.query.filter(Task.domain_id.in_(ids)).all()
+    tasks = Task.query.filter(Task.domain_id.in_(_domain_ids(d.id))).all()
     tasks.sort(key=lambda t: t.monthly_minutes or 0, reverse=True)
-    merged = _merged_graph("info", None, d.id)
-    info_flow, info_legend = flow_view(graph_to_diagram(merged) if merged["nodes"] else None)
+    info_flow, info_legend = _graph_view(_merged_graph("info", None, d.id))
     return render_template(
         "bizmap/domain.html",
         d=d,
