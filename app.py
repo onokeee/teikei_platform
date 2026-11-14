@@ -284,8 +284,6 @@ class Respondent(db.Model):
 
     @property
     def wants_to_improve(self):
-        if self.c1_wish in C.C1_POSITIVE:
-            return True
         return any(t.self_improve in C.SELF_IMPROVE_POSITIVE for t in self.tasks)
 
     @property
@@ -853,7 +851,7 @@ def kpis():
     sufficient = [t for t in tasks if t.is_sufficient]
     filled = [t for t in tasks if t.required_filled]
     verified = [t for t in tasks if t.verified]
-    self_improvers = [r for r in respondents if r.wants_to_improve]
+    self_improvers = [p for p in dx_people() if p["positive"]]
     automated_or_eliminated = [t for t in completed if t.decision in ("廃止", "自動化")]
     candidates = [t for t in tasks if t.is_candidate]
     domain_rows = domain_analysis()
@@ -885,6 +883,7 @@ def kpis():
 # ----- 職場別・領域別 -----
 def workplace_stats():
     rows = []
+    positives = [p for p in dx_people() if p["positive"]]
     for wp in Workplace.query.order_by(Workplace.sort, Workplace.id).all():
         tasks = Task.query.filter_by(workplace_id=wp.id).all()
         respondents = Respondent.query.filter_by(workplace_id=wp.id).all()
@@ -895,7 +894,7 @@ def workplace_stats():
                 "tasks": len(tasks),
                 "minutes": sum(t.monthly_minutes or 0 for t in tasks),
                 "candidates": len([t for t in tasks if t.is_candidate]),
-                "self_improvers": len([r for r in respondents if r.wants_to_improve]),
+                "self_improvers": len([p for p in positives if p["workplace_id"] == wp.id]),
             }
         )
     return rows
@@ -1048,10 +1047,10 @@ def dx_people(workplace_id=None, wish=None):
         if target_tasks:
             own_wish = C.SELF_IMPROVE_YES
         else:
-            own_wish = r.c1_wish or (C.SELF_IMPROVE_NO if r.tasks else "")
+            own_wish = C.SELF_IMPROVE_NO if r.tasks else ""
         p.update(
             respondent=r, wish=own_wish, skills=r.skills, learn=r.learn, work_pattern=r.work_pattern or "",
-            targets=r.c5_targets or "", target_tasks=target_tasks, task_count=len(r.tasks),
+            target_tasks=target_tasks, task_count=len(r.tasks),
         )
         people[key_for(r.emp_id, r.name)] = p
     for m in MonthlyResponse.query.order_by(MonthlyResponse.period.desc(), MonthlyResponse.id.desc()).all():
@@ -1063,7 +1062,7 @@ def dx_people(workplace_id=None, wish=None):
         if not p["work_pattern"] and m.work_pattern:
             p["work_pattern"] = m.work_pattern
 
-    wish_rank = {opt: i for i, opt in enumerate(C.DX_WISH_OPTIONS + C.C1_OPTIONS)}
+    wish_rank = {opt: i for i, opt in enumerate(C.DX_WISH_OPTIONS)}
     stance_options = next((q["options"] for q in C.MONTHLY_CORE_QUESTIONS if q["key"] == "stance"), [])
     stance_rank = {opt: i for i, opt in enumerate(stance_options)}
     rows = []
@@ -1073,7 +1072,7 @@ def dx_people(workplace_id=None, wish=None):
         p["latest_label"] = period_label(latest.period) if latest else ""
         p["stance_latest"] = latest.answer("stance") if latest else ""
         p["self_positive_count"] = sum(1 for m in p["monthly"] if m.answer("stance") in C.MONTHLY_KPI["self_positive"])
-        p["wish_positive"] = p["wish"] in C.C1_POSITIVE or p["wish"] in C.SELF_IMPROVE_POSITIVE
+        p["wish_positive"] = p["wish"] in C.SELF_IMPROVE_POSITIVE
         r = p["respondent"]
         p["positive"] = (r.wants_to_improve if r is not None else False) or p["stance_latest"] in C.MONTHLY_KPI["self_positive"]
         if workplace_id and p["workplace_id"] != workplace_id:
@@ -4842,10 +4841,8 @@ def index():
     emp = (request.args.get("emp") or "").strip()
     task = (request.args.get("task") or "").strip()[:200]
     src = (request.args.get("src") or "").strip()
-    r = _current()
-    if emp and r is not None and (r.emp_id or "") != emp:
-        session.pop("respondent_id", None)
-        r = None
+    session.pop("respondent_id", None)
+    r = None
     return render_template("survey/index.html", state=_state(r), options=_options(), emp=emp, prefill=task, monthly=_monthly_context(emp, src))
 
 @bp_survey.route("/start")
@@ -5100,11 +5097,10 @@ def api_task_create():
     if data.get("self_improve"):
         skills = [v for v in (data.get("skills") or []) if v in C.SKILLS]
         learn = [v for v in (data.get("learn") or []) if v in C.SKILLS]
-        if skills:
-            r.c2_skills = C.join_list(skills)
-        if learn:
-            r.c3_learn = C.join_list(learn)
+        r.c2_skills = C.join_list(skills)
+        r.c3_learn = C.join_list(learn)
         r.part_c_done = True
+        task.assignment = "自主改善"
     db.session.add(task)
     db.session.flush()
     _finalize_task(task, state, messages)
@@ -5912,17 +5908,20 @@ def remove_demo():
     flash("デモデータを削除しました。", "info")
     return redirect(url_for("admin.index"))
 
+def _latest_stance(emp_id):
+    m = MonthlyResponse.query.filter_by(emp_id=emp_id).order_by(MonthlyResponse.period.desc(), MonthlyResponse.id.desc()).first() if emp_id else None
+    return m.answer("stance") if m else ""
+
 @bp_admin.route("/export/respondents.csv")
 def export_respondents():
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["ID", "社員ID", "氏名", "職場", "勤務形態", "登録業務数", "月間時間(分)", "C1 改善意欲", "C2 使える技術", "C3 学びたい技術", "C4 割ける時間", "C5 取り組みたい業務", "C6 発表協力", "D1 他部署とのやりとり", "D2 重複入力", "D3 目的不明の帳票", "D4 自由記述", "登録日"])
+    w.writerow(["ID", "社員ID", "氏名", "職場", "勤務形態", "登録業務数", "月間時間(分)", "一緒にやってみたい業務数", "使える技術", "学びたい技術", "最新の月次の進め方", "登録日"])
     for r in Respondent.query.order_by(Respondent.id).all():
         w.writerow(
             [
                 r.id, r.emp_id or "", r.name, r.workplace.name if r.workplace else "", r.work_pattern or "", len(r.tasks), r.total_minutes,
-                r.c1_wish or "", "・".join(r.skills), "・".join(r.learn), r.c4_hours or "", r.c5_targets, r.c6_share or "",
-                r.d1, r.d2, r.d3, r.d4, r.created_at.strftime("%Y-%m-%d %H:%M") if r.created_at else "",
+                len([t for t in r.tasks if t.self_improve in C.SELF_IMPROVE_POSITIVE]), "・".join(r.skills), "・".join(r.learn), _latest_stance(r.emp_id), r.created_at.strftime("%Y-%m-%d %H:%M") if r.created_at else "",
             ]
         )
     return _csv_response(buf, "respondents_{}.csv".format(datetime.now().strftime("%Y%m%d")))
@@ -8900,7 +8899,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
       <td class="small text-nowrap">
         {% if p.stance_latest %}
         <span class="badge {{ 'text-bg-success' if p.stance_latest in C.MONTHLY_KPI['self_positive'] else ('text-bg-primary' if p.stance_latest in C.MONTHLY_KPI['ask_positive'] else 'text-bg-light border') }}">{{ p.stance_latest }}</span>
-        <div class="text-muted">{{ p.latest_label }}{% if p.self_positive_count %}・自分で {{ p.self_positive_count }}回{% endif %}</div>
+        <div class="text-muted">{{ p.latest_label }}{% if p.self_positive_count %}・自分で／一緒に {{ p.self_positive_count }}回{% endif %}</div>
         {% else %}<span class="text-muted">－</span>{% endif %}
       </td>
       <td class="small dx-wide">{{ p.skills|join('・') or '－' }}</td>
@@ -8908,8 +8907,8 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
       <td class="small dx-tasks">
         {% if p.task_count %}<div>{{ p.task_count }} 件</div>{% endif %}
         {% for t in p.target_tasks %}<div><a href="{{ url_for('cases.detail', task_id=t.id) }}">{{ t.name }}</a> <span class="text-muted">自分で</span></div>{% endfor %}
-        {% if p.targets %}<div class="text-muted">{{ p.targets }}</div>{% endif %}
-        {% if not p.task_count and not p.targets %}<span class="text-muted">－</span>{% endif %}
+        
+        {% if not p.task_count %}<span class="text-muted">－</span>{% endif %}
       </td>
     </tr>
     {% else %}
@@ -11842,6 +11841,7 @@ summary { transition: color 0.15s ease; }
     var preset = !!(conv.origin === "monthly" && CFG.monthly && CFG.monthly.self_improve);
     $("rq-self").checked = preset;
     $("rq-skills").classList.toggle("d-none", !preset);
+    fillSkills();
     $("rq-self-note").textContent = preset ? "月次アンケートで「" + CFG.monthly.stance + "」と答えたので、チェックを入れています（外せます）" : "";
     $("rq-self-note").classList.toggle("d-none", !preset);
     finalBox.classList.remove("d-none");
@@ -11853,6 +11853,11 @@ summary { transition: color 0.15s ease; }
   pills($("rq-shift"), O.shift_options, true);
   pills($("rq-skills-have"), O.skills, false);
   pills($("rq-skills-learn"), O.skills, false);
+  function fillSkills() {
+    var on = function (box, vals) { box.querySelectorAll(".rq-pill").forEach(function (p) { p.classList.toggle("is-on", (vals || []).indexOf(p.dataset.value) >= 0); }); };
+    on($("rq-skills-have"), S.respondent && S.respondent.c2_skills);
+    on($("rq-skills-learn"), S.respondent && S.respondent.c3_learn);
+  }
   $("rq-self-label").textContent = O.self_improve_yes;
   $("rq-self").addEventListener("change", function () { $("rq-skills").classList.toggle("d-none", !this.checked); });
   $("rq-save-task").addEventListener("click", async function () {
