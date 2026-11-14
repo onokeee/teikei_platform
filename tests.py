@@ -529,8 +529,25 @@ def smoke_bizmap_edit():
         def unnamed(t):
             f = app_module.build_task_flow(t)
             return [(b, e["method"]) for (a, b), e in f.edges.items() if f.nodes[a]["text"].endswith("（名前未確認）")]
-        check(unnamed(k_tie) == [("st1", "phs")] and unnamed(k_none) == [] and unnamed(k_has) == [] and any(s_["name"] == "人から聞く内容（名前未確認）" for s_ in app_module.task_sources(k_none)),
+        check(unnamed(k_tie) == [("st1", "phs")] and unnamed(k_none) == [] and unnamed(k_has) == [],
               f"案件の流れ図: 区分しか分からない取り出し元は、受け取り方が合う手順（PHSで聞く）につなぎ、合う手順がない・その手順に取り出し元があるときは描かない: {unnamed(k_tie)} {unnamed(k_none)} {unnamed(k_has)}")
+        full_k = app_module.build_info_flow([k_tie, k_none, k_has])
+        unnamed_full = sorted((b, e["method"]) for (a, b), e in full_k.edges.items() if full_k.nodes[a]["text"].endswith("（名前未確認）"))
+        rows_k = {r_["name"]: [x.name for x in r_["tasks"]] for r_ in app_module.source_rows([k_tie, k_none, k_has])}
+        check(unnamed_full == [(f"t{k_tie.id}", "phs")] and rows_k.get("人から聞く内容（名前未確認）") == [k_tie.name]
+              and [s_["name"] for s_ in app_module.task_sources(k_none)] == [] and [(s_["name"], s_["method"]) for s_ in app_module.task_sources(k_tie)] == [("人から聞く内容（名前未確認）", "phs")],
+              f"R3-5: 業務マップ全体・システム・情報源の表も案件の流れ図と同じ: 手順のある業務の区分だけの取り出し元は、受け取り方が合う手順があるときだけ（その受け取り方で）描き、ないときは描かない: {unnamed_full} {rows_k}")
+        eq_steps = [{"no": 1, "action": "設備モニタで稼働状況を見る", "system": "設備モニタ"}, {"no": 2, "action": "稼働日報をExcelで作る", "system": "Excel（稼働日報）", "output": "稼働日報"}]
+        k_eq = Task(name="設備の稼働日報の作成", respondent_id=r_.id, workplace_id=r_.workplace_id, inputs="設備データ", output="稼働日報", steps_json=json.dumps(eq_steps, ensure_ascii=False))
+        k_old = Task(name="設備モニタの値を書き写す", respondent_id=r_.id, workplace_id=r_.workplace_id, inputs="設備データ|生産管理システム", inputs_note="設備モニタ", steps_json="[]")
+        db.session.add_all([k_eq, k_old])
+        db.session.flush()
+        infos = lambda f: sorted(n["text"] for n in f.nodes.values() if n["type"] == "info" and n["cls"] == "source")
+        rows_eq = sorted(r_["name"] for r_ in app_module.source_rows([k_eq, k_old]))
+        check(infos(app_module.build_info_flow([k_eq])) == ["設備モニタ"] and infos(app_module.build_task_flow(k_eq)) == ["設備モニタ"]
+              and infos(app_module.build_info_flow([k_old])) == ["生産管理システム", "設備モニタ"] and infos(app_module.build_task_flow(k_old)) == ["生産管理システム", "設備モニタ"]
+              and rows_eq == ["生産管理システム", "設備モニタ"],
+              f"R3-5: 名前のある取り出し元から分類した区分（設備モニタ → 設備データ）は、業務マップ・案件の流れ図・システム・情報源の表で別の箱にしない（ほかの区分は描く）: {rows_eq}")
         db.session.rollback()
 
     # ---- 職場名を変えても、前の名前で書いた相手・前後の業務はその職場の枠とだれになる ----
@@ -558,6 +575,26 @@ def smoke_bizmap_edit():
         names_after = dict(app_module._workplace_names())
     check(stored == ["生産計画課"] and names_now.get("生産計画課") == "生産計画課" and names_now.get("生産管理課") == "生産管理課" and names_after.get("生産計画課") == "生産管理課",
           f"職場名の変更: 名前を戻すと戻した名前は前の名前から外れ、前の名前と同じ職場がほかにあればいまの職場名を優先する: {stored} {names_now.get('生産計画課')} {names_after.get('生産計画課')}")
+
+    # ---- 職場名の変更: 前の名前は、名前として独立して出てくるときだけいまの名前に直す（「第二組立課」は直さない） ----
+    with app.app_context():
+        wp_asm = app_module.Workplace.query.filter_by(name="組立課").first().id
+    client.post(f"/admin/workplace/{wp_asm}/update", data={"name": "組立1課"})
+    with app.test_request_context():
+        texts = ("第二組立課", "組立課 課長", "組立課長", "組立課の進捗確認", "製造1課から組立課へ", "組立課題の整理", "組立課二係")
+        swapped = {s: app_module.current_wp_text(s) for s in texts}
+        other = app_module.who_of("第二組立課", "製造1課")
+        mine = app_module.who_of("組立課 課長", "製造1課")
+        d_ = app_module.Diagram()
+        frame_other = d_.nodes[app_module.recipient_node(d_, "第二組立課", "製造1課", frame=("wp1", "製造1課"))[0]]["group"]
+        frame_mine = d_.nodes[app_module.recipient_node(d_, "組立課の班長", "製造1課", frame=("wp1", "製造1課"))[0]]["group"]
+        dept_other, dept_mine = app_module.dept_in_text("第二組立課に伝えるため", "製造1課"), app_module.dept_in_text("組立課に伝えるため", "製造1課")
+    client.post(f"/admin/workplace/{wp_asm}/update", data={"name": "組立課"})
+    check(swapped == {"第二組立課": "第二組立課", "組立課 課長": "組立1課 課長", "組立課長": "組立1課長", "組立課の進捗確認": "組立1課の進捗確認", "製造1課から組立課へ": "製造1課から組立1課へ",
+                      "組立課題の整理": "組立課題の整理", "組立課二係": "組立課二係"}
+          and other["label"] == "第二組立課" and frame_other != f"wp{wp_asm}" and (mine["actor"], mine["label"]) == ("dept", "組立1課 課長") and frame_mine == f"wp{wp_asm}"
+          and dept_other == "第二組立課" and dept_mine == "組立1課",
+          f"R3-4: 職場名の変更（組立課 → 組立1課）: 前の名前は名前として独立して出てくるときだけ（後ろの役職はよい）いまの名前に直し、「第二組立課」のような長い名前の一部は直さず、その職場の枠にも入れない: {swapped} / {other} {frame_other}")
 
     return fails
 
@@ -768,13 +805,19 @@ def smoke_board():
     with app.app_context():
         wk = Task.query.filter_by(name="週報の作成").first()
         wk_id, wk_minutes, wk_marked = wk.id, wk.monthly_minutes, "domain" in wk.ai_fields_list
+        wk_summary, wk_at, wk_edited = wk.ai_summary or "", wk.ai_at, wk.ai_extra_dict.get("info_edited_at")
         dom_q = app_module.Domain.query.filter_by(name="品質管理").first().id
-    client.post(f"/cases/{wk_id}/update", data=dict(form, prev_task="日報の実績をExcelの集計表に転記する", next_task="月報の作成（佐藤さんへ）", actors="佐藤課長、生産管理課", domain_id=str(dom_q), headcount="3"))
+    html_up = client.post(f"/cases/{wk_id}/update", data=dict(form, prev_task="日報の実績をExcelの集計表に転記する", next_task="月報の作成（佐藤さんへ）", actors="佐藤課長、生産管理課", domain_id=str(dom_q), headcount="3"),
+                          follow_redirects=True).data.decode("utf-8")
     with app.app_context():
         wk = db.session.get(Task, wk_id)
         check(wk_marked and wk.prev_task == "日報の実績をExcelの集計表に転記する" and wk.next_task == "月報の作成（担当者へ）" and wk.actors == "課長、生産管理課" and wk.domain_id == dom_q and "domain" not in wk.ai_fields_list
               and wk.headcount == 3 and wk.monthly_minutes == wk_minutes * 3,
               "案件詳細で前の業務・後の業務・関わる人・業務領域・担当人数を直せる（氏名は置き換え、直した領域は推定の印を外し、人数は月間時間に掛ける）")
+        hours_now = f"月間約 {wk.monthly_minutes / 60:.1f} 時間"
+        check(not wk_edited and wk.ai_extra_dict.get("info_edited_at") and wk.ai_source == "rules" and wk.ai_at > wk_at and hours_now in (wk.ai_summary or "") and hours_now not in wk_summary
+              and wk.ai_priority == app_module.rule_analyze(wk, app_module._domains(), [])["priority"] and "ルールベースの分析もやり直しました" in html_up and "業務情報を直す前の AI 分析" not in html_up,
+              f"R3-10・R3-11: 業務情報を直して保存すると、前回の分析がルールならルールで分析し直し（新しい月間時間の要約・優先度）、改善チームが手を付けた印を残す: {wk.ai_summary}")
     client.post(f"/cases/{wk_id}/update", data=dict(form, domain_id=""))
     code, html = page(f"/cases/{wk_id}")
     check('name="adopt_ai_domain"' in html and 'name="prev_task"' in html and 'name="next_task"' in html and 'name="actors"' in html and 'name="domain_id"' in html and 'name="headcount"' in html,
@@ -1749,6 +1792,18 @@ def _people_round2_checks(check):
     check("いまの職場" in html and "1人1回" in html, "R2-4: ダッシュボードの職場別の注記")
     rows = list(csv.reader(io.StringIO(client.get("/admin/export/respondents.csv").data.decode("utf-8-sig"))))
     check("月次の進め方（空でない直近の答え）" in rows[0] and "月次の進め方（直近の回答）" not in rows[0], "R2-7: 回答者CSVの見出しは「月次の進め方（空でない直近の答え）」")
+    review = "担当区分の見直しを"
+    check(a5["stance_old"] and not a6["stance_old"] and a2["wish_hint"] == review and a2["positive"] and a1["wish_hint"] == "" and a3["wish_hint"] == "",
+          "R3-1・R3-2: 6か月より前の進め方には印を付け、伴走している自主改善の案件がある人がその後の月次で依頼したいと答えたら、伴走・自分で改善したいのまま「担当区分の見直しを」")
+    html = client.get("/people/").data.decode("utf-8")
+    row_of = lambda e: next((x for x in html.split("<tr") if f">{e}<" in x), "")
+    check('text-bg-secondary">自分で取り組みたい</span>' in row_of("A005") and f"{period_label(stale)}（6か月より前）" in row_of("A005") and "6か月より前" not in row_of("A006")
+          and 'text-bg-success">自分で取り組みたい</span>' in row_of("A006") and f"{later} <span" in row_of("A002") and review in row_of("A002") and review not in row_of("A001") and ">伴走<" in row_of("A002"),
+          "R3-1・R3-2: DX人財情報の進め方の列は、6か月より前の答えを灰色にして「6か月より前」。意欲の列は「その後の月次で依頼したい」の横に「担当区分の見直しを」")
+    by_id = {x[0]: x for x in rows[1:]}
+    check(by_id["A002"][5] == f"スキルを身につけながら、一緒にやってみたい（{later}・{review}）" and by_id["A001"][5] == f"スキルを身につけながら、一緒にやってみたい（{later}）"
+          and by_id["A003"][5] == "スキルを身につけながら、一緒にやってみたい" and by_id["A005"][7] == f"{period_label(stale)}（6か月より前）" and by_id["A006"][7] == period_label(prev),
+          f"R3-3: 回答者CSVの意欲の列にも同じ注記（その後の月次で依頼したい・担当区分の見直しを）、月度の列に「6か月より前」: {by_id['A002'][5]} / {by_id['A005'][7]}")
 
     captured = []
     real_ai = app_module.suggest_actions_ai
@@ -1763,6 +1818,25 @@ def _people_round2_checks(check):
     check(ctx.get("回答した人") == len(people) and "アンケート対象者数（一度でも回答した人）" not in ctx and "回答者数" not in ctx and ctx.get("職場別") and all("回答した人" in w for w in ctx["職場別"]),
           f"R2-11: AI に渡す集計の人数は「回答した人」（{ctx.get('回答した人')} 人）")
 
+    later_at = now + timedelta(minutes=5)
+    with app.app_context():
+        for e in ("A008", "A009", "A010"):
+            db.session.add(Employee(emp_id=e, name=f"氏名 {e}", source="answer", created_at=now - timedelta(days=800)))
+        task("A008", w1, "A8の業務", now - timedelta(days=40), assignment="自主改善", assignee="改善チーム")
+        monthly("A008", prev, w1, now - timedelta(days=20), **ask)
+        monthly("A009", cur, w2, now, has="ない")
+        monthly("A009", prev, w3, later_at, has="ない")
+        task("A010", w1, "A10の業務", now)
+        monthly("A010", prev, w3, later_at, has="ない")
+        db.session.commit()
+    with app.test_request_context():
+        more = {p["emp_id"]: p for p in app_module.dx_people() if p["emp_id"] in ("A008", "A009", "A010")}
+    a8, a9, a10 = (more[e] for e in ("A008", "A009", "A010"))
+    check(a8["wish"] == "チェックなし" and a8["wish_note"] == later and a8["wish_hint"] == review and a8["positive"] and [x["label"] for x in a8["target_tasks"]] == ["伴走"],
+          "R3-2: 改善チームが自主改善にして伴走している案件（チェックなし）も、その後の月次で依頼したいと答えたら「担当区分の見直しを」（伴走・自分で改善したいのまま）")
+    check(a9["workplace_id"] == w2 and a10["workplace_id"] == w1,
+          f"R3-7: いまの職場は新しい月度（月次の月度・業務を登録した月）から決め、同じ月度なら回答日時で決める（前の月度にあとから答えても、新しい月度の職場は変わらない）: {a9['workplace_id']} {a10['workplace_id']}")
+
     with app.app_context():
         x1 = Employee.query.filter_by(emp_id="X001").first().id
     j = client.post(f"/admin/employees/{x1}/toggle", json={"excluded": True}).get_json()
@@ -1773,13 +1847,29 @@ def _people_round2_checks(check):
     check(at is not None and (st[prev]["members"], st[prev]["answered"], st[cur]["members"]) == (1, 1, 0) and via_route[prev]["answered"] >= 1,
           f"R2-10: 対象外にした日を残し、それより前の月は回答率の分子・分母にそのまま入れる（その月から外す）: {st}")
     client.post(f"/admin/employees/{x1}/toggle", json={"excluded": False})
+    month_start = datetime.strptime(cur + "-01", "%Y-%m-%d")
     with app.app_context():
         e = db.session.get(Employee, x1)
         cleared = e.excluded_at is None and e.active
-        e.active = False
+        e.active, e.updated_at = False, month_start
         db.session.commit()
+    restarted = create_app({"SQLALCHEMY_DATABASE_URI": "sqlite:///" + dbfile, "TESTING": True})
+    with restarted.app_context():
+        filled = db.session.get(Employee, x1).excluded_at
         st = app_module.member_stats([r for r in app_module.member_rows() if r["emp"].emp_id == "X001"], [prev, cur])
-    check(cleared and st[prev]["members"] == 0 and st[cur]["members"] == 0, "R2-10: 対象に戻すと日付は消え、日付のない対象外（以前のデータ）はこれまでどおりすべての月で外す")
+    check(cleared and filled == month_start and (st[prev]["members"], st[prev]["answered"], st[cur]["members"]) == (1, 1, 0),
+          f"R2-10・R3-6: 対象に戻すと日付は消える。日付のない対象外（以前のデータ）は起動時に更新日で埋め、それより前の月は分子・分母に入れたまま: {filled} {st}")
+
+    with app.test_request_context():
+        pre_old, pre_new = app_module._stance_json("A005"), app_module._stance_json("A006")
+        old_m = MonthlyResponse.query.filter_by(emp_id="A005").first().id
+        new_m = MonthlyResponse.query.filter_by(emp_id="A006").first().id
+    j5 = client.post("/survey/api/respondent", json={"emp_id": "A005", "workplace_id": w3, "work_pattern": "普通勤務"}).get_json()
+    j6 = client.post("/survey/api/respondent", json={"emp_id": "A006", "workplace_id": w3, "work_pattern": "普通勤務"}).get_json()
+    h5 = client.get("/survey/", query_string={"emp": "A005", "src": "monthly", "m": old_m}).data.decode("utf-8")
+    h6 = client.get("/survey/", query_string={"emp": "A006", "src": "monthly", "m": new_m}).data.decode("utf-8")
+    check(pre_old is None and j5["stance"] is None and pre_new["self_improve"] is True and j6["stance"]["self_improve"] is True and '"self_improve": false' in h5 and '"self_improve": true' in h6,
+          f"R3-1: 「一緒にやってみたい」の事前チェックの元（月次の進め方）も直近6か月の回答だけ。6か月より前の「自分で取り組みたい」ではチェックを入れない: {j5.get('stance')} {j6.get('stance')}")
 
 
 def _migration_checks(check):
@@ -1798,7 +1888,7 @@ def _migration_checks(check):
         db.session.add_all([r_low, r_up, r_q3])
         db.session.flush()
         db.session.add(MonthlyResponse(period="2004-04", emp_id="q001", name="", workplace_id=1, answers_json="{}", created_at=datetime(2004, 4, 2), respondent_id=r_low.id))
-        db.session.add(MonthlyResponse(period="2004-04", emp_id="Ｑ００１", name="", workplace_id=1, answers_json="{}", created_at=datetime(2004, 4, 20)))
+        db.session.add(MonthlyResponse(period="2004-04", emp_id="Ｑ００１", name="重複 太郎", workplace_id=1, answers_json="{}", created_at=datetime(2004, 4, 20)))
         db.session.add(MonthlyResponse(period="2004-05", emp_id="q003", name="", workplace_id=1, answers_json="{}", created_at=datetime(2004, 5, 2)))
         steps = json.dumps([{"no": 1, "action": "日報を転記する"}], ensure_ascii=False)
         db.session.add(Task(respondent_id=r_low.id, workplace_id=1, name="Q1の業務", frequency="毎週", duration="15分未満", steps_json=steps, self_improve="改善チームに任せたい"))
@@ -1823,7 +1913,21 @@ def _migration_checks(check):
     ])
     con.commit()
     con.close()
-    app2 = create_app({"SQLALCHEMY_DATABASE_URI": uri, "TESTING": True})
+    import logging
+
+    import app as app_module
+
+    logged = []
+    catcher = logging.Handler(logging.WARNING)
+    catcher.emit = logged.append
+    app_module.log.addHandler(catcher)
+    try:
+        app2 = create_app({"SQLALCHEMY_DATABASE_URI": uri, "TESTING": True})
+    finally:
+        app_module.log.removeHandler(catcher)
+    merged_logs = [x.getMessage() for x in logged if "同じ月度の月次の回答" in x.getMessage()]
+    check(len(merged_logs) == 1 and "月度 2004-04" in merged_logs[0] and "社員ID Ｑ００１" in merged_logs[0] and "2004-04-20" in merged_logs[0] and "重複" not in merged_logs[0],
+          f"R3-8: 起動時のまとめで同じ月度の月次の回答を消したら、月度と社員ID（氏名は書かない）を警告としてログに残す: {merged_logs}")
     with app2.app_context():
         from sqlalchemy import inspect
         cols = {c["name"] for c in inspect(db.engine).get_columns("employees")}
@@ -1832,6 +1936,9 @@ def _migration_checks(check):
         check("created_at" in cols and [e.emp_id for e in rows] == ["Q001", "Q002", "q003"],
               f"P6・R2-8: 起動時に、全角・大文字小文字だけが違う社員IDの行を1行にまとめ、半角にそろえる（回答で使われている書き方を残す）: {[e.emp_id for e in rows]}")
         check(rows[0].active is False and rows[0].name == "正しい 名前", "P6: まとめるとき、どれかが対象外なら対象外のまま、氏名はいちばん確かなものを残す")
+        st_q = app_module.member_stats([r for r in app_module.member_rows() if r["emp"].emp_id == "Q001"], ["2004-03", "2004-04"])
+        check(rows[0].excluded_at == datetime(2004, 4, 1) and (st_q["2004-03"]["members"], st_q["2004-03"]["answered"], st_q["2004-04"]["members"]) == (1, 1, 0),
+              f"R3-6: 日付のない対象外は起動時に更新日（なければ起動した日）で対象外にした日を埋め、それより前の月は回答率に入れたまま: {rows[0].excluded_at} {st_q}")
         check(rows[0].created_at == datetime(2004, 3, 9) and rows[1].created_at == datetime(2004, 7, 1),
               f"P8: 起動時に employees へ載った日（created_at）を足し、最初の月次の回答・最初の業務・更新日の早いほうで埋める: {[e.created_at for e in rows]}")
         resp = Respondent.query.filter(db.func.lower(Respondent.emp_id) == "q001").all()
@@ -2305,9 +2412,16 @@ def _survey_round2_checks(check):
     check(r.status_code == 400 and r.get_json()["errors"].get("workplace_id") == "職場を選んでください", "R2-13: 月次の送信は職場マスタにない職場を受け付けない")
     r = client.post("/survey/api/respondent", json={"emp_id": "S002", "workplace_id": 9999, "work_pattern": "普通勤務"})
     check(r.status_code == 400 and r.get_json()["errors"].get("workplace_id") == "職場を選んでください", "R2-13: 「あなたのこと」も職場マスタにない職場を受け付けない")
+    with client.session_transaction() as sess:
+        sess["monthly_last"] = old_id
     r = client.post("/monthly/submit", json={"period": cur, "emp_id": "S002", "workplace_id": "1", "work_pattern": "普通勤務",
                                              "answers": answers(wants_tasks=["日報・週報の集計", "佐藤さんへの報告"])})
     check(r.status_code == 200 and r.get_json()["wants_tasks"] == ["日報・週報の集計", "担当者への報告"], f"R2-14: 送信後に返す業務名も「・」で分けず、氏名を置き換える: {r.get_json().get('wants_tasks')}")
+    with client.session_transaction() as sess:
+        kept_last = "monthly_last" in sess
+    html_after_js = client.get(f"/monthly/done?period={cur}").data.decode("utf-8")
+    check(not kept_last and "自動化を検討する" not in html_after_js and "今月の業務" not in html_after_js,
+          "R3-9: 画面（JavaScript）からの月次の送信では完了ページの控え（monthly_last）を残さず、前の人の控えも消す（完了ページに前の人のリンクが出ない）")
     with app.app_context():
         pending = {p["name"] for p in app_module.pending_task_names(1)}
     check("日報・週報の集計" in pending and "担当者への報告" not in pending, f"R2-15: 業務マップの未登録の業務も、始めた月次の業務名を登録済みとみなす: {sorted(pending)}")
@@ -2362,6 +2476,18 @@ def _survey_round2_checks(check):
             t.verified, t.assignee, t.ecrs_combine, t.result_note, t.progress_note, t.after_minutes, t.steps_done, t.assignment = False, "", "", "", "", None, "", "未定"
             StageLog.query.filter_by(task_id=tid).delete()
             db.session.commit()
+    client.post("/login", data={"emp_id": "admin", "password": "adminpass"})
+    client.post(f"/cases/{tid}/update", data={"purpose": "日報の数字を課長会議で使うため"})
+    client.post("/logout")
+    client.post("/survey/api/respondent", json={"emp_id": "S003", "workplace_id": 1, "work_pattern": "普通勤務"})
+    r = client.delete(f"/survey/api/tasks/{tid}", json={"emp_id": "S003"})
+    with app.app_context():
+        t = db.session.get(Task, tid)
+        info_refused = (r.status_code == 409 and t is not None and t.purpose == "日報の数字を課長会議で使うため" and bool(t.ai_extra_dict.get("info_edited_at"))
+                        and app_module._task_json(t)["can_delete"] is False and t.stage_key == "start" and not t.stage_logs)
+        t.ai_extra = json.dumps({k: v for k, v in t.ai_extra_dict.items() if k != "info_edited_at"}, ensure_ascii=False)
+        db.session.commit()
+    check(info_refused, "R3-11: 改善チームが案件詳細の業務情報（目的など）を直して保存した案件は、開始のままでも本人は取り消せない")
     r = client.delete(f"/survey/api/tasks/{tid}", json={"emp_id": "S003"})
     check(all(ok for _, ok in refused) and r.status_code == 200, f"R2-16: 開始の段階でも改善チームが手を付けた案件（確認・担当者・ECRSメモ・改善内容・ひとこと・段階の記録など）は本人が取り消せない: {refused}")
 
@@ -2804,6 +2930,30 @@ def smoke_ai():
         html = r.data.decode("utf-8")
         check("AI分析を更新しました（ChatGPT API）" in html and "前回の AI 分析" not in html and "改善後の流れ（AI案）" in html and '<span class="badge badge-flag">AI</span>' in html,
               "AI で再分析し直すと、改善案はいまの分析の案に戻る（前回の印は消え、関連業務は AI の印）")
+        with app.app_context():
+            t_ai = db.session.get(Task, task_id)
+            before = (t_ai.ai_summary, t_ai.ai_at, t_ai.ai_priority, t_ai.ai_source)
+            stamp = t_ai.ai_at.strftime("%Y/%m/%d %H:%M")
+        n_calls = len(calls)
+        r = client.post(f"/cases/{task_id}/update", data={"purpose": "週の生産状況を部長会議で共有するため（テスト）"}, follow_redirects=True)
+        html = r.data.decode("utf-8")
+        with app.app_context():
+            t_ai = db.session.get(Task, task_id)
+            after = (t_ai.ai_summary, t_ai.ai_at, t_ai.ai_priority, t_ai.ai_source)
+            stale, edited = t_ai.ai_stale_note, t_ai.ai_extra_dict.get("info_edited_at")
+        check(len(calls) == n_calls and after == before and stale == f"業務情報を直す前の AI 分析（{stamp}）" and edited
+              and "業務情報を直しました。AI 分析を新しくするには「再分析」を押してください" in html and f'<span class="badge text-bg-light border">{stale}</span>' in html and ">ChatGPT API</span>" in html,
+              f"R3-10: 業務情報を直して保存しても AI の分析はそのまま残し（AI は呼ばない）、「業務情報を直す前の AI 分析（日時）」の印と「再分析」を促す知らせを出す: {stale}")
+        csv_text = client.get("/cases/export.csv").data.decode("utf-8-sig")
+        check(f"［{stale}］テスト要約" in csv_text, "R3-10: 案件CSVの AI要約にも「業務情報を直す前の AI 分析（日時）」の印を付ける")
+        script.append(message(ai_json))
+        r = client.post(f"/cases/{task_id}/reanalyze", follow_redirects=True)
+        html = r.data.decode("utf-8")
+        with app.app_context():
+            t_ai = db.session.get(Task, task_id)
+            still_edited, stale_after = t_ai.ai_extra_dict.get("info_edited_at"), t_ai.ai_stale_note
+        check("AI分析を更新しました（ChatGPT API）" in html and "業務情報を直す前の AI 分析" not in html and stale_after == "" and still_edited == edited,
+              "R3-10・R3-11: 再分析すると印は消える（改善チームが業務情報を直した印は残す）")
         script.append(message(json.dumps([{"kind": "調査", "title": "テスト提案のタイトル", "detail": "根拠 12 件"}], ensure_ascii=False)))
         r = client.post("/ai/suggest", follow_redirects=True)
         html = r.data.decode("utf-8")
