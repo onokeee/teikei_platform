@@ -734,6 +734,63 @@ def ensure_schema():
     if changed:
         db.session.commit()
 
+# ----- 番号の払い出し（業務・職場・領域の番号は使い回さない。消した行の手修正が新しい行に付かないように） -----
+ID_SEQ_TABLES = (("tasks", Task), ("workplaces", Workplace), ("domains", Domain))
+
+
+def _id_seq_key(table):
+    return f"id_seq:{table}"
+
+def _assign_id(mapper, connection, target):
+    if target.id is not None:
+        return
+    from sqlalchemy import text
+
+    table, key = mapper.local_table.name, _id_seq_key(mapper.local_table.name)
+    connection.execute(text("INSERT OR IGNORE INTO settings (key, value) VALUES (:k, '0')"), {"k": key})
+    connection.execute(text(f"UPDATE settings SET value = CAST(MAX(CAST(value AS INTEGER), (SELECT COALESCE(MAX(id), 0) FROM {table})) + 1 AS TEXT) WHERE key = :k"), {"k": key})
+    target.id = int(connection.execute(text("SELECT value FROM settings WHERE key = :k"), {"k": key}).scalar())
+
+for _table, _model in ID_SEQ_TABLES:
+    db.event.listen(_model, "before_insert", _assign_id)
+
+def _referenced_ids():
+    top = {table: 0 for table, _ in ID_SEQ_TABLES}
+    for scope, data in db.session.query(FlowMap.scope, FlowMap.data).all():
+        m = re.match(r"wp:(\d+)\|dom:(\d+)", scope or "")
+        if m:
+            top["workplaces"], top["domains"] = max(top["workplaces"], int(m.group(1))), max(top["domains"], int(m.group(2)))
+        graph = _json_column(data, {})
+        graph = graph if isinstance(graph, dict) else {}
+        refs = [str(x) for x in (graph.get("suppressed_nodes") or [])]
+        refs += [part for x in (graph.get("suppressed_edges") or []) for part in str(x).split("->")]
+        for n in graph.get("nodes") or []:
+            if isinstance(n, dict):
+                refs.append(str(n.get("id") or ""))
+                wp_ref = re.fullmatch(r"wp(\d+)", str(n.get("group") or ""))
+                if wp_ref:
+                    top["workplaces"] = max(top["workplaces"], int(wp_ref.group(1)))
+        for e in graph.get("edges") or []:
+            if isinstance(e, dict):
+                refs += [str(e.get("from") or ""), str(e.get("to") or "")]
+        for ref in refs:
+            if re.fullmatch(r"[to]\d+", ref):
+                top["tasks"] = max(top["tasks"], int(ref[1:]))
+    for ids in _map_written().values():
+        for tid in ids if isinstance(ids, dict) else {}:
+            if str(tid).isdigit():
+                top["tasks"] = max(top["tasks"], int(tid))
+    return top
+
+def init_id_seq():
+    refs = _referenced_ids()
+    for table, model in ID_SEQ_TABLES:
+        stored = Setting.get(_id_seq_key(table), "0")
+        top = max(int(stored) if str(stored).isdigit() else 0, db.session.query(db.func.max(model.id)).scalar() or 0, refs[table])
+        if str(top) != stored:
+            Setting.set(_id_seq_key(table), str(top))
+    db.session.commit()
+
 # ===== 社員ID照会の控え（ldap_auth の結果を employees に残し、足りない氏名・職場を補う） =====
 ldap_status_text = ldap_auth.status_text
 
@@ -1731,13 +1788,17 @@ SHAPES = {
     "cyl": ('[("', '")]'),
 }
 CLS_LABELS = OrderedDict([
-    ("task", "登録済みの業務"), ("done", "完了した業務"), ("work", "他の人・部署の作業"), ("pending", "未登録の業務（月次）"), ("warn", "使う人が分からない"),
+    ("task", "登録済みの業務"), ("done", "完了した業務"), ("hold", "保留中の業務"), ("abolished", "廃止した業務"), ("work", "他の人・部署の作業"), ("pending", "未登録の業務（月次）"), ("warn", "使う人が分からない"),
     ("source", "取り出し元の情報"), ("output", "できるもの"), ("dupout", "同じできるもの（統合候補）"),
 ])
-CLS_TYPE = {"task": "work", "done": "work", "work": "work", "pending": "work", "warn": "work", "source": "info", "output": "info", "dupout": "info"}
+CLS_TYPE = {"task": "work", "done": "work", "hold": "work", "abolished": "work", "work": "work", "pending": "work", "warn": "work", "source": "info", "output": "info", "dupout": "info"}
+TASK_CLASSES = ("task", "done", "hold", "abolished")
+STATUS_MARKS = {"hold": "（保留）", "abolished": "（廃止済み）"}
 CLASS_DEFS = [
     "classDef task fill:#e7f1ff,stroke:#0d6efd,color:#052c65",
     "classDef done fill:#d1e7dd,stroke:#198754,color:#0f5132",
+    "classDef hold fill:#e7f1ff,stroke:#0d6efd,color:#052c65,stroke-dasharray:5 4",
+    "classDef abolished fill:#f1f3f5,stroke:#ced4da,color:#adb5bd",
     "classDef work fill:#ffffff,stroke:#6c757d,color:#343a40",
     "classDef pending fill:#f8f9fa,stroke:#adb5bd,color:#6c757d,stroke-dasharray:4 3",
     "classDef warn fill:#f8d7da,stroke:#dc3545,color:#842029",
@@ -1820,7 +1881,7 @@ def node_icon(n):
     cls = n.get("cls")
     if cls == "done":
         return "bi-check-circle-fill", "done"
-    if cls == "task":
+    if cls in ("task", "hold", "abolished"):
         return "", ""
     if cls == "pending":
         return "bi-hourglass-split", "pending"
@@ -1836,7 +1897,7 @@ def show_who(n):
 def node_label(n):
     icon, mark = node_icon(n)
     head = f"<i class='bi {icon} fi {mark}'></i> " if icon else ""
-    body = wrap(n["text"], n.get("width") or 14)
+    body = wrap(n["text"] + STATUS_MARKS.get(n.get("cls"), ""), n.get("width") or 14)
     if show_who(n):
         return head + "<b>" + esc(n["who"]) + "</b><br/>" + body
     return head + body
@@ -1903,7 +1964,7 @@ class Diagram:
 
     def derive_roles(self):
         """情報の箱の色を線の向きから決める（登録済みの業務が作る＝できるもの、それ以外＝取り出し元）"""
-        made = {b for (a, b), e in self.edges.items() if e["type"] == "info" and self.nodes.get(a, {}).get("cls") in ("task", "done")}
+        made = {b for (a, b), e in self.edges.items() if e["type"] == "info" and self.nodes.get(a, {}).get("cls") in TASK_CLASSES}
         for i, n in self.nodes.items():
             if n["type"] == "info" and n["cls"] in ("source", "output"):
                 n["cls"] = "output" if i in made else "source"
@@ -2081,7 +2142,13 @@ def _same_box(a, b):
     return normalize_text(a.get("text")) == normalize_text(b.get("text")) and normalize_text(a.get("who")) == normalize_text(b.get("who"))
 
 def _ghost_twin(sn, nodes, saved_edges, auto_edges):
-    """手で足した箱・昔の箱が、再生成した自動の箱と同じものか。名前とだれが同じ、またはだれが同じで同じ業務から渡されている"""
+    """手で足した箱・昔の箱が、再生成した自動の箱と同じものか。名前とだれが同じ、またはだれが同じ（「課長」は渡す業務の職場名つきでも比べる）で同じ業務から渡されている。
+    未登録の業務は、同じ職場で登録された同じ名前の業務"""
+    if sn.get("cls") == "pending":
+        vocab = map_vocab()
+        key = pending_key(_pending_name(sn.get("text")), vocab)
+        return next((x for x in nodes if x.get("source") == "auto" and x.get("cls") in TASK_CLASSES and x.get("group") == sn.get("group")
+                     and key in {pending_key(v, vocab) for v in [x.get("text")] + task_aliases(_task_id_of(x["id"]))}), None) if key else None
     twin = next((x for x in nodes if x.get("source") == "auto" and _same_box(x, sn)), None)
     if twin is not None or sn.get("type") != "work" or not normalize_text(sn.get("who")):
         return twin
@@ -2089,8 +2156,10 @@ def _ghost_twin(sn, nodes, saved_edges, auto_edges):
     tids = {_task_id_of(f) for f in feeders if _task_id_of(f)}
     feeders |= {f"t{i}" for i in tids} | {f"o{i}" for i in tids}
     fed = {e["to"] for e in auto_edges if e["from"] in feeders}
+    own = {x.get("who") for x in nodes if x["id"] in {f"t{i}" for i in tids} and x.get("who")}
+    whos = {normalize_text(sn.get("who"))} | {normalize_text(recipient_who(sn.get("who"), wp)["label"]) for wp in own}
     return next((x for x in nodes if x.get("source") == "auto" and x.get("type") == "work" and x["id"] in fed
-                 and normalize_text(x.get("who")) == normalize_text(sn.get("who"))), None)
+                 and normalize_text(x.get("who")) in whos), None)
 
 def merge_graph(auto, saved):
     result = {
@@ -2116,7 +2185,7 @@ def merge_graph(auto, saved):
         sn = s_nodes.get(n["id"])
         if sn:
             m["x"], m["y"], m["color"] = sn.get("x"), sn.get("y"), sn.get("color")
-            if sn.get("text_edited") and sn.get("text"):
+            if sn.get("text_edited") and sn.get("text") and sn["text"].strip() != (m.get("text") or "").strip():
                 m["text"] = sn["text"]
                 m["text_edited"] = True
                 if m["type"] == "info" and not sn.get("medium_edited"):
@@ -2144,7 +2213,7 @@ def merge_graph(auto, saved):
             return False
         redirect[sn["id"]] = twin["id"]
         text = (sn.get("text") or "").strip()
-        if twin["type"] == "work" and text and text not in PLACEHOLDER_TEXTS and normalize_text(text) != normalize_text(sn.get("who")) and not twin.get("text_edited"):
+        if twin["cls"] == "work" and text and text not in PLACEHOLDER_TEXTS and normalize_text(text) != normalize_text(sn.get("who")) and not twin.get("text_edited"):
             twin["text"], twin["text_edited"] = text, True
         return True
 
@@ -2193,10 +2262,17 @@ def merge_graph(auto, saved):
         edges.append(m)
         seen.add(e["id"])
     pairs = {(e["from"], e["to"]) for e in edges}
+    fed = defaultdict(set)
+    for e in edges:
+        if _task_id_of(e["from"]):
+            fed[_task_id_of(e["from"])].add(e["to"])
     for se in saved.get("edges", []):
         if se.get("source") != "manual" or se.get("id") in seen:
             continue
         a, b = redirect.get(se.get("from"), se.get("from")), redirect.get(se.get("to"), se.get("to"))
+        tid = _task_id_of(a)
+        if tid and b in by_id and by_id[b].get("source") == "auto" and by_id[b].get("cls") == "work" and b not in fed[tid] and normalize_text(by_id[b].get("who")):
+            b = next((x for x in fed[tid] if by_id.get(x, {}).get("cls") == "work" and normalize_text(by_id[x].get("who")) == normalize_text(by_id[b].get("who"))), b)
         if a not in node_ids or b not in node_ids or a == b or (a, b) in pairs:
             continue
         m = dict(se, id=f"{a}->{b}", auto_method="", auto_show_method=False, auto_handoff="", **{"from": a, "to": b})
@@ -2226,6 +2302,8 @@ def _key(v):
 def sanitize_graph(data):
     if not isinstance(data, dict):
         raise ValueError("graph must be an object")
+    vocab = map_vocab()
+    mask = lambda v: mask_person_names(str(v or ""), vocab)
     nodes, edges = [], []
     for n in (data.get("nodes") or [])[:2000]:
         if not isinstance(n, dict) or not n.get("id"):
@@ -2233,9 +2311,9 @@ def sanitize_graph(data):
         ntype = _node_type(n)
         nodes.append(
             {
-                "id": str(n["id"])[:80], "text": str(n.get("text") or "")[:200], "type": ntype,
+                "id": str(n["id"])[:80], "text": mask(n.get("text"))[:200], "type": ntype,
                 "cls": _cls_for(n.get("cls"), ntype),
-                "medium": _key(n.get("medium")), "actor": _key(n.get("actor")), "who": str(n.get("who") or "")[:100],
+                "medium": _key(n.get("medium")), "actor": _key(n.get("actor")), "who": mask(n.get("who"))[:100],
                 "who_state": n.get("who_state") if n.get("who_state") in ("ok", "unconfirmed", "unknown") else "",
                 "hint": _key(n.get("hint")) or None, "group": n.get("group"), "group_title": n.get("group_title"),
                 "url": n.get("url"), "source": "manual" if n.get("source") == "manual" else "auto",
@@ -2252,7 +2330,7 @@ def sanitize_graph(data):
                 "id": str(e.get("id") or f"{e['from']}->{e['to']}")[:170], "from": str(e["from"])[:80], "to": str(e["to"])[:80],
                 "type": e.get("type") if e.get("type") in ("work", "info") else "info", "method": _key(e.get("method")),
                 "handoff": e.get("handoff") if e.get("handoff") in ("push", "pull", "none") else "", "show_method": bool(e.get("show_method")),
-                "inferred": bool(e.get("inferred")), "label": str(e.get("label") or "")[:120], "source": "manual" if e.get("source") == "manual" else "auto",
+                "inferred": bool(e.get("inferred")), "label": mask(e.get("label"))[:120], "source": "manual" if e.get("source") == "manual" else "auto",
                 "reversed": bool(e.get("reversed")), "label_edited": bool(e.get("label_edited")),
                 "method_edited": bool(e.get("method_edited")), "handoff_edited": bool(e.get("handoff_edited")),
             }
@@ -2281,10 +2359,6 @@ def _pending_name(text):
     """未登録の業務の箱の名前から「（2人）」を外す"""
     return re.sub(r"[（(]\d+人[）)]\s*$", "", (text or "").strip()).strip()
 
-def _contains(text, value):
-    nt, nv = normalize_text(text), normalize_text(value)
-    return bool(nv) and nv in nt
-
 def append_text(existing, value):
     existing = (existing or "").strip()
     value = (value or "").strip()
@@ -2292,18 +2366,59 @@ def append_text(existing, value):
         return existing
     if not existing:
         return value
-    if _contains(existing, value):
+    if any(normalize_text(p) == normalize_text(value) for p in task_names(existing) + _names(existing)):
         return existing
     return existing + "、" + value
 
-def remove_text(existing, value):
+def remove_text(existing, value, exact=False):
     existing = (existing or "").strip()
     value = (value or "").strip()
     if not existing or not value:
         return existing
-    parts = [p.strip() for p in re.split(r"[、,，/／\n;；]+", existing) if p.strip()]
-    kept = [p for p in parts if not (_contains(p, value) or _contains(value, p))]
-    return "、".join(kept)
+    parts = task_names(existing)
+    kept = [p for p in parts if not (pending_key(p) == pending_key(value) if exact else _mentions(p, value))]
+    return existing if len(kept) == len(parts) else "、".join(kept)
+
+def rename_text(existing, old, new):
+    parts, out = task_names(existing), []
+    for p in parts:
+        if _mentions(p, old):
+            p = p.replace(old, new) if old in p and normalize_text(p) != normalize_text(old) else new
+        if p not in out:
+            out.append(p)
+    return (existing or "").strip() if out == parts else "、".join(out)
+
+MAP_WRITTEN_KEY = "map_written"
+
+
+def _map_written():
+    if has_request_context() and "map_written" in g:
+        return g.map_written
+    try:
+        data = _json_column(Setting.get(MAP_WRITTEN_KEY, ""), {})
+    except Exception:
+        data = {}
+    data = data if isinstance(data, dict) else {}
+    if has_request_context():
+        g.map_written = data
+    return data
+
+def remember_written(kind, task_id, value):
+    data = _map_written()
+    names = data.setdefault(kind, {}).setdefault(str(task_id), [])
+    if value and value not in names:
+        names.append(value)
+        Setting.set(MAP_WRITTEN_KEY, json.dumps(data, ensure_ascii=False))
+
+def task_aliases(task_id):
+    return list((_map_written().get("names") or {}).get(str(task_id)) or []) if task_id else []
+
+def written_sources(t, info_from=None):
+    names = (_map_written().get("sources") or {}).get(str(t.id)) if t is not None and t.id else None
+    if not names:
+        return set()
+    text = t.info_from if info_from is None else info_from
+    return {normalize_text(v) for v in names} & {normalize_text(v) for v in task_names(text) + _names(text, dots=True)}
 
 def writeback_candidates(saved, tasks_by_id):
     cands = []
@@ -2325,11 +2440,17 @@ def writeback_candidates(saved, tasks_by_id):
     for n in saved.get("nodes", []):
         if n.get("text_edited") and str(n.get("id", "")).startswith("t"):
             t = task_of(n["id"])
-            if t and (n.get("text") or "").strip() and n["text"].strip() != t.name:
+            new = (n.get("text") or "").strip()
+            if t and new and new != t.name:
+                refs = [(o, f) for o in tasks_by_id.values() if o.id != t.id for f in ("prev_task", "next_task") if mentions_task(getattr(o, f), t.name)]
+                text = f"業務名「{t.name}」を「{new}」に変更"
+                if refs:
+                    text += "（" + "、".join(dict.fromkeys(f"「{o.name}」" for o, _ in refs)) + f"の前後の業務に書いた「{t.name}」も直す）"
                 cands.append(
                     {
-                        "id": f"rename:{t.id}", "task_id": t.id, "text": f"業務名「{t.name}」を「{n['text'].strip()}」に変更",
-                        "ops": [{"task_id": t.id, "field": "name", "action": "set", "value": n["text"].strip()}],
+                        "id": f"rename:{t.id}", "task_id": t.id, "text": text,
+                        "ops": [{"task_id": t.id, "field": "name", "action": "set", "value": new, "old": t.name}]
+                               + [{"task_id": o.id, "field": f, "action": "rename", "old": t.name, "value": new} for o, f in refs],
                     }
                 )
 
@@ -2345,15 +2466,15 @@ def writeback_candidates(saved, tasks_by_id):
                     "id": f"seq:{ta.id}:{tb.id}", "task_id": ta.id,
                     "text": f"「{ta.name}」の後の業務に「{tb.name}」、「{tb.name}」の前の業務に「{ta.name}」を追加",
                     "ops": [
-                        {"task_id": ta.id, "field": "next_task", "action": "append", "value": tb.name},
-                        {"task_id": tb.id, "field": "prev_task", "action": "append", "value": ta.name},
+                        {"task_id": ta.id, "field": "next_task", "action": "append", "value": tb.name, "name_of": tb.id},
+                        {"task_id": tb.id, "field": "prev_task", "action": "append", "value": ta.name, "name_of": ta.id},
                     ],
                 }
             )
         elif tb and not ta and b.startswith("t"):
             src = text_of(a)
             if na.get("type") == "info":
-                if not src or src in PLACEHOLDER_TEXTS:
+                if not src or src in PLACEHOLDER_TEXTS or src.endswith("（名前未確認）"):
                     continue
                 if src in C.SYSTEM_SOURCES:
                     cands.append({"id": f"input:{tb.id}:{a}", "task_id": tb.id, "text": f"「{tb.name}」の入力情報に「{src}」を追加",
@@ -2384,7 +2505,10 @@ def writeback_candidates(saved, tasks_by_id):
                     cands.append({"id": f"next:{ta.id}:{b}", "task_id": ta.id, "text": f"「{ta.name}」の後の業務に「{name}」を追加",
                                   "ops": [{"task_id": ta.id, "field": "next_task", "action": "append", "value": name}]})
             elif who:
-                user = actor_user(nb.get("actor")) if nb.get("who_state") == "ok" else ""
+                actor = nb.get("actor") or ""
+                user = actor_user(actor) if nb.get("who_state") == "ok" else ""
+                if nb.get("actor_locked") and actor != "unknown" and vocab_row("actors", actor) and recipient_who(who, _own_wp(ta))["actor"] != actor:
+                    who = f"{who}（{actor_user(actor) or vocab_label('actors', actor)}）"
                 ops = [{"task_id": ta.id, "field": "output_users_note", "action": "append", "value": who}]
                 if user and user != "分からない":
                     ops.append({"task_id": ta.id, "field": "output_users", "action": "add_list", "value": user})
@@ -2398,18 +2522,26 @@ def writeback_candidates(saved, tasks_by_id):
             continue
         a, b = str(eid).split("->", 1)
         ta, tb = task_of(a), task_of(b)
-        if ta and tb and a.startswith("t") and b.startswith("t"):
-            if _contains(ta.next_task, tb.name) or _contains(tb.prev_task, ta.name):
+        if ta and tb and ta.id != tb.id and a.startswith("t") and b.startswith("t"):
+            if mentions_task(ta.next_task, tb.name) or mentions_task(tb.prev_task, ta.name):
                 cands.append(
                     {
                         "id": f"unseq:{ta.id}:{tb.id}", "task_id": ta.id,
                         "text": f"「{ta.name}」の後の業務から「{tb.name}」、「{tb.name}」の前の業務から「{ta.name}」を外す",
                         "ops": [
-                            {"task_id": ta.id, "field": "next_task", "action": "remove", "value": tb.name},
-                            {"task_id": tb.id, "field": "prev_task", "action": "remove", "value": ta.name},
+                            {"task_id": ta.id, "field": "next_task", "action": "remove", "value": tb.name, "name_of": tb.id},
+                            {"task_id": tb.id, "field": "prev_task", "action": "remove", "value": ta.name, "name_of": ta.id},
                         ],
                     }
                 )
+        elif ta and a.startswith("t") and node_of(b).get("cls") == "pending" and _pending_name(text_of(b)):
+            name = _pending_name(text_of(b))
+            cands.append({"id": f"unnext:{ta.id}:{b}", "task_id": ta.id, "text": f"「{ta.name}」の後の業務から「{name}」を外す",
+                          "ops": [{"task_id": ta.id, "field": "next_task", "action": "remove", "value": name, "exact": True}]})
+        elif tb and b.startswith("t") and node_of(a).get("cls") == "pending" and _pending_name(text_of(a)):
+            name = _pending_name(text_of(a))
+            cands.append({"id": f"unprev:{tb.id}:{a}", "task_id": tb.id, "text": f"「{tb.name}」の前の業務から「{name}」を外す",
+                          "ops": [{"task_id": tb.id, "field": "prev_task", "action": "remove", "value": name, "exact": True}]})
 
     return [c for c in cands if any(_op_change(op, tasks_by_id) for op in c["ops"])]
 
@@ -2417,26 +2549,33 @@ WRITEBACK_FIELDS = {"name", "next_task", "prev_task", "inputs", "info_from", "ac
 
 
 def _op_change(op, tasks_by_id):
-    """書き戻しの1操作で変わる (業務, 新しい値)。業務がない・対象外の項目・値が変わらないなら None"""
+    """書き戻しの1操作で変わる (業務, 新しい値)。業務がない・対象外の項目・値が変わらないなら None（受け取り元は、書き戻した印がまだなければ変わるものとする）"""
     t = tasks_by_id.get(op["task_id"])
     if t is None or op["field"] not in WRITEBACK_FIELDS:
         return None
+    if op.get("name_of") in tasks_by_id:
+        op = dict(op, value=tasks_by_id[op["name_of"]].name)
     current = getattr(t, op["field"]) or ""
     new = _new_value(current, op)
-    return (t, new) if new != current else None
+    if new != current or (op["field"] == "info_from" and normalize_text(mask_person_names(op["value"])) not in written_sources(t, new)):
+        return t, new
+    return None
 
 def _new_value(current, op):
     action = op["action"]
+    value = op["value"] if action in ("remove", "add_list") else mask_person_names(op["value"])
     if action == "set":
-        return op["value"]
+        return value
     if action == "append":
-        return append_text(current, op["value"])
+        return append_text(current, value)
     if action == "remove":
-        return remove_text(current, op["value"])
+        return remove_text(current, value, op.get("exact"))
+    if action == "rename":
+        return rename_text(current, op["old"], value)
     if action == "add_list":
         items = C.split_list(current)
-        if op["value"] not in items:
-            items.append(op["value"])
+        if value not in items:
+            items.append(value)
         return C.join_list(items)
     return current
 
@@ -2450,6 +2589,10 @@ def apply_writeback(candidates, selected_ids, tasks_by_id):
             if change:
                 setattr(change[0], op["field"], change[1])
                 applied += 1
+                if op["field"] == "info_from":
+                    remember_written("sources", op["task_id"], mask_person_names(op["value"]))
+                elif op["field"] == "name" and op.get("old"):
+                    remember_written("names", op["task_id"], op["old"])
     return applied
 
 # ----- 共通 -----
@@ -2462,24 +2605,47 @@ def _wp_key(t):
 def _own_wp(t):
     return t.workplace.name if t is not None and t.workplace else ""
 
+def task_cls(t):
+    if t.status == "完了":
+        return "abolished" if t.decision == "廃止" else "done"
+    return "hold" if t.status == "保留" else "task"
+
 def _task_node(d, t):
     tid = f"t{t.id}"
-    d.node(tid, t.name, "done" if t.status == "完了" else "task", subgraph=(_wp_key(t), _wp_name(t)),
+    d.node(tid, t.name, task_cls(t), subgraph=(_wp_key(t), _wp_name(t)),
            who={"actor": "team", "label": _own_wp(t), "state": "ok"})
     d.click(tid, url_for("cases.detail", task_id=t.id), "案件詳細を開く")
     return tid
 
+_TASK_NAMES_RX = re.compile(r"[\n、,，]+")
+
+
+def task_names(text):
+    out = []
+    for part in _TASK_NAMES_RX.split(text or ""):
+        part = part.strip()
+        if part and part not in out:
+            out.append(part)
+    return out
+
+def name_key(name):
+    return normalize_text(unicodedata.normalize("NFKC", str(name or "")))
+
+def pending_key(name, vocab=None):
+    return name_key(mask_person_names(name, vocab))
+
+def _mentions(part, name):
+    np_, nn = normalize_text(part), normalize_text(name)
+    return len(np_) >= 2 and len(nn) >= 3 and (nn in np_ or (len(np_) >= 4 and np_ in nn))
+
+def mentions_task(text, name):
+    return any(_mentions(p, name) for p in task_names(text))
+
 def _match_tasks(text, tasks, exclude=None, limit=3):
-    nt = normalize_text(text)
-    if len(nt) < 2:
-        return []
     hits = []
     for t in tasks:
-        if t is exclude:
-            continue
-        nn = normalize_text(t.name)
-        if len(nn) >= 3 and (nn in nt or (len(nt) >= 4 and nt in nn)):
-            hits.append((len(nn), t))
+        if t is not exclude and mentions_task(text, t.name):
+            hits.append((len(normalize_text(t.name)), t))
     hits.sort(key=lambda x: -x[0])
     return [t for _, t in hits[:limit]]
 
@@ -2488,18 +2654,32 @@ MAX_PENDING = 40
 
 
 def _names(value, dots=False):
-    """「、」「／」などで区切った名前。dots=True なら「A・B」も分ける（職場名の「・」は分けない）"""
+    """「、」「／」などで区切った名前。dots=True なら「A・B」も分ける（かっこの中と職場名の「・」は分けない）"""
     names = [v.strip() for v in _SPLIT_NAMES_RX.split(value or "") if v.strip()]
     if not dots:
         return names
     out = []
     for v in names:
-        parts = [p.strip() for p in v.split("・")]
+        parts = [p.strip() for p in _split_dots(v)]
         if len(parts) > 1 and all(len(p) >= 2 for p in parts) and not any(vnorm(found) in vnorm(v) and "・" in found for found, _ in _workplace_names()):
             out.extend(parts)
         else:
             out.append(v)
     return out
+
+def _split_dots(text):
+    parts, cur, depth = [], "", 0
+    for ch in text:
+        if ch in "（(「『【［[":
+            depth += 1
+        elif ch in "）)」』】］]":
+            depth = max(depth - 1, 0)
+        if ch == "・" and depth == 0:
+            parts.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    return parts + [cur]
 
 def same_name(a, b, min_len=3):
     na, nb = normalize_text(a), normalize_text(b)
@@ -2516,14 +2696,6 @@ def _parts(name):
 def same_thing(a, b):
     pa, pb = _parts(a), _parts(b)
     return same_name(a, b) or bool(pa and pb and (pa <= pb or pb <= pa))
-
-def _bigrams(text):
-    t = normalize_text(text)
-    return {t[i:i + 2] for i in range(len(t) - 1)}
-
-def similar_name(a, b):
-    ga, gb = _bigrams(a), _bigrams(b)
-    return same_name(a, b) or (min(len(ga), len(gb)) >= 3 and len(ga & gb) / min(len(ga), len(gb)) >= 0.7)
 
 def _is_destination(system, action):
     action = action or ""
@@ -2543,18 +2715,23 @@ def _task_outputs(t, steps):
     return [m for m in [x.get("output") or "" for x in steps] + [t.output or ""] if m.strip()]
 
 def task_sources(t):
-    """業務の取り出し元 [{name, hint, method, shared}]。手順 → 具体名 → 受け取り元 → 区分の順に見て、同じものは1つにまとめる"""
+    """業務の取り出し元 [{name, hint, method, shared, fixed}]。手順 → 具体名 → 受け取り元 → 区分の順に見て、同じものは1つにまとめる。
+    業務マップから書き戻した受け取り元（fixed）は、言い換えとしてまとめたり省いたりせず必ず描く（同じもの＝same_thing のときだけ1つにする）"""
     items = []
+    written = written_sources(t)
 
-    def add(name, hint=None, method="", shared=True, exact=False):
+    def add(name, hint=None, method="", shared=True, exact=False, fixed=False):
         name = (name or "").strip()
         if not name:
             return
         for it in items:
-            if normalize_text(name) == normalize_text(it["name"]) or (not exact and it["name"] not in C.SYSTEM_SOURCES and same_name(name, it["name"], 2)):
+            same = normalize_text(name) == normalize_text(it["name"])
+            if not same and not exact and it["name"] not in C.SYSTEM_SOURCES:
+                same = same_thing(name, it["name"]) if fixed or it["fixed"] else same_name(name, it["name"], 2)
+            if same:
                 it["method"] = it["method"] or method
                 return
-        items.append({"name": name, "hint": hint, "method": method or "", "shared": shared})
+        items.append({"name": name, "hint": hint, "method": method or "", "shared": shared, "fixed": fixed})
 
     steps = t.steps
     made = _task_outputs(t, steps)
@@ -2595,11 +2772,13 @@ def task_sources(t):
         m = method_of(v)
         return m if m and vocab_row("methods", m)["kind"] == "channel" else ""
 
-    for v in _names(specific, dots=True):
-        row = category_of(v)
-        hint = row[0] if row else None
-        if not named or medium_of(v, hint) not in kinds():
-            add(v, hint=hint, method=(row[1] if row and row[1] else "") or channel_of(v))
+    for part in task_names(specific):
+        for v in ([part] if normalize_text(part) in written else _names(part, dots=True)):
+            row = category_of(v)
+            hint = row[0] if row else None
+            fixed = normalize_text(v) in written
+            if fixed or not named or medium_of(v, hint) not in kinds():
+                add(v, hint=hint, method=(row[1] if row and row[1] else "") or channel_of(v), fixed=fixed)
     for c in cats:
         if c in C.SYSTEM_SOURCES:
             add(c, method="system", exact=True)
@@ -2626,18 +2805,23 @@ def task_destinations(t):
     return out
 
 def task_recipients(t):
-    """渡す相手 [{name, how, use}]。手順の to と利用者の具体名を、1人・1部署ずつ"""
-    out = []
+    """渡す相手 [{name, how, use, who, step}]。手順の to と利用者の具体名を、1人・1部署ずつ。
+    だれ（職場名つきの名前）が同じものだけ1つにする（「課長」と「製造1課 課長」は同じ、「検査・品質保証課 課長」は別）"""
+    own, out, vocab = _own_wp(t), [], map_vocab()
 
-    def add(name, how="", use=""):
+    def add(name, how="", use="", step=False):
         name = (name or "").strip()
         if not name:
             return
+        w = recipient_who(name, own, vocab)
+        key = normalize_text(w["label"] or name)
         for r in out:
-            if same_name(name, r["name"], 2):
+            if normalize_text(r["who"]["label"] or r["name"]) == key:
                 r["how"], r["use"] = r["how"] or how, r["use"] or use
+                if r["who"]["state"] == "unconfirmed" and w["state"] != "unconfirmed":
+                    r["who"] = w
                 return
-        out.append({"name": name, "how": how or "", "use": use or ""})
+        out.append({"name": name, "how": how or "", "use": use or "", "who": w, "step": step})
 
     for x in t.steps:
         to, system = (x.get("to") or "").strip(), (x.get("system") or "").strip()
@@ -2646,10 +2830,27 @@ def task_recipients(t):
         line = field_role(system) if system else ("box", "")
         how = method_of(x.get("how") or "") or (line[1] if line[0] == "line" else "")
         for n in _names(to):
-            add(n, how, (x.get("use") or "").strip())
+            add(n, how, (x.get("use") or "").strip(), step=True)
     for n in _names(t.output_users_note):
         add(n)
     return out
+
+def split_who_hint(name, vocab=None):
+    text = (name or "").strip()
+    for row in (vocab or map_vocab())["actors"]:
+        for word in dict.fromkeys(w for w in (row.get("label"), row.get("user")) if w):
+            for tail in (f"（{word}）", f"({word})"):
+                if text.endswith(tail) and len(text) > len(tail):
+                    return text[: -len(tail)].strip(), row["key"]
+    return text, ""
+
+def recipient_who(name, own_wp="", vocab=None):
+    vocab = vocab or map_vocab()
+    base, actor = split_who_hint(name, vocab)
+    w = who_of(base, own_wp, vocab)
+    if actor and actor != w["actor"]:
+        w = {"actor": actor, "label": w["label"] or base, "state": "unknown" if actor == "unknown" else "ok"}
+    return w
 
 def dept_in_text(text, own_wp="", actor="dept"):
     """業務の目的などの文から、相手の部署・社外の名前を探す（「翌日の残業人員を総務に伝えるため」→ 総務）。なければ空"""
@@ -2670,15 +2871,30 @@ def dept_in_text(text, own_wp="", actor="dept"):
     return word[:20] if len(word) >= 2 else ""
 
 def category_recipient(u, t):
-    """利用者の区分（アンケートの選択肢）しか分からない相手の (だれ, 業務ごとの箱にするなら業務ID)"""
+    """利用者の区分（アンケートの選択肢）しか分からない相手のだれ。他部署・社外は業務の目的の文から名前を探す"""
     own = _own_wp(t)
     w = category_who(u, own)
-    if not w:
-        return None, None
-    if w["actor"] in ("dept", "external"):
+    if w and w["actor"] in ("dept", "external"):
         found = dept_in_text(_purpose(t), own, w["actor"])
-        return (dict(w, label=found), None) if found else (w, t.id)
-    return w, (t.id if w["actor"] == "unknown" else None)
+        if found:
+            return dict(w, label=found)
+    return w
+
+def task_users(t):
+    named = task_recipients(t)
+    out, covered = [], set()
+    for r in named:
+        system = r["who"]["state"] == "unconfirmed" and medium_of(r["name"]) == "system"
+        out.append(dict(r, system=system, category=False))
+        if not system:
+            covered.add(actor_user(r["who"]["actor"]) if r["who"]["actor"] else "職場内")
+    if named:
+        covered.add("分からない")
+    for u in t.output_users_list:
+        w = category_recipient(u, t) if u != "自分" and u not in covered else None
+        if w:
+            out.append({"name": u, "how": "", "use": "", "who": w, "step": False, "system": False, "category": True})
+    return out
 
 def users_from_names(names, own_wp=""):
     """渡す相手の名前から、利用者の区分（職場内・上司・他部署・顧客・社外）を決める"""
@@ -2722,8 +2938,8 @@ def _wp_frame(name):
 
 def recipient_node(d, name, own_wp="", use="", frame=None, who=None, task_id=None):
     """渡す相手の箱。システムなら書き込み先の情報、それ以外は相手の作業（だれ＋使いみち）。(node_id, 'work'|'info')
-    task_id を渡すと業務ごとの箱にする（「他部署」「顧客・社外」「分からない」のような区分だけの相手）"""
-    w = who or who_of(name, own_wp)
+    task_id を渡すと、業務と答えた名前（区分だけの相手は区分）で箱の ID を決める（区分の語・目的・相手の数を変えても手修正が残るように）"""
+    w = who or recipient_who(name, own_wp)
     if w["state"] == "unconfirmed" and medium_of(name) == "system":
         return d.node(nid("s", name), name, "source", medium="system"), "info"
     if w["state"] == "unknown":
@@ -2734,30 +2950,20 @@ def recipient_node(d, name, own_wp="", use="", frame=None, who=None, task_id=Non
         inside = frame
     elif frame and w["actor"] == "dept":
         inside = next((_wp_frame(wp) for found, wp in _workplace_names() if found in w["label"]), None)
-    key = f"{w['label']}|{content}" if task_id is None else f"{task_id}:{w['label']}|{content}"
+    key = f"{w['label']}|{content}" if task_id is None else f"{task_id}:{name}"
     return d.node(nid("p", key), content, "work", subgraph=inside, who=w), "work"
 
 def task_user_nodes(d, t, frame=None):
-    """利用者の箱 [{id, type, how}]。具体名を優先し、区分（職場内・上司・他部署・社外・分からない）は具体名で表せないものだけ"""
+    """利用者の箱 [{id, type, how}]。具体名を優先し、区分（職場内・上司・他部署・社外・分からない）は具体名で表せないものだけ。箱は業務ごと"""
     own, purpose = _own_wp(t), _purpose(t)
-    named = task_recipients(t)
+    users = task_users(t)
+    named = [u for u in users if not u["category"]]
     cats = [u for u in t.output_users_list if u != "自分"]
-    out, covered = [], set()
-    for r in named:
-        node, typ = recipient_node(d, r["name"], own, r["use"] or (purpose if len(named) == 1 else ""), frame)
-        out.append({"id": node, "type": typ, "how": r["how"]})
-        if typ == "work":
-            covered.add(actor_user(d.nodes[node]["actor"]))
-    if named:
-        covered.add("分からない")
-    for u in cats:
-        if u in covered:
-            continue
-        w, per_task = category_recipient(u, t)
-        if not w:
-            continue
-        node, typ = recipient_node(d, w["label"], own, purpose if not named and len(cats) == 1 else "", frame, who=w, task_id=per_task)
-        out.append({"id": node, "type": typ, "how": ""})
+    out = []
+    for u in users:
+        use = (purpose if not named and len(cats) == 1 else "") if u["category"] else (u["use"] or (purpose if len(named) == 1 else ""))
+        node, typ = recipient_node(d, u["name"], own, use, frame, who=u["who"], task_id=t.id)
+        out.append({"id": node, "type": typ, "how": u["how"]})
     return out
 
 def _add_task_info(d, t, tid, outs=None, dups=None, frame=None):
@@ -2824,38 +3030,50 @@ def build_info_flow(tasks):
                     d.edge(f"o{t.id}", f"t{other.id}", "info", inferred=True)
     return d
 
+PENDING_MONTHS = 6
+
+
 def pending_task_names(workplace_id=None):
-    """月次アンケート（1-3・3-2）で挙がったが、まだ流れを登録していない業務名（職場ごと・最新の回答から）"""
+    """月次アンケート（1-3・3-2）で挙がったが、まだ流れを登録していない業務名。各人の最新の回答（6か月以内・対象外の人を除く）から、回答の職場ごとに。
+    名前は1行・「、」ごとに分け（「・」では分けない）、全角・半角と記号をそろえて完全に同じものだけを登録済みとみなす（「月報の作成」と「週報の作成」は別）"""
+    vocab = map_vocab()
+    since = shift_period(current_period(), 1 - PENDING_MONTHS)
+    excluded = {norm_emp_id(e.emp_id).lower() for e in Employee.query.filter(Employee.active.is_(False)).all()}
     latest = {}
-    for m in MonthlyResponse.query.order_by(MonthlyResponse.period, MonthlyResponse.id).all():
-        if workplace_id and m.workplace_id != workplace_id:
-            continue
+    for m in MonthlyResponse.query.filter(MonthlyResponse.period >= since).order_by(MonthlyResponse.period, MonthlyResponse.id).all():
         latest[norm_emp_id(m.emp_id).lower()] = m
-    registered = defaultdict(list)
+    registered = defaultdict(set)
     for t in Task.query.all():
-        registered[t.workplace_id].append(t.name)
+        registered[t.workplace_id] |= {pending_key(v, vocab) for v in [t.name] + task_aliases(t.id)}
     found = OrderedDict()
     for key, m in latest.items():
-        for name in _split_names(m.answer("task_names")) + _split_names(m.answer("wants_tasks")):
-            if len(normalize_text(name)) < 2 or any(similar_name(name, r) for r in registered[m.workplace_id]):
+        if key in excluded or (workplace_id and m.workplace_id != workplace_id):
+            continue
+        for raw in task_names(m.answer("task_names")) + task_names(m.answer("wants_tasks")):
+            name = mask_person_names(raw, vocab).strip()
+            k = name_key(name)
+            if len(k) < 2 or k in registered[m.workplace_id]:
                 continue
-            row = found.setdefault((m.workplace_id, normalize_text(name)), {"name": name, "workplace_id": m.workplace_id, "people": set()})
+            row = found.setdefault((m.workplace_id, k), {"name": name, "workplace_id": m.workplace_id, "people": set()})
             row["people"].add(key)
     return list(found.values())[:MAX_PENDING]
 
 def add_pending_tasks(d, workplace_id=None, tasks=()):
     names = {w.id: w.name for w in Workplace.query.all()}
-    for p in pending_task_names(workplace_id):
+    pending, vocab = pending_task_names(workplace_id), map_vocab()
+    links = {t.id: ({pending_key(v, vocab) for v in task_names(t.next_task)}, {pending_key(v, vocab) for v in task_names(t.prev_task)}) for t in tasks} if pending else {}
+    for p in pending:
         n = len(p["people"])
         wp = names.get(p["workplace_id"], "職場未設定")
         node = d.node(nid("u", f"{p['workplace_id']}:{p['name']}"), p["name"] + (f"（{n}人）" if n >= 2 else ""), "pending",
                       subgraph=(f"wp{p['workplace_id'] or 0}", wp), who={"actor": "team", "label": wp, "state": "ok"})
+        key = name_key(p["name"])
         for t in tasks:
             if t.workplace_id != p["workplace_id"]:
                 continue
-            if similar_name(p["name"], t.next_task):
+            if key in links[t.id][0]:
                 d.edge(f"t{t.id}", node, "work", inferred=True)
-            if similar_name(p["name"], t.prev_task):
+            if key in links[t.id][1]:
                 d.edge(node, f"t{t.id}", "work", inferred=True)
     return d
 
@@ -2866,28 +3084,19 @@ def handoff_rows(tasks):
         wp, own = _wp_name(t), _own_wp(t)
         inputs = t.inputs_list
         if (t.info_from or "").strip():
-            agg[(t.info_from.strip(), wp)]["info"] += 1
+            for v in _names(t.info_from, dots=True):
+                agg[(who_of(v, own)["label"] or v, wp)]["info"] += 1
         elif "人から聞く" in inputs:
             agg[("口頭での聞き取り", wp)]["info"] += 1
-        named = task_recipients(t)
-        covered = set()
-        for r in named:
-            w = who_of(r["name"], own)
-            covered.add(actor_user(w["actor"]))
-            if w["actor"] in ("team", "system") or w["state"] == "unconfirmed":
+        for u in task_users(t):
+            w = u["who"]
+            if u["system"] or w["actor"] in ("team", "system") or w["state"] == "unconfirmed":
                 continue
             agg[(wp, w["label"] or "利用者不明")]["info"] += 1
-        if named:
-            covered.add("分からない")
-        for u in t.output_users_list:
-            if u in ("自分", "職場内") or u in covered:
-                continue
-            r = {"上司": f"{wp} 上司", "他部署": "他部署", "顧客・社外": "顧客・社外", "分からない": "利用者不明"}.get(u)
-            if r:
-                agg[(wp, r)]["info"] += 1
         for a_ in t.actors_list:
-            if (a_, wp) not in agg and (wp, a_) not in agg:
-                agg[(wp, a_)]["involve"] += 1
+            label = recipient_who(a_, own)["label"] or a_
+            if (label, wp) not in agg and (wp, label) not in agg:
+                agg[(wp, label)]["involve"] += 1
     rows = [
         {"src": a_, "dst": b_, "info": c["info"], "involve": c["involve"]}
         for (a_, b_), c in agg.items()
@@ -2993,34 +3202,26 @@ def build_steps_flow(steps, own_wp="", purpose=""):
         prev = sid
     return d
 
-def _task_ref(name, t):
-    """前後の業務の名前が登録済みの業務なら、その業務の職場をだれにする"""
-    hit = _match_tasks(name, Task.query.filter(Task.id != t.id).all(), exclude=t, limit=1) if t.id else []
-    if hit:
-        wp = _own_wp(hit[0])
-        if wp:
-            return {"actor": "team" if wp == _own_wp(t) else "dept", "label": wp, "state": "ok"}
+def _task_ref(name, t, hit=None):
+    """前後の業務の名前が登録済みの業務（hit）なら、その業務の職場をだれにする"""
+    wp = _own_wp(hit) if hit is not None else ""
+    if wp:
+        return {"actor": "team" if wp == _own_wp(t) else "dept", "label": wp, "state": "ok"}
     return who_of(name, _own_wp(t))
 
 def _extra_case_links(d, t, steps):
-    """手順に出てこない業務レベルの取り出し元・渡す相手（アンケートや登録で答えたもの）を、案件の流れ図に足す"""
+    """手順に出てこない業務レベルの取り出し元・渡す相手（アンケートや登録で答えたもの・業務マップから書き戻したもの）を、案件の流れ図に足す。手順の箱と同じもの（same_thing）はその箱にまとめる"""
     own, purpose = _own_wp(t), _purpose(t)
     first, last = "st1", f"st{steps[-1]['no']}"
     texts = [v for x in steps for v in (x.get("system"), x.get("input"), x.get("output")) if v]
     for s_ in task_sources(t):
-        if any(same_name(s_["name"], v, 2) for v in texts):
+        if any(same_thing(s_["name"], v) for v in texts):
             continue
         node = d.node(nid("s", s_["name"]), s_["name"], "source", hint=s_["hint"])
         d.info_edge(node, first, s_["method"])
-    step_to = [n for x in steps for n in _names(x.get("to"))]
-    extra = [dict(r, who=None) for r in task_recipients(t) if not any(same_name(r["name"], v, 2) for v in step_to)]
-    covered = {actor_user(who_of(n, own)["actor"]) or "職場内" for n in step_to + [r["name"] for r in extra]}
-    if step_to or extra:
-        covered.add("分からない")
-    for u in t.output_users_list:
-        w = category_recipient(u, t)[0] if u != "自分" and u not in covered else None
-        if w:
-            extra.append({"name": w["label"], "how": "", "use": "", "who": w})
+    users = task_users(t)
+    step_to = any(u["step"] for u in users)
+    extra = [u for u in users if not u["step"]]
     deliver = next((i for i, n in reversed(d.nodes.items()) if n["cls"] == "output"), None)
     for r in extra:
         node, typ = recipient_node(d, r["name"], own, r["use"] or (purpose if len(extra) == 1 and not step_to else ""), who=r["who"])
@@ -3036,28 +3237,45 @@ def _extra_case_links(d, t, steps):
 def build_task_flow(t):
     own = _own_wp(t)
     steps = t.steps
+    cls = task_cls(t)
     if steps:
         d = build_steps_flow(steps, own, t.purpose or "")
         _extra_case_links(d, t, steps)
         first, last = "st1", f"st{steps[-1]['no']}"
+        if cls in STATUS_MARKS:
+            for x in steps:
+                d.nodes[f"st{x['no']}"]["cls"] = cls
     else:
         d = Diagram("LR")
         first = last = f"t{t.id}"
-        d.node(first, t.name, "done" if t.status == "完了" else "task", width=16, who={"actor": "team", "label": own, "state": "ok"})
+        d.node(first, t.name, cls, width=16, who={"actor": "team", "label": own, "state": "ok"})
         _add_task_info(d, t, first)
-    if (t.prev_task or "").strip():
-        node = d.node("prev_task", t.prev_task, "work", who=_task_ref(t.prev_task, t))
-        d.edge(node, first, "work", handoff=handoff_of(t.prev_task, steps[0].get("action") if steps else ""))
-    if (t.next_task or "").strip():
-        w = _task_ref(t.next_task, t)
-        twin = None
-        if w["state"] == "ok" and w["actor"] != "team":
-            twin = next((i for i, n in d.nodes.items() if n["cls"] == "work" and n["who_state"] == "ok" and n["who"] and (n["who"] == w["label"] or t.next_task.startswith(n["who"]))), None)
-        if twin:
-            d.nodes[twin]["text"] = t.next_task.replace(d.nodes[twin]["who"], "", 1).strip(" 　の") or t.next_task
-        node = twin or d.node("next_task", t.next_task, "work", who=w)
-        d.edge(last, node, "work", handoff=handoff_of(steps[-1].get("action") if steps else "", t.next_task))
-    return d
+    others = Task.query.filter(Task.id != t.id).all() if t.id else []
+    boxes = []
+
+    def neighbor(name, side):
+        hit = next(iter(_match_tasks(name, others, exclude=t, limit=1)), None)
+        w = _task_ref(name, t, hit)
+        node = next((nd for text, tid, nd in boxes if (hit is not None and tid == hit.id) or same_thing(name, text)), None)
+        if node is None and side == "next":
+            node = next((i for i, n in d.nodes.items() if n["cls"] == "work" and n["text"] not in PLACEHOLDER_TEXTS and same_thing(name, n["text"])), None)
+            if node is None and w["state"] == "ok" and w["actor"] != "team":
+                node = next((i for i, n in d.nodes.items() if n["cls"] == "work" and n["who_state"] == "ok" and n["who"] and (n["who"] == w["label"] or name.startswith(n["who"]))), None)
+            if node is not None:
+                who = d.nodes[node]["who"]
+                d.nodes[node]["text"] = (name.replace(who, "", 1).strip(" 　の") if who else "") or name
+        if node is None:
+            node = d.node(f"{side}{len(boxes)}", name, "work", who=w)
+        boxes.append((name, hit.id if hit is not None else None, node))
+        return node, hit
+
+    for name in task_names(t.prev_task):
+        node, hit = neighbor(name, "prev")
+        d.edge(node, first, "work", handoff=_task_handoff(hit, t, d) if hit is not None else handoff_of(name, steps[0].get("action") if steps else ""))
+    for name in task_names(t.next_task):
+        node, hit = neighbor(name, "next")
+        d.edge(last, node, "work", handoff=_task_handoff(t, hit, d) if hit is not None else handoff_of(steps[-1].get("action") if steps else "", name))
+    return d.derive_roles()
 
 # ----- 凡例・閲覧と編集画面に渡すもの -----
 def map_legend_html(d):
@@ -3097,7 +3315,7 @@ def flow_view(d):
 
 def editor_config():
     return {
-        "vocab": vocab_public(), "cls_labels": CLS_LABELS, "cls_type": CLS_TYPE, "glyphs": _SHAPE_GLYPHS,
+        "vocab": vocab_public(), "cls_labels": CLS_LABELS, "cls_type": CLS_TYPE, "glyphs": _SHAPE_GLYPHS, "status_marks": STATUS_MARKS,
         "classify_url": url_for("bizmap.api_classify"),
     }
 
@@ -5366,7 +5584,7 @@ def index():
         pending_count=pending_count,
         saved_at=saved_at,
         task_count=len(tasks),
-        flow_info_count=len([t for t in tasks if t.has_flow_info]),
+        flow_info_count=len([t for t in tasks if t.has_flow_info or t.steps]),
         source_rows=source_rows(tasks),
         handoff_rows=handoff_rows(tasks),
         truncated=truncated,
@@ -5455,25 +5673,14 @@ def api_graph_reset():
 def _saved_graph(kind, workplace_id, domain_id):
     return _graph_data(FlowMap.query.filter_by(kind=kind, scope=scope_key(workplace_id, domain_id)).first())
 
-def _tasks_in_graph(saved):
-    ids = set()
-    for n in (saved or {}).get("nodes", []):
-        nid = str(n.get("id", ""))
-        if nid[:1] in ("t", "o") and nid[1:].isdigit():
-            ids.add(int(nid[1:]))
-    for eid in (saved or {}).get("suppressed_edges", []):
-        for part in str(eid).split("->"):
-            if part[:1] in ("t", "o") and part[1:].isdigit():
-                ids.add(int(part[1:]))
-    if not ids:
-        return {}
-    return {t.id: t for t in Task.query.filter(Task.id.in_(list(ids))).all()}
+def _all_tasks(saved):
+    return {t.id: t for t in Task.query.all()} if saved else {}
 
 @bp_bizmap.route("/api/writeback", methods=["GET"])
 def api_writeback_candidates():
     kind, workplace_id, domain_id = _kind_and_scope()
     saved = _saved_graph(kind, workplace_id, domain_id)
-    cands = writeback_candidates(saved, _tasks_in_graph(saved))
+    cands = writeback_candidates(saved, _all_tasks(saved))
     return jsonify({"candidates": [{"id": c["id"], "task_id": c["task_id"], "text": c["text"]} for c in cands]})
 
 @bp_bizmap.route("/api/writeback", methods=["POST"])
@@ -5482,7 +5689,7 @@ def api_writeback_apply():
     kind, workplace_id, domain_id = _kind_and_scope(payload)
     selected = set(str(x) for x in (payload.get("ids") or []))
     saved = _saved_graph(kind, workplace_id, domain_id)
-    tasks_by_id = _tasks_in_graph(saved)
+    tasks_by_id = _all_tasks(saved)
     cands = writeback_candidates(saved, tasks_by_id)
     applied = apply_writeback(cands, selected, tasks_by_id)
     db.session.commit()
@@ -7070,7 +7277,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
 <div class="bizmap-sections">
   <div id="tab-info">
     {{ flow_panel('info', '業務マップ',
-       '取り出し元の情報 → 業務 → できるもの → 渡す相手の作業。箱は作業（四角・だれつき）と情報（媒体の形とアイコン）の2種類、線は仕事の流れ（太い灰）と情報の流れ（細い青）の2種類です。聞き取りで答えた名前で描き、同じ名前は1つの箱にまとめます。職場ごとの枠に業務を置き、点線は名前から推定したつながり（ある業務のできるものを別の業務が使っている、前後の業務）です。灰色の点線の箱は、月次アンケートで挙がったものの、まだ流れを登録していない業務です。',
+       '取り出し元の情報 → 業務 → できるもの → 渡す相手の作業。箱は作業（四角・だれつき）と情報（媒体の形とアイコン）の2種類、線は仕事の流れ（太い灰）と情報の流れ（細い青）の2種類です。聞き取りで答えた名前で描き、同じ名前は1つの箱にまとめます。職場ごとの枠に業務を置き、点線は名前から推定したつながり（ある業務のできるものを別の業務が使っている、前後の業務）です。灰色の点線の箱は、月次アンケートで挙がったものの、まだ流れを登録していない業務です。保留中の業務は点線の枠に「（保留）」、廃止した業務は薄い色に「（廃止済み）」を付けます。',
        '',
        flows.info, '業務が登録されると図が描かれます。') }}
 
@@ -7101,7 +7308,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
       <div class="col-lg-5">
         <div class="card h-100"><div class="card-body">
           <h5 class="card-title">職場・部署の間の受け渡し</h5>
-          <p class="small text-muted">誰から受け取り、誰に渡しているか。「情報」は情報の受け取り元とアウトプットの利用者から、「関与」は関わる人・部署から数えています。</p>
+          <p class="small text-muted">誰から受け取り、誰に渡しているか。「情報」は情報の受け取り元とアウトプットの利用者から、「関与」は関わる人・部署から数えています。業務マップと同じ決まりで、受け取り元は1つずつに分け、役職は職場名つきにし、「他部署」だけの相手は目的の文の部署名にします。</p>
           <div class="table-responsive">
           <table class="table table-sm mb-0">
             <thead><tr><th>から</th><th>へ</th><th class="text-end">情報</th><th class="text-end">関与</th></tr></thead>
@@ -7122,7 +7329,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
   <div id="tab-domains" class="mt-4">
     <h2 class="section-title">領域別の把握状況 <span class="section-sub">案件がない領域と、実態を把握できていない領域を区別する</span></h2>
     <div class="card"><div class="card-body">
-      <h5 class="card-title">業務領域ごとの把握状況（ヒートマップ）</h5>
+      <h5 class="card-title">業務領域ごとの把握状況（ヒートマップ） <span class="badge text-bg-light border align-middle">全体</span></h5>
       <p class="small text-muted">案件がない領域と、業務実態を把握できていない領域を区別します。絞り込みに関係なく製造部全体で判定しています。</p>
       <div class="table-responsive">
       <table class="table table-sm align-middle mb-2">
@@ -7158,7 +7365,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
     <div class="row g-3 mb-3">
       <div class="col-lg-6">
         <div class="card h-100"><div class="card-body">
-          <h5 class="card-title">同じアウトプットを複数人が作成（統合候補）</h5>
+          <h5 class="card-title">同じアウトプットを複数人が作成（統合候補） <span class="badge text-bg-light border align-middle">全体</span></h5>
           {% if dup_outputs %}
           <table class="table table-sm mb-0">
             <thead><tr><th>アウトプット</th><th>業務（回答者）</th><th class="text-end">月間</th></tr></thead>
@@ -7179,7 +7386,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
       </div>
       <div class="col-lg-6">
         <div class="card h-100"><div class="card-body">
-          <h5 class="card-title">「同じ情報を何度も入力する」業務（入力元別）</h5>
+          <h5 class="card-title">「同じ情報を何度も入力する」業務（入力元別） <span class="badge text-bg-light border align-middle">全体</span></h5>
           {% if dup_inputs %}
           <table class="table table-sm mb-0">
             <thead><tr><th>入力元</th><th>業務</th></tr></thead>
@@ -7201,7 +7408,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
     <div class="row g-3">
       <div class="col-12">
         <div class="card h-100"><div class="card-body">
-          <h5 class="card-title">業務のつながり（前の業務 → 業務 → 後の業務）</h5>
+          <h5 class="card-title">業務のつながり（前の業務 → 業務 → 後の業務） <span class="badge text-bg-light border align-middle">全体</span></h5>
           {% if flow_rows %}
           <div class="table-responsive">
           <table class="table table-sm mb-0">
@@ -9294,6 +9501,7 @@ document.addEventListener("DOMContentLoaded", function () {
   var G = { nodes: [], edges: [], suppressed_nodes: [], suppressed_edges: [] };
 
   var KC = JSON.parse(document.getElementById("fe-kinds").textContent);
+  var STATUS_MARKS = KC.status_marks || {};
   function vrow(group, key) { var rows = KC.vocab[group] || []; for (var i = 0; i < rows.length; i++) if (rows[i].key === key) return rows[i]; return null; }
   function typeOf(n) { return n.type === "info" || n.type === "work" ? n.type : (KC.cls_type[n.cls] || "work"); }
   function shapeOf(n) {
@@ -9307,7 +9515,7 @@ document.addEventListener("DOMContentLoaded", function () {
       return [r ? r.icon : "bi-question-square", "m-" + m];
     }
     if (n.cls === "done") return ["bi-check-circle-fill", "done"];
-    if (n.cls === "task") return ["", ""];
+    if (n.cls === "task" || STATUS_MARKS[n.cls]) return ["", ""];
     if (n.cls === "pending") return ["bi-hourglass-split", "pending"];
     if (n.who_state === "unconfirmed" || !n.actor) return ["bi-question-circle", "who-unconfirmed"];
     var a = vrow("actors", n.actor);
@@ -9367,6 +9575,7 @@ document.addEventListener("DOMContentLoaded", function () {
         if (!n || !was || classifySeq[n.id] !== was.seq || typeOf(n) !== was.type || n.text !== was.text || (n.who || "") !== was.who) return;
         if (typeOf(n) === "info") { if (!n.medium_edited && n.medium !== it.medium) { n.medium = it.medium; changed = true; } }
         else if (!n.actor_locked) { n.actor = it.actor; n.who_state = it.who_state; if (it.who) n.who = it.who; changed = true; }
+        else if (it.who && it.who !== n.who) { n.who = it.who; changed = true; }
       });
       if (!changed) return;
       // 判定の結果は直前の操作の一部として履歴に入れる（元に戻す・やり直しで消えないように）
@@ -9474,6 +9683,12 @@ document.addEventListener("DOMContentLoaded", function () {
     text.className = "fe-text";
     text.textContent = n.text || "";
     label.appendChild(text);
+    if (STATUS_MARKS[n.cls]) {
+      var state = document.createElement("span");
+      state.className = "fe-state";
+      state.textContent = STATUS_MARKS[n.cls];
+      label.appendChild(state);
+    }
     div.appendChild(label);
     if (n.group_title) {
       var sub = document.createElement("div");
@@ -9813,7 +10028,7 @@ document.addEventListener("DOMContentLoaded", function () {
     var type = typeOf(n);
     els.typeRow.style.display = n.source === "manual" ? "flex" : "none";
     els.typeRow.querySelectorAll("[data-type]").forEach(function (b) { b.classList.toggle("active", b.dataset.type === type); });
-    els.whoRow.style.display = type === "work" && ["task", "done", "pending"].indexOf(n.cls) === -1 ? "block" : "none";
+    els.whoRow.style.display = type === "work" && ["task", "done", "hold", "abolished", "pending"].indexOf(n.cls) === -1 ? "block" : "none";
     if (document.activeElement !== els.whoInput) els.whoInput.value = n.who || "";
     els.actorSelect.value = n.actor_locked ? (n.actor || "") : "";
     els.mediumRow.style.display = type === "info" ? "block" : "none";
@@ -9883,7 +10098,9 @@ document.addEventListener("DOMContentLoaded", function () {
     n.who = els.whoInput.value.trim();
     n.who_edited = true;
     pushHistory();
-    if (n.actor_locked) renderAll(); else classify([n]);
+    // だれの区分を手で選んでいても、名前はサーバーで氏名を置き換えてから使う
+    if (n.actor_locked) renderAll();
+    classify([n]);
   });
   els.actorSelect.addEventListener("change", function () {
     var n = nodeById(popNodeId);
@@ -10450,6 +10667,8 @@ document.addEventListener("DOMContentLoaded", function () {
 .lg-system { background: #f8f9fa; border-color: #6c757d; }
 .lg-warn { background: #f8d7da; border-color: #dc3545; }
 .lg-pending { background: #f8f9fa; border-color: #adb5bd; border-style: dashed; color: #6c757d; }
+.lg-hold { background: #e7f1ff; border-color: #0d6efd; border-style: dashed; }
+.lg-abolished { background: #f1f3f5; border-color: #ced4da; color: #adb5bd; }
 .legend-row { display: flex; flex-wrap: wrap; align-items: center; row-gap: 0.25rem; }
 .legend-title { font-size: 0.75rem; color: #6c757d; margin-right: 0.4rem; white-space: nowrap; }
 .kind-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 0.25rem 0.8rem; margin-top: 0.35rem; font-size: 0.78rem; color: #495057; }
@@ -10565,6 +10784,9 @@ body.flow-max-open { overflow: hidden; }
 .fe-cls-dupout { --fe-fill: #ffe5d0; --fe-stroke: #fd7e14; }
 .fe-cls-warn { --fe-fill: #f8d7da; --fe-stroke: #dc3545; color: #842029; }
 .fe-cls-pending { --fe-fill: #f8f9fa; --fe-stroke: #adb5bd; border-style: dashed; color: #6c757d; }
+.fe-cls-hold { --fe-fill: #e7f1ff; --fe-stroke: #0d6efd; border-style: dashed; color: #052c65; }
+.fe-cls-abolished { --fe-fill: #f1f3f5; --fe-stroke: #ced4da; color: #adb5bd; }
+.fe-node .fe-state { font-size: 11px; white-space: nowrap; }
 .fe-node[data-color="white"] { --fe-fill: #fff; }
 .fe-node[data-color="red"] { --fe-fill: #fee2e2; }
 .fe-node[data-color="orange"] { --fe-fill: #fed7aa; }
@@ -12035,6 +12257,7 @@ def create_app(test_config=None):
     with app.app_context():
         db.create_all()
         ensure_schema()
+        init_id_seq()
         seed_masters()
 
     return app

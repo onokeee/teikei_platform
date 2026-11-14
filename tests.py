@@ -366,6 +366,129 @@ def smoke_bizmap_edit():
     r = client.get("/bizmap/api/graph?kind=nope")
     check(r.status_code == 404, "GET unknown kind -> 404")
 
+    # ---- 業務マップと他の機能のつながり（相手・受け取り元・相手の箱の ID・保留と廃止・案件の流れ図・図の下の表・月次の業務名） ----
+    with app.test_request_context():
+        by_name = {t.name: t for t in Task.query.all()}
+        t_day, t_week, t_asm, t_def = by_name["日報の実績をExcelの集計表に転記する"], by_name["週報の作成"], by_name["組立実績の日次入力（生産管理システム）"], by_name["不良品発生報告のメール配信"]
+        wp1 = t_day.workplace_id
+        check(app_module._names("オペレーターの故障連絡（口頭・メモ）", dots=True) == ["オペレーターの故障連絡（口頭・メモ）"] and app_module._names("週報・生産管理システム", dots=True) == ["週報", "生産管理システム"]
+              and any(s_["name"] == "オペレーターの故障連絡（口頭・メモ）" for s_ in app_module.task_sources(by_name["設備故障記録の台帳入力"])),
+              "かっこの中の「・」では分けない（「オペレーターの故障連絡（口頭・メモ）」は1つの受け取り元）、かっこの外は分ける")
+        tr = Task(name="相手の確かめ用の業務", respondent_id=t_day.respondent_id, workplace_id=wp1, purpose="朝会で確認するため", output_users_note="検査・品質保証課 課長、製造1課 課長",
+                  steps_json=json.dumps([{"no": 1, "action": "集計表を課長に渡す", "output": "集計表", "to": "課長"}], ensure_ascii=False))
+        db.session.add(tr)
+        db.session.flush()
+        labels = [r_["who"]["label"] for r_ in app_module.task_recipients(tr)]
+        check(labels == ["製造1課 課長", "検査・品質保証課 課長"], f"渡す相手はだれが同じものだけまとめる（「課長」は「製造1課 課長」と同じ、「検査・品質保証課 課長」は別）: {labels}")
+        boss_id = app_module.nid("p", f"{tr.id}:課長")
+        d1 = app_module.build_info_flow([tr])
+        raw_vocab = app_module.Setting.get(app_module.MAP_VOCAB_KEY, "")
+        v = app_module.vocab_public()
+        for row_ in v["actors"]:
+            if row_["key"] == "boss":
+                row_["words"] = "上司、部長"
+        app_module.Setting.set(app_module.MAP_VOCAB_KEY, json.dumps(v, ensure_ascii=False))
+        tr.purpose, tr.output_users_note = "目的を書き直した", ""
+        d2 = app_module.build_info_flow([tr])
+        check(boss_id in d1.nodes and boss_id in d2.nodes and d1.nodes[boss_id]["who"] == "製造1課 課長" and d2.nodes[boss_id]["who"] == "課長" and d2.nodes[boss_id]["text"] == "目的を書き直した",
+              f"相手の箱の ID は業務と答えた名前で決まる（区分の語・目的・相手の数を変えても同じ箱で、手修正が残る）: {d2.nodes.get(boss_id)}")
+        app_module.Setting.set(app_module.MAP_VOCAB_KEY, raw_vocab)
+        db.session.rollback()
+
+        tasks = Task.query.all()
+        flow = app_module.build_info_flow(tasks)
+        src = flow.render()
+        legend = app_module.map_legend_html(flow)
+        check(flow.nodes[f"t{t_asm.id}"]["cls"] == "hold" and flow.nodes[f"t{t_def.id}"]["cls"] == "abolished" and "（保留）" in src and "（廃止済み）" in src
+              and "classDef hold" in src and "stroke-dasharray:5 4" in src and "保留中の業務" in legend and "廃止した業務" in legend and flow.nodes[f"t{t_asm.id}"]["text"] == t_asm.name,
+              "業務マップ: 保留の業務は点線の枠に「（保留）」、廃止して完了した業務は薄い色に「（廃止済み）」（名前そのものは変えない）")
+        fa, fd = app_module.build_task_flow(t_asm), app_module.build_task_flow(t_def)
+        check(all(n["cls"] == "hold" for i, n in fa.nodes.items() if i.startswith("st")) and "（保留）" in fa.render() and fd.nodes[f"t{t_def.id}"]["cls"] == "abolished" and "（廃止済み）" in fd.render(),
+              "案件の流れ図でも、保留は点線の枠に「（保留）」、廃止済みは薄い色に「（廃止済み）」")
+        f_day = app_module.build_task_flow(t_day)
+        roles = {n["text"]: n["cls"] for n in f_day.nodes.values() if n["type"] == "info"}
+        check(roles.get("Excel（日次実績集計表）") == "output" and roles.get("紙の日報") == "source", f"案件の流れ図も業務マップと同じ色の決まり（手順が書き込む情報はできるもの）: {roles}")
+        tn = Task(name="前後の確かめ用の業務", respondent_id=t_day.respondent_id, workplace_id=wp1, prev_task="日報の実績をExcelの集計表に転記する、各ラインの日報記入\n各ラインの日報記入（紙）",
+                  next_task="週報の作成、生産実績の月報作成", steps_json=json.dumps([{"no": 1, "action": "数字を確かめる"}], ensure_ascii=False))
+        db.session.add(tn)
+        db.session.flush()
+        fn = app_module.build_task_flow(tn)
+        prev_boxes = sorted(fn.nodes[a]["text"] for (a, b), e in fn.edges.items() if b == "st1" and e["type"] == "work")
+        nexts = {fn.nodes[b]["text"]: e["handoff"] for (a, b), e in fn.edges.items() if a == "st1" and e["type"] == "work"}
+        monthly = by_name["生産実績の月報作成"]
+        check(prev_boxes == sorted(["日報の実績をExcelの集計表に転記する", "各ラインの日報記入"]) and nexts.get("週報の作成") == "none"
+              and nexts.get("生産実績の月報作成") == app_module._task_handoff(tn, monthly, fn),
+              f"案件の流れ図: 前後の業務は1業務1つの箱（同じもの＝same_thing はまとめる）、引き継ぎ方は業務マップと同じ決まり（同じ人なら引き継ぎなし）: {prev_boxes} {nexts}")
+        db.session.rollback()
+
+        rows = app_module.handoff_rows(tasks)
+        pairs = {(r_["src"], r_["dst"]): r_ for r_ in rows}
+        wp1_name = t_day.workplace.name
+        check(("オペレーターの故障連絡（口頭・メモ）", "設備保全課") in pairs and ("受注一覧（Excel）", "生産管理課") in pairs and ("生産管理システム", "生産管理課") in pairs
+              and (wp1_name, "総務") in pairs and (wp1_name, "課長") not in pairs and pairs[(wp1_name, f"{wp1_name} 課長")]["info"] >= 1,
+              "図の下の表も業務マップと同じ決まり（受け取り元は1つずつ、「他部署」は目的の部署名、「課長」は「製造1課 課長」にまとめる）")
+
+        db.session.add(MonthlyResponse(period=current_period(), emp_id="P201", name="", workplace_id=wp1,
+                                       answers_json=json.dumps({"has": "ある", "task_names": "月報の作成\n週報の作成、日報の集計・確認\n佐藤さんの日報まとめ\n週報の作成"}, ensure_ascii=False)))
+        db.session.add(MonthlyResponse(period=current_period(), emp_id="P205", name="", workplace_id=wp1, answers_json=json.dumps({"has": "ある", "task_names": "日報の集計・確認"}, ensure_ascii=False)))
+        db.session.add(Employee(emp_id="P202", name="対象外の人", active=False, source="answer"))
+        db.session.add(MonthlyResponse(period=current_period(), emp_id="P202", name="", workplace_id=wp1, answers_json=json.dumps({"has": "ある", "task_names": "対象外の人の業務"}, ensure_ascii=False)))
+        db.session.add(MonthlyResponse(period=shift_period(current_period(), -6), emp_id="P203", name="", workplace_id=wp1, answers_json=json.dumps({"has": "ある", "task_names": "7か月前の業務"}, ensure_ascii=False)))
+        other_wp = by_name["組立実績の日次入力（生産管理システム）"].workplace_id
+        db.session.add(MonthlyResponse(period=shift_period(current_period(), -1), emp_id="P204", name="", workplace_id=wp1, answers_json=json.dumps({"has": "ある", "task_names": "異動前の業務"}, ensure_ascii=False)))
+        db.session.add(MonthlyResponse(period=current_period(), emp_id="P204", name="", workplace_id=other_wp, answers_json=json.dumps({"has": "ある", "task_names": "異動後の業務"}, ensure_ascii=False)))
+        db.session.commit()
+        pend = {p["name"]: len(p["people"]) for p in app_module.pending_task_names(wp1)}
+        pend_other = [p["name"] for p in app_module.pending_task_names(other_wp)]
+        check("月報の作成" in pend and "週報の作成" not in pend and "日報の集計・確認" in pend and "担当者の日報まとめ" in pend and not any("佐藤" in p for p in pend),
+              f"月次の業務名: 1行・「、」ごとに分け（「・」では分けない）、「月報の作成」と「週報の作成」は別、氏名は担当者に置き換える: {sorted(pend)}")
+        check("対象外の人の業務" not in pend and "7か月前の業務" not in pend and "異動前の業務" not in pend and "異動後の業務" in pend_other
+              and app_module.name_key("ＡＢＣ点検") == app_module.name_key("abc点検"),
+              f"月次の業務名: 各人の最新の回答（6か月以内）を職場で絞り、対象外の人は除く。全角・半角はそろえる: {sorted(pend)} / {pend_other}")
+        flow = app_module.add_pending_tasks(app_module.build_info_flow(tasks), wp1, tasks)
+        u_month = app_module.nid("u", f"{wp1}:月報の作成")
+        check((f"t{t_week.id}", u_month) in flow.edges and (f"t{t_day.id}", u_month) not in flow.edges,
+              "未登録の業務への点線も、前後の業務の名前が同じときだけ（「週報の作成」は「月報の作成」につながない）")
+
+    g_wp = client.get(f"/bizmap/api/graph?kind=info&workplace_id={wp1}").get_json()
+    u_node = next(n for n in g_wp["nodes"] if n["cls"] == "pending" and n["text"] == "日報の集計・確認（2人）")
+    data = {"nodes": [dict(n) for n in g_wp["nodes"]] + [{"id": "m_who", "text": "佐藤課長に確認", "type": "work", "cls": "work", "who": "山田さん", "who_edited": True, "actor": "dept", "actor_locked": True, "source": "manual"}],
+            "edges": [dict(e) for e in g_wp["edges"]] + [{"id": f"t{t_day.id}->{u_node['id']}", "from": f"t{t_day.id}", "to": u_node["id"], "type": "work", "source": "manual"},
+                                                         {"id": f"t{t_day.id}->m_who", "from": f"t{t_day.id}", "to": "m_who", "type": "work", "source": "manual", "label": "鈴木さんに電話", "label_edited": True}],
+            "suppressed_nodes": [], "suppressed_edges": [], "view": None}
+    r = client.post("/bizmap/api/graph", json={"kind": "info", "workplace_id": wp1, "data": data})
+    with app.app_context():
+        stored = json.loads(FlowMap.query.filter_by(scope=f"wp:{wp1}|dom:0").first().data)
+        m_who = next(n for n in stored["nodes"] if n["id"] == "m_who")
+        e_who = next(e for e in stored["edges"] if e["to"] == "m_who")
+    check(r.status_code == 200 and m_who["who"] == "担当者" and m_who["text"] == "課長に確認" and e_who["label"] == "担当者に電話",
+          f"保存するときにサーバーで氏名を置き換える（だれ・箱の名前・線のラベル。だれの区分を手で選んでいても）: {m_who['who']} / {m_who['text']} / {e_who['label']}")
+    with app.app_context():
+        db.session.add(Task(name="日報の集計・確認", respondent_id=Respondent.query.filter_by(emp_id="E001").first().id, workplace_id=wp1, frequency="毎日", duration="15分未満"))
+        db.session.commit()
+        new_id = Task.query.filter_by(name="日報の集計・確認").first().id
+    g_wp = client.get(f"/bizmap/api/graph?kind=info&workplace_id={wp1}").get_json()
+    eids = {e["id"] for e in g_wp["edges"]}
+    new_box = next((n for n in g_wp["nodes"] if n["id"] == f"t{new_id}"), {})
+    check(u_node["id"] not in {n["id"] for n in g_wp["nodes"]} and f"t{t_day.id}->t{new_id}" in eids and new_box.get("text") == "日報の集計・確認" and not new_box.get("text_edited"),
+          "未登録の箱（2人）に引いた手の線は、同じ職場に同じ名前の業務が登録されたら、その業務の箱につなぎ直す（業務名は変えない）")
+    with app.app_context():
+        steps_only = app_module.Workplace(name="手順だけの職場", sort=99)
+        db.session.add(steps_only)
+        db.session.flush()
+        db.session.add(Task(name="手順だけの業務", respondent_id=Respondent.query.filter_by(emp_id="E001").first().id, workplace_id=steps_only.id,
+                            steps_json=json.dumps([{"no": 1, "action": "集計する"}], ensure_ascii=False)))
+        db.session.commit()
+        steps_wp = steps_only.id
+    html = client.get(f"/bizmap/?workplace_id={steps_wp}").data.decode("utf-8")
+    check("図に載せた業務 1 件（関わる人・情報の受け取り元の入力あり 1 件）" in html, "見出しの件数: 聞き取りの手順がある業務は入力ありに数える")
+    html = client.get(f"/bizmap/?workplace_id={wp1}").data.decode("utf-8")
+    check(html.count('border align-middle">全体</span>') >= 4, "絞り込みに関係なく全体で数える表には「全体」と書く")
+    html = client.get("/bizmap/edit?kind=info").data.decode("utf-8")
+    fe = client.get("/static/flowedit.js").data.decode("utf-8")
+    check('"status_marks"' in html and "fe-state" in fe and "else if (it.who && it.who !== n.who)" in fe and 'if (n.actor_locked) renderAll();\n    classify([n]);' in fe,
+          "編集: 保留・廃止済みの印を出し、だれの区分を手で選んでいても名前はサーバーで氏名を置き換える")
+
     return fails
 
 def smoke_board():
@@ -1437,6 +1560,122 @@ def smoke_writeback():
     check(r.status_code == 200 and "fe-writeback" in r.data.decode("utf-8"), "editor has writeback button")
     r = client.get("/bizmap/api/writeback?kind=info&domain_id=99")
     check(r.status_code == 200 and r.get_json()["candidates"] == [], "writeback without saved map -> empty")
+
+    # ---- 書き戻しと再生成（手で選んだだれの区分・書き戻した受け取り元・業務名の変更・点線の取り消し） ----
+    import app as app_module
+    with app.app_context():
+        t3 = db.session.get(Task, t3_id)
+        t3.output_users_note = "検査・品質保証課 課長"
+        t_cnt = Task.query.filter_by(name="出勤簿の集計").first()
+        t_cnt.prev_task = "残業予定の連絡"
+        db.session.get(Task, t2_id).next_task = "クレーム対応の進捗"
+        t1 = db.session.get(Task, t1_id)
+        t1.next_task = (t1.next_task or "") + "、点検結果のまとめ"
+        monthly_id, cnt_id, wp3, wp1, wp3_name = Task.query.filter_by(name="クレーム対応の進捗報告").first().id, t_cnt.id, t3.workplace_id, t1.workplace_id, t3.workplace.name
+        db.session.add(MonthlyResponse(period=current_period(), emp_id="P301", name="", workplace_id=wp3, answers_json=json.dumps({"has": "ある", "task_names": "残業予定の連絡"}, ensure_ascii=False)))
+        db.session.add(MonthlyResponse(period=current_period(), emp_id="P302", name="", workplace_id=wp1, answers_json=json.dumps({"has": "ある", "task_names": "点検結果のまとめ"}, ensure_ascii=False)))
+        db.session.commit()
+    g3 = client.get("/bizmap/api/graph?kind=info").get_json()
+    u_check = next(n["id"] for n in g3["nodes"] if n["cls"] == "pending" and n["text"].startswith("点検結果のまとめ"))
+    eids3 = {e["id"] for e in g3["edges"]}
+    check(f"t{t2_id}->t{monthly_id}" in eids3 and f"t{t1_id}->{u_check}" in eids3, "点線: 「クレーム対応の進捗」（業務名の一部）と未登録の業務への前後の業務は名前からつながる")
+    data = {"nodes": [], "edges": [dict(e) for e in g3["edges"]], "suppressed_nodes": [], "suppressed_edges": [f"t{t2_id}->t{monthly_id}", f"t{t1_id}->{u_check}"], "view": None}
+    for n in g3["nodes"]:
+        m = dict(n)
+        if n["id"] == f"t{t3_id}":
+            m["text"], m["text_edited"] = "残業連絡（Excel）", True
+        data["nodes"].append(m)
+    data["nodes"] += [
+        {"id": "m_ext", "text": "新しい作業", "type": "work", "cls": "work", "who": "山田製作所", "who_edited": True, "actor": "external", "actor_locked": True, "who_state": "ok", "source": "manual"},
+        {"id": "m_boss", "text": "新しい作業", "type": "work", "cls": "work", "who": "課長", "who_edited": True, "source": "manual"},
+        {"id": "m_src", "text": "検査チェックシート", "type": "info", "cls": "source", "source": "manual"},
+    ]
+    data["edges"] = [e for e in data["edges"] if e["id"] not in data["suppressed_edges"]] + [
+        {"id": f"t{t3_id}->m_ext", "from": f"t{t3_id}", "to": "m_ext", "type": "work", "source": "manual"},
+        {"id": f"t{t3_id}->m_boss", "from": f"t{t3_id}", "to": "m_boss", "type": "work", "source": "manual"},
+        {"id": f"m_src->t{t1_id}", "from": "m_src", "to": f"t{t1_id}", "type": "info", "source": "manual"},
+    ]
+    client.post("/bizmap/api/graph", json={"kind": "info", "data": data})
+    cands = client.get("/bizmap/api/writeback?kind=info").get_json()["candidates"]
+    texts = [c["text"] for c in cands]
+    check(any("利用者に「山田製作所（顧客・社外）」を追加" in t for t in texts) and any("利用者に「課長」を追加" in t for t in texts) and any("受け取り元に「検査チェックシート」を追加" in t for t in texts),
+          f"書き戻し: 手で選んだだれの区分は名前と一緒に残し、「課長」は「検査・品質保証課 課長」に吸い込まれない: {texts}")
+    check(any("「残業連絡（Excel）」に変更" in t and "「出勤簿の集計」の前後の業務に書いた「残業予定の連絡」も直す" in t for t in texts)
+          and any("「週報の作成」の後の業務から「クレーム対応の進捗報告」" in t for t in texts) and any("後の業務から「点検結果のまとめ」を外す" in t for t in texts),
+          f"書き戻し: 業務名の変更は前後の業務に書いた名前も直す。点線（名前の一部・未登録の業務）を消すと外す候補が出る: {texts}")
+    r = client.post("/bizmap/api/writeback", json={"kind": "info", "ids": [c["id"] for c in cands]})
+    with app.test_request_context():
+        t1, t2, t3, t_cnt = (db.session.get(Task, i) for i in (t1_id, t2_id, t3_id, cnt_id))
+        pend3 = [p["name"] for p in app_module.pending_task_names(wp3)]
+        check(t3.name == "残業連絡（Excel）" and t_cnt.prev_task == "残業連絡（Excel）" and "残業予定の連絡" not in pend3 and "クレーム対応の進捗" not in (t2.next_task or "")
+              and "点検結果のまとめ" not in (t1.next_task or "") and "残業連絡（Excel）" in (t1.next_task or ""),
+              f"反映後: 前後の業務の名前も新しい業務名になり、古い名前は未登録の業務に出ない。消した点線の名前は外れる: {t_cnt.prev_task} / {t1.next_task} / {t2.next_task}")
+        check("山田製作所（顧客・社外）" in (t3.output_users_note or "") and "課長" in [x.strip() for x in t3.output_users_note.split("、")] and "顧客・社外" in t3.output_users_list
+              and "検査チェックシート" in (t1.info_from or ""), f"反映後の業務データ: {t3.output_users_note} / {t3.output_users_list} / {t1.info_from}")
+        case = app_module.build_task_flow(t1)
+        check(any(n["text"] == "検査チェックシート" for n in case.nodes.values()), "書き戻した受け取り元は、同じ媒体の取り出し元があっても案件の流れ図に必ず描く")
+    g4 = client.get("/bizmap/api/graph?kind=info").get_json()
+    nodes4 = {n["id"]: n for n in g4["nodes"]}
+    edges4 = {(e["from"], e["to"]): e for e in g4["edges"]}
+    ext = next((n for n in g4["nodes"] if n.get("who") == "山田製作所" and n["source"] == "auto"), {})
+    boss = nodes4.get(app_module.nid("p", f"{t3_id}:課長"), {})
+    src_box = next((n for n in g4["nodes"] if n["text"] == "検査チェックシート" and n["source"] == "auto"), {})
+    check("m_ext" not in nodes4 and ext.get("actor") == "external" and ext.get("who_state") == "ok" and (f"t{t3_id}", ext.get("id")) in edges4 and (f"o{t3_id}", ext.get("id")) in edges4
+          and app_module.nid("p", f"{t3_id}:顧客・社外") not in nodes4 and not any(n.get("who") == "山田製作所" and n.get("who_state") == "unconfirmed" for n in g4["nodes"]),
+          f"再生成: 手で選んだ区分の相手は同じ自動の箱（だれ未確認・区分だけの箱は増えない）にまとまり、手の線もその箱につながる: {ext}")
+    check("m_boss" not in nodes4 and boss.get("who") == f"{wp3_name} 課長" and (f"o{t3_id}", boss.get("id")) in edges4 and "m_src" not in nodes4 and (src_box.get("id"), f"t{t1_id}") in edges4,
+          f"再生成: 書き戻した「課長」と受け取り元は自動の箱になる: {boss.get('who')} / {src_box.get('id')}")
+    left = client.get("/bizmap/api/writeback?kind=info").get_json()["candidates"]
+    check(not any("山田製作所" in c["text"] or "検査チェックシート" in c["text"] or "残業連絡" in c["text"] for c in left), f"反映した内容は候補に残らない: {[c['text'] for c in left]}")
+
+    with app.test_request_context():
+        tasks_by_id = {t.id: t for t in Task.query.all()}
+        saved = {"schema": 2, "nodes": [{"id": f"t{t2_id}", "text": "佐藤さんの週報", "text_edited": True, "type": "work", "cls": "task", "source": "auto"},
+                                        {"id": "m_p", "text": "鈴木課長の確認", "type": "work", "cls": "work", "who": "", "source": "manual"}],
+                 "edges": [{"id": "x", "from": f"t{t2_id}", "to": "m_p", "type": "work", "source": "manual"}]}
+        cands = app_module.writeback_candidates(saved, tasks_by_id)
+        app_module.apply_writeback(cands, {c["id"] for c in cands}, tasks_by_id)
+        t2 = tasks_by_id[t2_id]
+        check(t2.name == "担当者の週報" and "課長の確認" in (t2.next_task or "") and "鈴木" not in (t2.next_task or ""), f"書き戻す値も氏名を置き換える: {t2.name} / {t2.next_task}")
+        db.session.rollback()
+
+    # ---- 番号の使い回しをしない（業務・職場・領域。消した番号の手修正が新しい行に付かない） ----
+    with app.app_context():
+        r0 = Respondent.query.first()
+        t = Task(name="番号の確かめ1", respondent_id=r0.id, workplace_id=r0.workplace_id)
+        db.session.add(t)
+        db.session.commit()
+        first_id = t.id
+        db.session.delete(t)
+        db.session.commit()
+        t = Task(name="番号の確かめ2", respondent_id=r0.id, workplace_id=r0.workplace_id)
+        db.session.add(t)
+        db.session.commit()
+        second_id = t.id
+    client.post("/admin/workplace/add", data={"name": "番号確認の職場"})
+    client.post("/admin/domain/add", data={"name": "番号確認の領域"})
+    with app.app_context():
+        w_id = app_module.Workplace.query.filter_by(name="番号確認の職場").first().id
+        d_id = app_module.Domain.query.filter_by(name="番号確認の領域").first().id
+    client.post(f"/admin/workplace/{w_id}/delete")
+    client.post(f"/admin/domain/{d_id}/delete")
+    client.post("/admin/workplace/add", data={"name": "番号確認の職場2"})
+    client.post("/admin/domain/add", data={"name": "番号確認の領域2"})
+    with app.app_context():
+        w2 = app_module.Workplace.query.filter_by(name="番号確認の職場2").first().id
+        d2 = app_module.Domain.query.filter_by(name="番号確認の領域2").first().id
+        big = (db.session.query(db.func.max(Task.id)).scalar() or 0) + 50
+        db.session.add(FlowMap(kind="info", scope="wp:0|dom:77", data=json.dumps({"nodes": [{"id": f"t{big}", "group": "wp66"}], "edges": [], "suppressed_edges": [f"t1->o{big + 5}"]})))
+        db.session.commit()
+    check(second_id > first_id and w2 > w_id and d2 > d_id, f"消した業務・職場・領域の番号は使い回さない: 業務 {first_id}→{second_id} 職場 {w_id}→{w2} 領域 {d_id}→{d2}")
+    app2 = create_app({"SQLALCHEMY_DATABASE_URI": "sqlite:///" + dbfile, "TESTING": True})
+    with app2.app_context():
+        t = Task(name="番号の確かめ3", respondent_id=Respondent.query.first().id)
+        w = app_module.Workplace(name="番号確認の職場3")
+        dm = app_module.Domain(name="番号確認の領域3")
+        db.session.add_all([t, w, dm])
+        db.session.commit()
+        check(t.id > big + 5 and w.id > 66 and dm.id > 77, f"起動時に手修正が指している番号より大きい番号から始める: 業務 {t.id} 職場 {w.id} 領域 {dm.id}")
 
     return fails
 
