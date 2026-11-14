@@ -10,7 +10,7 @@ SECRET_KEY = ""  # 空なら instance/secret_key.txt を自動生成
 ADMIN_ID = "admin"
 ADMIN_PASSWORD = "adminpass"
 
-# ---- 社員ID照会: 社内 LDAP API（HTTP/JSON）。例 "http://ldap-api.local/employees/{id}"。{id} がなければ ?LDAP_API_ID_PARAM=社員ID を付けて GET ----
+# ---- ユーザーID照会: 社内 LDAP API（HTTP/JSON）。例 "http://ldap-api.local/employees/{id}"。{id} がなければ ?LDAP_API_ID_PARAM=ユーザーID を付けて GET ----
 LDAP_API_URL = ""
 LDAP_API_TOKEN = ""
 LDAP_API_ID_PARAM = "employee_id"
@@ -21,7 +21,7 @@ LDAP_API_FIELD_MAIL = "mail"
 LDAP_API_FIELD_EXISTS = "exists"
 LDAP_API_TIMEOUT = 5
 
-# ---- 社員ID照会: LDAP サーバーへ直接（pip install ldap3 が必要。API があれば不要） ----
+# ---- ユーザーID照会: LDAP サーバーへ直接（pip install ldap3 が必要。API があれば不要） ----
 LDAP_SERVER = ""
 LDAP_BIND_DN = ""
 LDAP_BIND_PASSWORD = ""

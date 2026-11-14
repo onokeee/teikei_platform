@@ -1,4 +1,4 @@
-"""社員ID照会（社内 LDAP API サービス / LDAP サーバー）。config.py と標準ライブラリだけに依存する"""
+"""ユーザーID照会（社内 LDAP API サービス / LDAP サーバー）。config.py と標準ライブラリだけに依存する"""
 import json
 import logging
 import urllib.error

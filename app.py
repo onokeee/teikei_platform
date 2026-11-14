@@ -1,4 +1,4 @@
-"""PC定型業務ゼロ化プロジェクト ポータル（Flask + SQLite）。アプリ本体はこの1ファイル。設定は config.py、社員ID照会は ldap_auth.py"""
+"""PC定型業務ゼロ化プロジェクト ポータル（Flask + SQLite）。アプリ本体はこの1ファイル。設定は config.py、ユーザーID照会は ldap_auth.py"""
 import csv
 import hashlib
 import hmac
@@ -123,7 +123,7 @@ STAGES = [
     ("spec", "要件定義", "ECRSで業務を最適化し、残る作業の仕様を決める", "手順3（ECRSによる最適化）"),
     ("build", "作成", "ツール・仕組みを作る。自主改善の案件は改善チームが伴走する", "手順4・5（自動化・高度化）"),
     ("test", "テスト", "実際のデータで動作と効果を確かめる", ""),
-    ("check", "確認", "本人・職場で結果を確認し、運用に乗せる", ""),
+    ("check", "確認", "本人とGr・役割で結果を確認し、運用に乗せる", ""),
     ("done", "完了！", "運用開始。改善前後の結果を記録する", ""),
 ]
 STAGE_KEYS = [s[0] for s in STAGES]
@@ -219,8 +219,8 @@ MONTHLY_KPI = {
 
 # ===== 自動化を検討（1画面）のフォーム定義 =====
 PERSON_FIELDS = [
-    {"key": "emp_id", "type": "text", "label": "社員ID", "required": True, "lookup": True, "placeholder": "例：E001"},
-    {"key": "workplace_id", "type": "select", "label": "職場", "required": True, "options": "workplaces"},
+    {"key": "emp_id", "type": "text", "label": "ユーザーID", "required": True, "lookup": True, "placeholder": "例：E001"},
+    {"key": "workplace_id", "type": "select", "label": "Gr・役割", "required": True, "options": "workplaces"},
     {"key": "work_pattern", "type": "select", "label": "勤務形態", "required": True, "options": "work_patterns"},
 ]
 
@@ -814,11 +814,11 @@ def init_id_seq():
             Setting.set(_id_seq_key(table), str(top))
     db.session.commit()
 
-# ===== 社員ID照会の控え（ldap_auth の結果を employees に残し、足りない氏名・職場を補う） =====
+# ===== ユーザーID照会の控え（ldap_auth の結果を employees に残し、足りない氏名を補う） =====
 ldap_status_text = ldap_auth.status_text
-EMP_NOT_FOUND = "この社員IDは見つかりません。IDを確かめてください"
-EMP_EXCLUDED = "この社員IDは対象外になっています。管理者に連絡してください"
-PREFILL_NOTE = "前回の回答の職場・勤務形態を入れました。変わっていたら、今の所属・勤務形態に合わせてプルダウンで選び直してください。"
+EMP_NOT_FOUND = "このユーザーIDは見つかりません。IDを確かめてください"
+EMP_EXCLUDED = "このユーザーIDは対象外になっています。管理者に連絡してください"
+PREFILL_NOTE = "前回の回答のGr・役割と勤務形態を入れました。変わっていたら、今の所属・勤務形態に合わせてプルダウンで選び直してください。"
 
 
 def workplace_for(department):
@@ -1371,8 +1371,8 @@ def suggest_actions(limit=10):
         suggestions.append(
             {
                 "kind": "回答促進",
-                "title": f"まだ回答のない職場: {'、'.join(quiet)}",
-                "detail": "月次アンケートの回答も「自動化を検討」の登録もまだありません。推進メンバーから職場に声をかけ、回答をお願いしてください。",
+                "title": f"まだ回答のないGr・役割: {'、'.join(quiet)}",
+                "detail": "月次アンケートの回答も「自動化を検討」の登録もまだありません。推進メンバーからそのGr・役割の人に声をかけ、回答をお願いしてください。",
                 "url": ("admin.index", {}),
             }
         )
@@ -2834,7 +2834,7 @@ def apply_writeback(candidates, selected_ids, tasks_by_id):
 
 # ----- 共通 -----
 def _wp_name(t):
-    return t.workplace.name if t.workplace else "職場未設定"
+    return t.workplace.name if t.workplace else "Gr・役割未設定"
 
 def _frame(workplace_id, name):
     return f"wp{workplace_id or 0}", name
@@ -3317,7 +3317,7 @@ def add_pending_tasks(d, workplace_id=None, tasks=()):
     written = written_links() if pending else set()
     for p in pending:
         n = len(p["people"])
-        wp = names.get(p["workplace_id"], "職場未設定")
+        wp = names.get(p["workplace_id"], "Gr・役割未設定")
         node = d.node(nid("u", f"{p['workplace_id']}:{p['name']}"), p["name"] + (f"（{n}人）" if n >= 2 else ""), "pending",
                       subgraph=_frame(p["workplace_id"], wp), who={"actor": "team", "label": wp, "state": "ok"})
         key = name_key(p["name"])
@@ -3893,14 +3893,14 @@ INTAKE_PROMPT = """あなたは製造部「PC定型業務ゼロ化プロジェ�
 - person_history: 聞き取りの最初に1回だけ呼び、本人の登録済み業務・月次アンケートの答え・勤務形態を見てから質問を始める。
 - list_known_systems: 手順にシステム・ファイル・帳票・できるものの名前が出たら1回呼び、既存の呼び方があればそれにそろえる（名寄せ）。できるもの（outputs と steps の output）も、同じものが登録済みならその呼び方にそろえる。
 - check_duplicate: 業務名が決まったら1回呼ぶ。本人が同じ名前を登録済みなら、そのことを伝えて「前の登録を取り消して続けるか、別の業務として続けるか」を聞く。
-- search_similar_tasks: 手順が2つそろったら1回呼び、他の人が同じ成果物を作っていれば「同じ職場で同じものを作っている人がいます。同じ流れですか？」と確かめる。
+- search_similar_tasks: 手順が2つそろったら1回呼び、他の人が同じ成果物を作っていれば「同じGr・役割で同じものを作っている人がいます。同じ流れですか？」と確かめる。
 - 道具の結果は事実として使い、結果に無いことは言わない。同じ道具を同じ引数で2回呼ばない。道具を呼んだ往復でも、最後は必ず上の JSON だけで返す。
-- 道具の結果は次のターンでは見えない。分かったこと（例: 二重登録なし、職場の常用システムは生産管理システム、同じ成果物を同じ職場の別の人も作成）は state.notes に短く残し、notes にあることは調べ直さない。渡されていない道具はもう調べ済み。
+- 道具の結果は次のターンでは見えない。分かったこと（例: 二重登録なし、Gr・役割の常用システムは生産管理システム、同じ成果物を同じGr・役割の別の人も作成）は state.notes に短く残し、notes にあることは調べ直さない。渡されていない道具はもう調べ済み。
 - 手順を聞く「次に何をしますか？」は回数に数えない。それ以外の質問が全部で {max_q} 回まで。remaining は「手順以外であと何回聞くつもりか」。手順が2つ以上、できるものと渡す相手（使いみち）、頻度、時間がそろったら done を true にし、reply は「この流れで合っていますか？」と確認の一言にする（chips は空）。使いみちを相手が分からないと答えたら unknowns に入れて先へ進む。
 - 相手が「違う」「直したい」と言ったら、state を直して done は false のまま確認し直す。
 - 写真が読めないときは、そう伝えて文字で教えてほしいと頼む。
 - 推測で手順を作らない。相手が言ったことだけを入れる。
-- 人の名前（氏名・〇〇さん）は state にも返事にも書かない。職場・役職・部署で書く（例: 製造1課の担当者、品質保証課 課長）。
+- 人の名前（氏名・〇〇さん）は state にも返事にも書かない。Gr・役割・役職・部署で書く（例: 製造1課の担当者、品質保証課 課長）。
 - 渡す手順（送る・渡す・提出する）の output には、渡したものの名前を入れる。
 - sources・outputs と steps の input・output には情報の名前だけを書く（「〜をメール送付」「〜を印刷」のような渡し方・作業は how や action に書く）。
 - 引き継ぎの話が出たら、前の勤務からの引き継ぎは情報の取り出し元（sources と steps の input）、次の勤務への引き継ぎは渡す相手（recipients と steps の to）として扱う。
@@ -3908,7 +3908,7 @@ INTAKE_PROMPT = """あなたは製造部「PC定型業務ゼロ化プロジェ�
 state は次の形（必ず全部のキーを返す。不明は "" か [] か null）:
 {
   "title": "<業務名。『〜を〜する』で短く>",
-  "steps": [{"no": 1, "action": "<その手順でやること>", "system": "<使うシステム・ファイル・ツール名。なければ空>", "input": "<元になる情報。なければ空>", "output": "<その手順でできるもの。なければ空>", "to": "<渡す相手（職場・役職・部署。氏名は書かない）。なければ空>", "how": "<to がある手順の渡し方（メール・手渡し・共有フォルダなど）。なければ空>", "use": "<渡す相手がそれを何に使うか。分からなければ空>", "how_from": "<この手順で情報を受け取る方法（メールで届く・PHSで聞く・システムで見るなど）。なければ空>"}],
+  "steps": [{"no": 1, "action": "<その手順でやること>", "system": "<使うシステム・ファイル・ツール名。なければ空>", "input": "<元になる情報。なければ空>", "output": "<その手順でできるもの。なければ空>", "to": "<渡す相手（Gr・役割・役職・部署。氏名は書かない）。なければ空>", "how": "<to がある手順の渡し方（メール・手渡し・共有フォルダなど）。なければ空>", "use": "<渡す相手がそれを何に使うか。分からなければ空>", "how_from": "<この手順で情報を受け取る方法（メールで届く・PHSで聞く・システムで見るなど）。なければ空>"}],
   "sources": ["<情報の取り出し元（システム名・帳票名・人）>"],
   "outputs": ["<最終的にできるもの>"],
   "recipients": ["<最終的に渡す相手。人・部署を1つずつ>"],
@@ -3935,7 +3935,7 @@ FINALIZE_PROMPT = """あなたは製造部「PC定型業務ゼロ化プロジェ
 - 本人の希望（wish）が「なくしたい」なら目的と利用者の確認を最優先にし排除の案から、「減らしたい」なら結合・入替・簡素化の案を出して残る作業に自動化の手段を付け、「まずは相談したい」なら改善チームがヒアリングで聞くべき質問を用意する。
 - 使える道具: search_similar_tasks（登録済みの業務から似たものを探す。related はここで実際に見つかった業務名だけにする）、duplicate_outputs（同じできるものを複数人が作っている組）。結合の案はこの結果に基づいて書き、結果に無い業務名を作らない。道具は各1回まで。
 - 「登録済みの内容」があるときは再分析。改善チームが直した内容を前提にして、分析と改善の案を出し直す。
-- 人の名前（氏名・〇〇さん）は書かない。職場・役職・部署で書く。
+- 人の名前（氏名・〇〇さん）は書かない。Gr・役割・役職・部署で書く。
 
 次のキーを持つ JSON オブジェクトだけを返す（前後に説明文を付けない）:
 {
@@ -3943,7 +3943,7 @@ FINALIZE_PROMPT = """あなたは製造部「PC定型業務ゼロ化プロジェ
   "purpose": "<目的（なぜやるのか・誰が何に使うか）。state.purpose と会話から書く。分からなければ「不明」>",
   "output": "<最終的にできるもの。search_similar_tasks で同じものが見つかったら、その呼び方にそろえる>",
   "output_users": ["<利用者。次の中から: {output_users}>"],
-  "output_users_note": "<渡す相手の職場・部署・役職を「、」区切りで1つずつ（例: 課長、生産管理課）。氏名は書かない。なければ空>",
+  "output_users_note": "<渡す相手のGr・役割・部署・役職を「、」区切りで1つずつ（例: 課長、生産管理課）。氏名は書かない。なければ空>",
   "inputs": ["<情報のもと。次の中から: {input_sources}>"],
   "inputs_note": "<具体的なシステム名・ファイル名・帳票名を「、」区切りで1つずつ>",
   "info_from": "<情報の受け取り元（部署・システム・帳票）の名前を「、」区切りで。氏名は書かない>",
@@ -4111,7 +4111,7 @@ FINALIZE_TOOLS = [
 
 def _task_brief(t, steps=True):
     row = {
-        "id": t.id, "業務名": t.name, "職場": t.workplace.name if t.workplace else "",
+        "id": t.id, "業務名": t.name, "Gr・役割": t.workplace.name if t.workplace else "",
         "できるもの": t.output or "", "情報のもと": t.inputs_note or "・".join(t.inputs_list), "頻度": t.frequency or "",
         "月間時間": round((t.monthly_minutes or 0) / 60, 1), "希望": t.wish or "",
     }
@@ -4162,7 +4162,7 @@ def intake_handlers(r, used=None):
         if latest is not None:
             monthly = {"月度": latest.period, "行っている業務": latest.answer("task_names"), "なくしたい業務": latest.answer("wants_tasks"),
                        "先月比": latest.answer("trend"), "減った理由": latest.answer("decreased_reason"), "増えた業務": latest.answer("new_tasks")}
-        return {"職場": r.workplace.name if r.workplace else "", "勤務形態": r.work_pattern or "",
+        return {"Gr・役割": r.workplace.name if r.workplace else "", "勤務形態": r.work_pattern or "",
                 "登録済みの業務": [_task_brief(t, steps=False) for t in r.tasks][:C.AI_TOOL_ROWS], "月次アンケート": monthly}
 
     def list_known_systems(args):
@@ -4572,7 +4572,7 @@ def _merge_answer_rows(monthly_rows, resp_rows, spelling):
     for m in monthly_rows:
         if m.period in periods:
             first = periods[m.period]
-            log.warning("社員IDのまとめ: 同じ月度の月次の回答が重なっていたため、後から送られた回答を消しました（月度 %s、社員ID %s、消した回答 #%s %s、残した回答 #%s %s）",
+            log.warning("ユーザーIDのまとめ: 同じ月度の月次の回答が重なっていたため、後から送られた回答を消しました（月度 %s、ユーザーID %s、消した回答 #%s %s、残した回答 #%s %s）",
                         m.period, m.emp_id, m.id, m.created_at, first.id, first.created_at)
             db.session.delete(m)
             changed = True
@@ -5261,7 +5261,7 @@ def demo_ids_with_real_data():
         if not m.is_demo and is_demo_id(m.emp_id):
             add(m.emp_id, m.name, "monthly")
     for row in found.values():
-        row["label"] = "デモの社員IDで本物の業務あり" if row["tasks"] else "デモの社員IDで本物の回答あり"
+        row["label"] = "デモのユーザーIDで本物の業務あり" if row["tasks"] else "デモのユーザーIDで本物の回答あり"
         row["detail"] = "・".join(x for x in (f"業務 {row['tasks']} 件" if row["tasks"] else "", f"月次 {row['monthly']} 回" if row["monthly"] else "") if x)
     return found
 
@@ -5420,8 +5420,8 @@ def ai_suggest():
             }
             for d in k["domain_rows"]
         ],
-        "職場別": [
-            {"職場": w["workplace"].name, "回答した人": w["respondents"], "件数": w["tasks"], "月間時間（時間）": round(w["minutes"] / 60, 1)}
+        "Gr・役割別": [
+            {"Gr・役割": w["workplace"].name, "回答した人": w["respondents"], "件数": w["tasks"], "月間時間（時間）": round(w["minutes"] / 60, 1)}
             for w in workplace_stats()
         ],
         "重複入力の指摘（入力元別件数）": [{"入力元": src, "件数": len(ts)} for src, ts in duplicate_input_tasks()],
@@ -5660,7 +5660,7 @@ def start():
     emp, task, src, m = _entry_args()
     return redirect(url_for("survey.index", emp=emp or None, task=task or None, src=src or None, m=m or None))
 
-# ----- API: あなたのこと -----
+# ----- API: 基本情報 -----
 @bp_survey.post("/api/respondent")
 def api_respondent():
     f = _JsonForm(request.get_json(silent=True) or {})
@@ -5670,7 +5670,7 @@ def api_respondent():
     if not workplace_id:
         errors["workplace_id"] = "選択してください"
     elif db.session.get(Workplace, workplace_id) is None:
-        errors["workplace_id"] = "職場を選んでください"
+        errors["workplace_id"] = "Gr・役割を選んでください"
     if work_pattern not in C.WORK_PATTERNS:
         errors["work_pattern"] = "選択してください"
     if errors:
@@ -5824,9 +5824,9 @@ def _clean_messages(items):
 def _need_respondent(emp_id=None):
     r = _session_respondent()
     if r is None:
-        return None, (jsonify({"success": False, "message": "先に「あなたのこと」を保存してください", "errors": {"_": "respondent"}}), 400)
+        return None, (jsonify({"success": False, "message": "先に「基本情報」を保存してください", "errors": {"_": "respondent"}}), 400)
     if emp_id is not None and emp_key(emp_id) != emp_key(r.emp_id):
-        return None, (jsonify({"success": False, "message": "画面の社員IDと登録先の人が違います。「あなたのこと」を入れ直してください", "errors": {"_": "respondent"}}), 409)
+        return None, (jsonify({"success": False, "message": "画面のユーザーIDと登録先の人が違います。「基本情報」を入れ直してください", "errors": {"_": "respondent"}}), 409)
     emp = find_employee(r.emp_id)
     if emp is not None and emp.active is False:
         session.pop("respondent_id", None)
@@ -6305,7 +6305,7 @@ def export_csv():
     w = csv.writer(buf)
     w.writerow(
         [
-            "ID", "業務名", "回答者", "職場", "業務領域", "目的", "アウトプット", "利用者", "利用者補足", "入力情報", "入力情報補足",
+            "ID", "業務名", "回答者", "Gr・役割", "業務領域", "目的", "アウトプット", "利用者", "利用者補足", "入力情報", "入力情報補足",
             "前の業務", "後の業務", "関わる人・部署", "情報の受取元",
             "頻度", "1回あたり時間", "担当人数", "月間時間(分)", "使用ツール", "作業の性質", "困りごと", "困りごと補足",
             "改善の希望", "自分で改善", "補足", "ステータス", "進捗段階", "段階更新日", "活動状況のひとこと", "改善方針", "担当区分", "担当者", "手順完了", "改善後月間時間(分)", "削減(分/月)",
@@ -6371,7 +6371,7 @@ def _scope_label(workplace_id, domain_id):
     parts = []
     if workplace_id:
         w = db.session.get(Workplace, workplace_id)
-        parts.append(w.name if w else f"職場 {workplace_id}")
+        parts.append(w.name if w else f"Gr・役割 {workplace_id}")
     if domain_id:
         d = db.session.get(Domain, domain_id)
         parts.append(d.name if d else f"領域 {domain_id}")
@@ -6665,13 +6665,13 @@ def _next_sort(model):
 def add_workplace():
     name = (request.form.get("name") or "").strip()
     if not name:
-        flash("職場名を入力してください。", "danger")
+        flash("Gr・役割名を入力してください。", "danger")
     elif Workplace.query.filter_by(name=name).first():
-        flash("同じ名前の職場があります。", "warning")
+        flash("同じ名前のGr・役割があります。", "warning")
     else:
         db.session.add(Workplace(name=name, sort=_next_sort(Workplace)))
         db.session.commit()
-        flash("職場を追加しました。", "success")
+        flash("Gr・役割を追加しました。", "success")
     return redirect(url_for("admin.index"))
 
 _WORKPLACE_USERS = (("業務", "件", Task), ("月次の回答", "件", MonthlyResponse), ("対象者", "人", Employee), ("「自動化を検討」の回答者", "人", Respondent))
@@ -6689,14 +6689,14 @@ def update_workplace(workplace_id):
     w = _get_or_404(Workplace, workplace_id)
     name = (request.form.get("name") or "").strip()
     if not name:
-        flash("職場名を入力してください。", "danger")
+        flash("Gr・役割名を入力してください。", "danger")
     elif Workplace.query.filter(Workplace.name == name, Workplace.id != w.id).first():
-        flash("同じ名前の職場があります。", "warning")
+        flash("同じ名前のGr・役割があります。", "warning")
     elif name != w.name:
         remember_workplace_name(w.id, w.name, name)
         w.name = name
         db.session.commit()
-        flash("職場名を変更しました。前の名前で書かれた業務の相手・前後の業務・受け取り元も、業務マップではこの職場として扱います。", "success")
+        flash("Gr・役割名を変更しました。前の名前で書かれた業務の相手・前後の業務・受け取り元も、業務マップではこのGr・役割として扱います。", "success")
     return redirect(url_for("admin.index"))
 
 @bp_admin.post("/workplace/<int:workplace_id>/delete")
@@ -6704,11 +6704,11 @@ def delete_workplace(workplace_id):
     w = _get_or_404(Workplace, workplace_id)
     used = _workplace_usage().get(w.id)
     if used:
-        flash(f"「{w.name}」は使われているため削除できません（{'・'.join(used)}）。名前を変えるときは、職場名を直して保存してください。", "warning")
+        flash(f"「{w.name}」は使われているため削除できません（{'・'.join(used)}）。名前を変えるときは、Gr・役割名を直して保存してください。", "warning")
     else:
         db.session.delete(w)
         db.session.commit()
-        flash("職場を削除しました。", "info")
+        flash("Gr・役割を削除しました。", "info")
     return redirect(url_for("admin.index"))
 
 @bp_admin.post("/domain/add")
@@ -6794,7 +6794,7 @@ def add_employee():
     emp_id = norm_emp_id(request.form.get("emp_id"))
     name = (request.form.get("name") or "").strip()
     if not emp_id or not name:
-        flash("社員IDと氏名を入力してください。", "danger")
+        flash("ユーザーIDと氏名を入力してください。", "danger")
         return redirect(url_for("admin.employees"))
     created = _upsert_employee(
         emp_id, name, (request.form.get("department") or "").strip(), (request.form.get("email") or "").strip(),
@@ -6834,9 +6834,9 @@ def delete_employee(employee_id):
     return redirect(url_for("admin.employees"))
 
 _HEADER_ALIASES = {
-    "emp_id": ["社員id", "社員番号", "社員コード", "emp_id", "employee_id", "employeeid", "id"],
+    "emp_id": ["ユーザーid", "ユーザid", "社員id", "社員番号", "社員コード", "user_id", "userid", "emp_id", "employee_id", "employeeid", "id"],
     "name": ["氏名", "名前", "name", "displayname"],
-    "department": ["所属", "部署", "職場", "department", "dept"],
+    "department": ["所属", "部署", "gr・役割", "職場", "department", "dept"],
     "email": ["メール", "メールアドレス", "email", "mail", "e-mail"],
     "work_pattern": ["勤務形態", "勤務", "work_pattern", "shift"],
 }
@@ -6871,7 +6871,7 @@ def import_employees():
     reader = csv.DictReader(io.StringIO(text))
     cols = _detect_columns(reader.fieldnames)
     if "emp_id" not in cols or "name" not in cols:
-        flash("見出し行に「社員ID」と「氏名」が必要です。", "danger")
+        flash("見出し行に「ユーザーID」と「氏名」が必要です。", "danger")
         return redirect(url_for("admin.employees"))
 
     def cell(row, key):
@@ -6895,7 +6895,7 @@ def import_employees():
 def export_employees():
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["社員ID", "氏名", "所属", "職場", "勤務形態", "メール", "対象", "元"])
+    w.writerow(["ユーザーID", "氏名", "所属", "Gr・役割", "勤務形態", "メール", "対象", "元"])
     for e in Employee.query.order_by(Employee.workplace_id, Employee.emp_id).all():
         w.writerow([e.emp_id, e.name, e.department, e.workplace.name if e.workplace else "", e.work_pattern or "", e.email, "1" if e.active else "0", e.source])
     return _csv_response(buf, "employees.csv")
@@ -6951,14 +6951,14 @@ def remove_demo():
     flash("デモデータを削除しました。", "info")
     if kept:
         who = "、".join(" ".join(x for x in (p["emp_id"], p["name"]) if x) + f"（{p['detail']}）" for p in kept)
-        flash(f"デモの社員IDで本物の業務・回答がある人は消さずに残しました: {who}。対象者一覧のその行に印を付けています。回答率に入れないときは対象外にしてください。", "warning")
+        flash(f"デモのユーザーIDで本物の業務・回答がある人は消さずに残しました: {who}。対象者一覧のその行に印を付けています。回答率に入れないときは対象外にしてください。", "warning")
     return redirect(url_for("admin.index"))
 
 @bp_admin.route("/export/respondents.csv")
 def export_respondents():
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["社員ID", "氏名", "職場", "勤務形態", "自分で改善したい", "意欲（自動化を検討）", "月次の進め方（空でない直近の答え）", "その月度", "月次で自分で・一緒にと答えた回数",
+    w.writerow(["ユーザーID", "氏名", "Gr・役割", "勤務形態", "自分で改善したい", "意欲（自動化を検討）", "月次の進め方（空でない直近の答え）", "その月度", "月次で自分で・一緒にと答えた回数",
                 "使える技術", "学びたい技術", "登録業務数", "月間時間(分)", "一緒にやってみたい業務数", "伴走・希望の業務"])
     for p in dx_people():
         w.writerow(
@@ -7056,9 +7056,9 @@ def submit():
     survey = get_or_create_survey(period)
     workplace_id = _int_or(data.get("workplace_id") or 0, 0) or None
     work_pattern = (data.get("work_pattern") or "").strip()
-    emp_id, name, errors = _check_emp_id(data.get("emp_id"), "社員IDを入力してください")
+    emp_id, name, errors = _check_emp_id(data.get("emp_id"), "ユーザーIDを入力してください")
     if not workplace_id or db.session.get(Workplace, workplace_id) is None:
-        errors["workplace_id"] = "職場を選んでください"
+        errors["workplace_id"] = "Gr・役割を選んでください"
     if work_pattern not in C.WORK_PATTERNS:
         errors["work_pattern"] = "勤務形態を選んでください（普通勤務／交代勤務）"
     raw = data.get("answers") if request.is_json else None
@@ -7207,7 +7207,7 @@ def export_csv():
                 texts[q["key"]] = q["text"]
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["月度", "社員ID", "氏名", "職場", "勤務形態"] + [texts[k] for k in keys] + ["コメント", "回答日時"])
+    w.writerow(["月度", "ユーザーID", "氏名", "Gr・役割", "勤務形態"] + [texts[k] for k in keys] + ["コメント", "回答日時"])
     for r in MonthlyResponse.query.order_by(MonthlyResponse.period, MonthlyResponse.workplace_id, MonthlyResponse.name).all():
         a = r.answers
         w.writerow(
@@ -7367,7 +7367,7 @@ TEMPLATES = {
 <div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-2">
   <div>
     <h2 class="mb-1">対象者一覧</h2>
-    <p class="text-muted mb-0">月次アンケートか「自動化を検討」に一度でも回答した人が、社員IDごとに1行で自動で載ります。退職や他部門への異動で回答率の分母から外す人は「対象外」にチェックします。</p>
+    <p class="text-muted mb-0">月次アンケートか「自動化を検討」に一度でも回答した人が、ユーザーIDごとに1行で自動で載ります。退職や他部門への異動で回答率の分母から外す人は「対象外」にチェックします。</p>
     <p class="small text-muted mb-0">回答した人 {{ answered_count }} 人（業務を1件以上登録したか、月次アンケートに回答した人。対象外は除く）。</p>
   </div>
   <div class="d-flex gap-2">
@@ -7385,7 +7385,7 @@ TEMPLATES = {
   <div class="member-wrap">
   <table class="table table-sm align-middle mb-0 member-table">
     <thead><tr>
-      <th class="text-center">対象外</th><th>社員ID</th><th>氏名</th><th class="text-end">自動化を検討</th>
+      <th class="text-center">対象外</th><th>ユーザーID</th><th>氏名</th><th class="text-end">自動化を検討</th>
       {% for p in periods %}<th class="text-center member-month">{{ p[:4] }}<br>{{ p[5:]|int }}月</th>{% endfor %}
     </tr></thead>
     <tbody>
@@ -7415,11 +7415,11 @@ TEMPLATES = {
 <div class="row g-3 mb-3">
   <div class="col-lg-6">
     <div class="card h-100"><div class="card-body">
-      <h5 class="card-title">社員IDの照会（LDAP）</h5>
+      <h5 class="card-title">ユーザーIDの照会（LDAP）</h5>
       <p class="mb-2">{{ ldap_status }}</p>
-      <p class="small text-muted mb-0">回答するときは、社員IDが存在するかだけを確かめます。<code>config.py</code> に <code>LDAP_API_URL</code>（例: <code>http://ldap-api.local/employees/{id}</code>）と、レスポンスの項目名 <code>LDAP_API_FIELD_NAME</code> などを設定します（README 参照）。</p>
+      <p class="small text-muted mb-0">回答するときは、ユーザーIDが存在するかだけを確かめます。<code>config.py</code> に <code>LDAP_API_URL</code>（例: <code>http://ldap-api.local/employees/{id}</code>）と、レスポンスの項目名 <code>LDAP_API_FIELD_NAME</code> などを設定します（README 参照）。</p>
       <form class="d-flex gap-2 mt-3" onsubmit="return false">
-        <input type="text" id="test-emp" class="form-control form-control-sm" placeholder="社員IDで照会テスト">
+        <input type="text" id="test-emp" class="form-control form-control-sm" placeholder="ユーザーIDで照会テスト">
         <button type="button" class="btn btn-sm btn-outline-primary text-nowrap" id="test-btn">照会</button>
       </form>
       <div id="test-msg" class="form-text"></div>
@@ -7430,9 +7430,9 @@ TEMPLATES = {
       <h5 class="card-title">回答前に対象者へ入れる（任意）</h5>
       <p class="small text-muted">まだ回答していない人も分母に入れたいときだけ使います。</p>
       <form method="post" action="{{ url_for('admin.add_employee') }}" class="row g-2 align-items-end">
-        <div class="col-6 col-md-3"><label class="form-label small mb-0">社員ID</label><input type="text" name="emp_id" class="form-control form-control-sm" required></div>
+        <div class="col-6 col-md-3"><label class="form-label small mb-0">ユーザーID</label><input type="text" name="emp_id" class="form-control form-control-sm" required></div>
         <div class="col-6 col-md-3"><label class="form-label small mb-0">氏名</label><input type="text" name="name" class="form-control form-control-sm" required></div>
-        <div class="col-6 col-md-3"><label class="form-label small mb-0">職場</label>
+        <div class="col-6 col-md-3"><label class="form-label small mb-0">Gr・役割</label>
           <select name="workplace_id" class="form-select form-select-sm"><option value="">（未設定）</option>{% for w in workplaces %}<option value="{{ w.id }}">{{ w.name }}</option>{% endfor %}</select></div>
         <div class="col-6 col-md-3"><label class="form-label small mb-0">勤務形態</label>
           <select name="work_pattern" class="form-select form-select-sm"><option value="">（本人が選ぶ）</option>{% for w in C.WORK_PATTERNS %}<option value="{{ w }}">{{ w }}</option>{% endfor %}</select></div>
@@ -7442,7 +7442,7 @@ TEMPLATES = {
         <input type="file" name="file" accept=".csv,text/csv" class="form-control form-control-sm" required>
         <button class="btn btn-sm btn-outline-primary text-nowrap">CSV取込</button>
       </form>
-      <p class="small text-muted mt-2 mb-0">CSV は1行目に「社員ID」「氏名」（任意で「所属」「メール」「勤務形態」）。同じ社員IDは上書きします。文字コードは UTF-8 または Shift_JIS。</p>
+      <p class="small text-muted mt-2 mb-0">CSV は1行目に「ユーザーID」（「社員ID」でも可）と「氏名」（任意で「所属」「メール」「勤務形態」）。同じユーザーIDは上書きします。文字コードは UTF-8 または Shift_JIS。</p>
     </div></div>
   </div>
 </div>
@@ -7500,7 +7500,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
 <div id="mv-app">
   <div class="card mb-3 mv-card"><div class="card-body">
     <h5 class="card-title">作業のだれ（担い手）</h5>
-    <p class="small text-muted mb-2">作業の箱に付く「だれがやるか」。渡す相手・前後の作業の担い手を名前から見分けます。氏名は出さず、職場・役職・部署で表します。先に職場マスタの職場名で判定し、当たらなければここの語で判定します。「利用者の区分」は、業務データへ反映するときの利用者（職場内・上司・他部署・顧客・社外）です。</p>
+    <p class="small text-muted mb-2">作業の箱に付く「だれがやるか」。渡す相手・前後の作業の担い手を名前から見分けます。氏名は出さず、Gr・役割・役職・部署で表します。先にGr・役割マスタの名前で判定し、当たらなければここの語で判定します。「利用者の区分」は、業務データへ反映するときの利用者（職場内・上司・他部署・顧客・社外）です。</p>
     <div class="table-responsive"><table class="table table-sm align-middle mv-table" data-group="actors"><thead><tr><th></th><th>名前</th><th>判定に使う語</th><th>除く語</th><th>アイコン</th><th>利用者の区分</th><th></th></tr></thead><tbody></tbody></table></div>
     <button type="button" class="btn btn-sm btn-outline-primary mv-add" data-group="actors"><i class="bi bi-plus-lg"></i> 区分を追加</button>
   </div></div>
@@ -7679,7 +7679,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
       <div class="mb-2"><label class="form-label small mb-0">サブメッセージ</label><input type="text" name="sub_message" class="form-control form-control-sm" value="{{ settings.sub_message }}"></div>
       <div class="form-check mb-2">
         <input class="form-check-input" type="checkbox" name="board_show_names" value="1" id="board-show-names" {% if settings.board_show_names != '0' %}checked{% endif %}>
-        <label class="form-check-label small" for="board-show-names">活動状況に登録者の氏名を表示する（外すと職場名のみ）</label>
+        <label class="form-check-label small" for="board-show-names">活動状況に登録者の氏名を表示する（外すとGr・役割名のみ）</label>
       </div>
       <button class="btn btn-primary btn-sm">保存</button>
     </div></form>
@@ -7736,21 +7736,21 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
 
   <div class="col-lg-6">
     <div class="card mb-3"><div class="card-body">
-      <h5 class="card-title">職場マスタ</h5>
-      <p class="small text-muted">職場名は直して保存できます（業務・回答の紐づきはそのまま）。業務・月次の回答・対象者・「自動化を検討」の回答者が使っている職場は削除できません。</p>
+      <h5 class="card-title">Gr・役割マスタ</h5>
+      <p class="small text-muted">Gr・役割名は直して保存できます（業務・回答の紐づきはそのまま）。業務・月次の回答・対象者・「自動化を検討」の回答者が使っているGr・役割は削除できません。</p>
       {% for w in workplaces %}
       {% set used = workplace_usage.get(w.id) %}
       <form method="post" action="{{ url_for('admin.update_workplace', workplace_id=w.id) }}" class="row g-1 align-items-center mb-2">
-        <div class="col-8"><input type="text" name="name" class="form-control form-control-sm" value="{{ w.name }}" required aria-label="職場名"></div>
+        <div class="col-8"><input type="text" name="name" class="form-control form-control-sm" value="{{ w.name }}" required aria-label="Gr・役割名"></div>
         <div class="col-4 d-flex gap-1 justify-content-end">
           <button class="btn btn-sm btn-outline-primary">保存</button>
-          <button class="btn btn-sm btn-outline-danger" formaction="{{ url_for('admin.delete_workplace', workplace_id=w.id) }}" {% if used %}disabled title="使われている職場は削除できません"{% endif %} onclick="return confirm('「{{ w.name }}」を削除しますか？')">削除</button>
+          <button class="btn btn-sm btn-outline-danger" formaction="{{ url_for('admin.delete_workplace', workplace_id=w.id) }}" {% if used %}disabled title="使われているGr・役割は削除できません"{% endif %} onclick="return confirm('「{{ w.name }}」を削除しますか？')">削除</button>
         </div>
         <div class="col-12 small text-muted">{{ used|join('・') if used else '未使用（削除できます）' }}</div>
       </form>
       {% endfor %}
       <form method="post" action="{{ url_for('admin.add_workplace') }}" class="d-flex gap-2 mt-2">
-        <input type="text" name="name" class="form-control form-control-sm" placeholder="職場名" required>
+        <input type="text" name="name" class="form-control form-control-sm" placeholder="Gr・役割名" required>
         <button class="btn btn-sm btn-primary text-nowrap">追加</button>
       </form>
     </div></div>
@@ -7940,7 +7940,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
   <h5 class="card-title">この領域の業務（月間時間順）</h5>
   <div class="table-responsive">
   <table class="table table-sm align-middle mb-0">
-    <thead><tr><th>業務名</th><th>職場／回答者</th><th>目的</th><th>アウトプット</th><th class="text-end">月間</th><th>状態</th><th>確認</th></tr></thead>
+    <thead><tr><th>業務名</th><th>Gr・役割／回答者</th><th>目的</th><th>アウトプット</th><th class="text-end">月間</th><th>状態</th><th>確認</th></tr></thead>
     <tbody>
     {% for t in tasks %}
     <tr>
@@ -8054,7 +8054,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
         <div class="btn-group btn-group-sm" role="group"><button type="button" class="btn btn-outline-secondary" data-type="work"><i class="bi bi-square"></i> 作業</button><button type="button" class="btn btn-outline-secondary" data-type="info"><i class="bi bi-file-earmark"></i> 情報</button></div>
       </div>
       <div class="mt-2" id="fe-who-row">
-        <label class="small mb-0" for="fe-who-input">だれ（職場・役職・部署。氏名は書かない）</label>
+        <label class="small mb-0" for="fe-who-input">だれ（Gr・役割・役職・部署。氏名は書かない）</label>
         <input type="text" class="form-control form-control-sm mb-1" id="fe-who-input" placeholder="例: 製造1課 課長、生産管理課">
         <select class="form-select form-select-sm" id="fe-actor-select" aria-label="だれの区分"></select>
       </div>
@@ -8135,7 +8135,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
 <form method="get" class="card mb-3"><div class="card-body py-2">
   <div class="row g-2 align-items-end">
     <div class="col-6 col-md-3">
-      <label class="form-label small mb-0">職場</label>
+      <label class="form-label small mb-0">Gr・役割</label>
       <select name="workplace_id" class="form-select form-select-sm">
         <option value="">製造部全体</option>
         {% for w in workplaces %}<option value="{{ w.id }}" {% if args.get('workplace_id')|string == w.id|string %}selected{% endif %}>{{ w.name }}</option>{% endfor %}
@@ -8155,13 +8155,13 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
   </div>
 </div></form>
 {% if truncated %}
-<div class="alert alert-warning py-2 small">業務が {{ max_tasks }} 件を超えるため、先頭 {{ max_tasks }} 件だけを描いています。職場や領域で絞り込んでください。</div>
+<div class="alert alert-warning py-2 small">業務が {{ max_tasks }} 件を超えるため、先頭 {{ max_tasks }} 件だけを描いています。Gr・役割や領域で絞り込んでください。</div>
 {% endif %}
 
 <div class="bizmap-sections">
   <div id="tab-info">
     {{ flow_panel('info', '業務マップ',
-       '取り出し元の情報 → 業務 → できるもの → 渡す相手の作業。箱は作業（四角・だれつき）と情報（媒体の形とアイコン）の2種類、線は仕事の流れ（太い灰）と情報の流れ（細い青）の2種類です。聞き取りで答えた名前で描き、同じ名前は1つの箱にまとめます。職場ごとの枠に業務を置き、点線は名前から推定したつながり（ある業務のできるものを別の業務が使っている、前後の業務）です。灰色の点線の箱は、月次アンケートで挙がったものの、まだ流れを登録していない業務です。保留中の業務は点線の枠に「（保留）」、廃止した業務は薄い色に「（廃止済み）」を付けます。',
+       '取り出し元の情報 → 業務 → できるもの → 渡す相手の作業。箱は作業（四角・だれつき）と情報（媒体の形とアイコン）の2種類、線は仕事の流れ（太い灰）と情報の流れ（細い青）の2種類です。聞き取りで答えた名前で描き、同じ名前は1つの箱にまとめます。Gr・役割ごとの枠に業務を置き、点線は名前から推定したつながり（ある業務のできるものを別の業務が使っている、前後の業務）です。灰色の点線の箱は、月次アンケートで挙がったものの、まだ流れを登録していない業務です。保留中の業務は点線の枠に「（保留）」、廃止した業務は薄い色に「（廃止済み）」を付けます。',
        flows.info, '業務が登録されると図が描かれます。') }}
 
     <div class="row g-3 mt-1">
@@ -8190,8 +8190,8 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
       </div>
       <div class="col-lg-5">
         <div class="card h-100"><div class="card-body">
-          <h5 class="card-title">職場・部署の間の受け渡し</h5>
-          <p class="small text-muted">誰から受け取り、誰に渡しているか。「情報」は情報の受け取り元とアウトプットの利用者から、「関与」は関わる人・部署から数えています。業務マップと同じ決まりで、受け取り元は1つずつに分け、役職は職場名つきにし、「他部署」だけの相手は目的の文の部署名にします。</p>
+          <h5 class="card-title">Gr・役割・部署の間の受け渡し</h5>
+          <p class="small text-muted">誰から受け取り、誰に渡しているか。「情報」は情報の受け取り元とアウトプットの利用者から、「関与」は関わる人・部署から数えています。業務マップと同じ決まりで、受け取り元は1つずつに分け、役職はGr・役割名つきにし、「他部署」だけの相手は目的の文の部署名にします。</p>
           <div class="table-responsive">
           <table class="table table-sm mb-0">
             <thead><tr><th>から</th><th>へ</th><th class="text-end">情報</th><th class="text-end">関与</th></tr></thead>
@@ -8330,7 +8330,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
   <div class="pb-head-main">
   <form method="get" class="pb-scope-form">
     <h1 class="pb-h1">
-      <select name="workplace_id" class="pb-scope-select" aria-label="職場で絞り込む" onchange="this.form.submit()">
+      <select name="workplace_id" class="pb-scope-select" aria-label="Gr・役割で絞り込む" onchange="this.form.submit()">
         <option value="">全体</option>
         {% for w in workplaces %}<option value="{{ w.id }}" {% if selected_wp and selected_wp.id == w.id %}selected{% endif %}>{{ w.name }}</option>{% endfor %}
       </select>活動状況
@@ -8442,7 +8442,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
 {% macro row(t, show_names=True) %}
 <div class="pb-row">
   <div class="pb-from">
-    <div class="pb-wp">{{ t.workplace.name if t.workplace else '職場未設定' }}</div>
+    <div class="pb-wp">{{ t.workplace.name if t.workplace else 'Gr・役割未設定' }}</div>
     {% if show_names and t.respondent %}<div class="pb-name">{{ t.respondent.name }}</div>{% endif %}
   </div>
   <div class="pb-what">
@@ -8521,7 +8521,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
       <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
         <div>
           <h5 class="mb-1">この業務の流れ</h5>
-          <p class="small text-muted mb-0">取り出し元の情報 → 手順 → できるもの → 渡す相手の作業、前後の業務。<a href="{{ url_for('bizmap.index', workplace_id=task.workplace_id) }}">職場全体の流れ図</a></p>
+          <p class="small text-muted mb-0">取り出し元の情報 → 手順 → できるもの → 渡す相手の作業、前後の業務。<a href="{{ url_for('bizmap.index', workplace_id=task.workplace_id) }}">Gr・役割全体の流れ図</a></p>
           {{ task_legend|safe }}
         </div>
         <div class="btn-group btn-group-sm flow-toolbar" data-target="task" role="group">
@@ -8688,7 +8688,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
           <div class="form-label small mb-0">利用者{{ need('利用者') }}</div>
           <input type="hidden" name="output_users" value="">
           {% for u in C.OUTPUT_USERS %}<div class="form-check form-check-inline small mb-0"><input class="form-check-input" type="checkbox" name="output_users" value="{{ u }}" id="f-ou-{{ loop.index }}" {% if u in task.output_users_list %}checked{% endif %}><label class="form-check-label" for="f-ou-{{ loop.index }}">{{ u }}</label></div>{% endfor %}
-          <input type="text" name="output_users_note" class="form-control form-control-sm mt-1" value="{{ task.output_users_note or '' }}" maxlength="500" placeholder="渡す相手の職場・部署・役職（「、」区切り。氏名は書かない）" aria-label="利用者の補足">
+          <input type="text" name="output_users_note" class="form-control form-control-sm mt-1" value="{{ task.output_users_note or '' }}" maxlength="500" placeholder="渡す相手のGr・役割・部署・役職（「、」区切り。氏名は書かない）" aria-label="利用者の補足">
         </div>
         <div class="col-12" id="f-inputs">
           <div class="form-label small mb-0">入力元（情報のもと）{{ need('入力元') }}</div>
@@ -8827,7 +8827,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
       </select>
     </div>
     <div class="col-6 col-md-4 col-xl">
-      <label class="form-label small mb-0">職場</label>
+      <label class="form-label small mb-0">Gr・役割</label>
       <select name="workplace_id" class="form-select form-select-sm">
         <option value="">すべて</option>
         {% for w in workplaces %}<option value="{{ w.id }}" {% if args.get('workplace_id')|string == w.id|string %}selected{% endif %}>{{ w.name }}</option>{% endfor %}
@@ -8876,7 +8876,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
 <div class="table-responsive">
 <table class="table table-sm table-hover align-middle bg-white">
   <thead><tr>
-    <th>業務名</th><th>職場／登録者</th><th>領域</th><th class="text-end">月間</th><th>改善の希望</th><th>自分で</th><th>ステータス</th><th>進捗（活動状況）</th><th>手順</th><th>確認</th><th>AI</th>
+    <th>業務名</th><th>Gr・役割／登録者</th><th>領域</th><th class="text-end">月間</th><th>改善の希望</th><th>自分で</th><th>ステータス</th><th>進捗（活動状況）</th><th>手順</th><th>確認</th><th>AI</th>
   </tr></thead>
   <tbody>
   {% for t in tasks %}
@@ -9004,7 +9004,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
 
 <p class="dash-link"><a href="{{ url_for('board.index') }}"><i class="bi bi-kanban"></i>活動状況で案件の進み具合を見る（進行中 {{ active_count }} 件）<i class="bi bi-arrow-right-short"></i></a></p>
 
-<h2 class="section-title">アンケートと職場の状況</h2>
+<h2 class="section-title">アンケートとGr・役割の状況</h2>
 <div class="row g-3 mb-4">
   <div class="col-lg-5">
     <div class="card h-100"><div class="card-body">
@@ -9028,10 +9028,10 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
   </div>
   <div class="col-lg-7">
     <div class="card h-100"><div class="card-body">
-      <h5 class="card-title">職場別の回答状況</h5>
+      <h5 class="card-title">Gr・役割別の回答状況</h5>
       <div class="table-responsive">
       <table class="table table-sm mb-0">
-        <thead><tr><th>職場</th><th class="text-end">回答した人</th><th class="text-end">業務</th><th class="text-end">月間時間</th><th class="text-end" title="希望が「なくしたい・減らしたい」か、困りごとのある業務">案件候補</th><th class="text-end">自主改善</th></tr></thead>
+        <thead><tr><th>Gr・役割</th><th class="text-end">回答した人</th><th class="text-end">業務</th><th class="text-end">月間時間</th><th class="text-end" title="希望が「なくしたい・減らしたい」か、困りごとのある業務">案件候補</th><th class="text-end">自主改善</th></tr></thead>
         <tbody>
         {% for w in workplaces %}
         <tr class="{% if w.respondents == 0 %}text-muted{% endif %}">
@@ -9046,7 +9046,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
         </tbody>
       </table>
       </div>
-      <p class="small text-muted mt-2 mb-0">回答した人は、業務を1件以上登録したか、月次アンケートに回答した人（対象外は除く）を、いまの職場（月次アンケートか「自動化を検討」のいちばん新しい回答で選んだ職場）で1人1回数えます。自主改善はそのうち自ら改善に取り組みたい人です。業務・月間時間・案件候補は、業務を登録したときの職場で数えます。</p>
+      <p class="small text-muted mt-2 mb-0">回答した人は、業務を1件以上登録したか、月次アンケートに回答した人（対象外は除く）を、いまのGr・役割（月次アンケートか「自動化を検討」のいちばん新しい回答で選んだGr・役割）で1人1回数えます。自主改善はそのうち自ら改善に取り組みたい人です。業務・月間時間・案件候補は、業務を登録したときのGr・役割で数えます。</p>
     </div></div>
   </div>
 </div>
@@ -9115,7 +9115,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
       </div>
       <div class="table-responsive">
       <table class="table table-sm mt-2 mb-0">
-        <thead><tr><th>業務名</th><th>職場</th><th>領域</th><th class="text-end">月間</th><th>希望</th><th>状態</th></tr></thead>
+        <thead><tr><th>業務名</th><th>Gr・役割</th><th>領域</th><th class="text-end">月間</th><th>希望</th><th>状態</th></tr></thead>
         <tbody>
         {% for t in recent %}
         <tr>
@@ -9395,7 +9395,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
     <div class="mq-next">
       <div class="mq-next-title">次は、なくしたい業務の「流れ」を AI と整理してみませんか</div>
       <div class="mq-next-tasks">{% for n in wants_tasks %}<span>{{ n }}</span>{% endfor %}</div>
-      <p class="small text-muted mb-3">あなたのことと業務名はアンケートの答えから入力済みです。AI の短い質問に答えると流れ図ができ、改善チームと自動化を検討できます（1件 2〜3分）。</p>
+      <p class="small text-muted mb-3">基本情報と業務名はアンケートの答えから入力済みです。AI の短い質問に答えると流れ図ができ、改善チームと自動化を検討できます（1件 2〜3分）。</p>
       <a class="btn btn-primary btn-lg" href="{{ url_for('survey.start', emp=row.emp_id, src='monthly', m=row.id) }}"><i class="bi bi-diagram-3"></i> 自動化を検討する</a>
     </div>
     {% endif %}
@@ -9417,25 +9417,17 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
   {% if not survey.is_active %}
   <div class="card mq-card"><div class="card-body text-center text-muted py-5">この月度のアンケートは準備中です。</div></div>
   {% else %}
-  <div class="card mq-card mq-done {% if not existing %}d-none{% endif %}" id="mq-answered"><div class="card-body text-center">
-    <div class="mq-check"><i class="bi bi-check-lg"></i></div>
-    <h2 class="h4 mb-1">回答済み</h2>
-    <p class="text-muted mb-3">{{ period_label }}のアンケートはすでに回答いただいています。ご協力ありがとうございました。</p>
-    <button type="button" class="btn btn-outline-secondary btn-sm" id="mq-other-id">別の社員IDで回答する</button>
-  </div></div>
-
   <form id="mq-form" class="card mq-card {% if existing %}d-none{% endif %}" method="post" action="{{ url_for('monthly.submit') }}" novalidate>
     <div class="card-body">
       <input type="hidden" name="period" value="{{ period }}">
-      <div class="mq-progress" id="mq-progress" aria-live="polite"><div class="mq-progress-bar"><span></span></div><span class="mq-progress-text">あと少しです</span></div>
       <div class="mq-identity">
         <div class="row g-2">
           <div class="col-sm-6">
-            <label class="form-label" for="emp_id">社員ID</label>
+            <label class="form-label" for="emp_id">ユーザーID</label>
             <input type="text" name="emp_id" id="emp_id" class="form-control" value="{{ emp_id }}" autocomplete="off" required>
           </div>
           <div class="col-sm-6">
-            <label class="form-label" for="workplace_id">職場</label>
+            <label class="form-label" for="workplace_id">Gr・役割</label>
             <select name="workplace_id" id="workplace_id" class="form-select" required>
               <option value="">選択</option>
               {% for w in workplaces %}<option value="{{ w.id }}">{{ w.name }}</option>{% endfor %}
@@ -9505,6 +9497,12 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
     </div>
   </form>
 
+  <div class="card mq-card mq-done {% if not existing %}d-none{% endif %}" id="mq-answered"><div class="card-body text-center">
+    <div class="mq-check"><i class="bi bi-check-lg"></i></div>
+    <h2 class="h4 mb-1">回答済み</h2>
+    <p class="text-muted mb-0">{{ period_label }}のアンケートはすでに回答いただいています。ご協力ありがとうございました。</p>
+  </div></div>
+
   <div class="card mq-card mq-done d-none" id="mq-success"><div class="card-body text-center">
     <div class="mq-check"><i class="bi bi-check-lg"></i></div>
     <h2 class="h4 mb-1">回答を受け付けました</h2>
@@ -9512,7 +9510,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
     <div class="mq-next d-none" id="mq-next">
       <div class="mq-next-title">次は、なくしたい業務の「流れ」を AI と整理してみませんか</div>
       <div class="mq-next-tasks" id="mq-next-tasks"></div>
-      <p class="small text-muted mb-3">あなたのことと業務名はアンケートの答えから入力済みです。AI の短い質問に答えると流れ図ができ、改善チームと自動化を検討できます（1件 2〜3分）。</p>
+      <p class="small text-muted mb-3">基本情報と業務名はアンケートの答えから入力済みです。AI の短い質問に答えると流れ図ができ、改善チームと自動化を検討できます（1件 2〜3分）。</p>
       <a class="btn btn-primary btn-lg" id="mq-register"><i class="bi bi-diagram-3"></i> 自動化を検討する</a>
     </div>
   </div></div>
@@ -9556,52 +9554,37 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
     var j = await r.json();
     if (empInput.value.trim() !== id) return;
     if (j.answered && !j.excluded) {
-      form.classList.add("d-none");
+      setMsg("");
+      clearPrefill();
+      form.classList.add("mq-only-id");
       answered.classList.remove("d-none");
       return;
     }
     answered.classList.add("d-none");
-    form.classList.remove("d-none");
+    form.classList.remove("d-none", "mq-only-id");
     empFound = !!j.found && !j.excluded;
     if (empFound) {
-      setMsg("社員IDを確認しました", "ok");
+      setMsg("ユーザーIDを確認しました", "ok");
       applyPrefill((j.emp_id || id).toLowerCase(), j.prefill);
     } else {
       empProblem = j.excluded ? (j.message || {{ C.EMP_EXCLUDED|tojson }}) : NOT_FOUND;
       setMsg(empProblem, "ng");
       clearPrefill();
     }
-    updateProgress();
+    updateReady();
   }
-  document.getElementById("mq-other-id").addEventListener("click", function () {
-    empInput.value = "";
-    empFound = null;
-    setMsg("");
-    clearPrefill();
-    answered.classList.add("d-none");
-    form.classList.remove("d-none");
-    if (window.history && history.replaceState) history.replaceState(null, "", "{{ url_for('monthly.form', period=period) }}");
-    updateProgress();
-    empInput.focus();
-  });
-  var prog = document.getElementById("mq-progress");
   function answeredOf(q) {
     if (q.dataset.type === "choice") return !!q.querySelector("input:checked");
     if (q.dataset.type === "list") return Array.prototype.some.call(q.querySelectorAll("[data-list-item]"), function (i) { return i.value.trim(); });
     var t = q.querySelector("textarea");
     return !!(t && t.value.trim());
   }
-  function updateProgress() {
-    if (!prog) return;
+  function updateReady() {
     var items = [!!(empInput.value.trim() && empFound !== false && wpSelect.value && patSelect.value)];
     form.querySelectorAll(".mq-q[data-key]").forEach(function (q) {
       if (!q.classList.contains("d-none") && q.dataset.required === "1") items.push(answeredOf(q));
     });
-    var done = items.filter(Boolean).length, rest = items.length - done;
-    prog.style.setProperty("--p", items.length ? done / items.length : 0);
-    prog.classList.toggle("is-complete", rest === 0);
-    form.classList.toggle("mq-ready", rest === 0);
-    prog.querySelector(".mq-progress-text").textContent = rest === 0 ? "すべて答えました。送信できます" : "あと " + rest + " 問";
+    form.classList.toggle("mq-ready", items.every(Boolean));
   }
   function applyDeps() {
     form.querySelectorAll(".mq-q[data-dep-key]").forEach(function (q) {
@@ -9622,8 +9605,8 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
       if (err && !shown) err.textContent = "";
     });
   }
-  form.addEventListener("change", function (e) { if (e.target.matches('input[type="radio"]')) applyDeps(); updateProgress(); });
-  form.addEventListener("input", function () { updateProgress(); });
+  form.addEventListener("change", function (e) { if (e.target.matches('input[type="radio"]')) applyDeps(); updateReady(); });
+  form.addEventListener("input", function () { updateReady(); });
   function listBox(el) { return el.closest(".mq-list-input"); }
   function listValues(box) { return Array.prototype.map.call(box.querySelectorAll("[data-list-item]"), function (i) { return i.value.trim(); }).filter(Boolean); }
   function addListRow(box, value) {
@@ -9676,7 +9659,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
     if (next) next.focus(); else addListRow(box).focus();
   });
   applyDeps();
-  updateProgress();
+  updateReady();
   empInput.addEventListener("input", function () { clearTimeout(lookupTimer); lookupTimer = setTimeout(lookupEmp, 500); });
   empInput.addEventListener("change", lookupEmp);
   {% if emp_id and not existing %}lookupEmp();{% endif %}
@@ -9696,7 +9679,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
       if (q.dataset.required === "1" && !val) { err.textContent = q.dataset.type === "choice" ? "選択してください" : "入力してください"; if (!firstMissing) firstMissing = q; }
       answers[key] = val;
     });
-    var missing = !form.emp_id.value.trim() ? "社員IDを入力してください" : empFound === false ? empProblem : !form.workplace_id.value ? "職場を選んでください" : !form.work_pattern.value ? "勤務形態を選んでください" : "";
+    var missing = !form.emp_id.value.trim() ? "ユーザーIDを入力してください" : empFound === false ? empProblem : !form.workplace_id.value ? "Gr・役割を選んでください" : !form.work_pattern.value ? "勤務形態を選んでください" : "";
     if (missing) {
       errBox.textContent = missing; errBox.classList.remove("d-none");
       document.querySelector(".mq-identity").scrollIntoView({ behavior: "smooth", block: "center" });
@@ -9723,7 +9706,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
         if (window.uiCelebrate) window.uiCelebrate();
       } else {
         errBox.textContent = j.message || "送信できませんでした"; errBox.classList.remove("d-none");
-        if (j.errors && j.errors.emp_id) { empFound = false; empProblem = j.errors.emp_id; setMsg(empProblem, "ng"); updateProgress(); }
+        if (j.errors && j.errors.emp_id) { empFound = false; empProblem = j.errors.emp_id; setMsg(empProblem, "ng"); updateReady(); }
         if (j.errors) Object.keys(j.errors).forEach(function (k) { var el = form.querySelector('.mq-q[data-key="' + k + '"] .mq-err'); if (el) el.textContent = j.errors[k]; });
         submitBtn.disabled = false; submitBtn.textContent = "回答を送信する";
       }
@@ -9825,11 +9808,11 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
   {% endfor %}
 </div>
 
-<h2 class="section-title">職場別の推移 <span class="section-sub">PCの定型・定期業務あり率と推計月間時間</span></h2>
+<h2 class="section-title">Gr・役割別の推移 <span class="section-sub">PCの定型・定期業務あり率と推計月間時間</span></h2>
 <div class="card mb-2"><div class="card-body">
   <div class="table-responsive">
   <table class="table table-sm trend-table mb-0">
-    <thead><tr><th>職場</th>{% for l in wp_trends.labels %}<th class="text-end">{{ l|replace('年', '/')|replace('月度', '') }}</th>{% endfor %}</tr></thead>
+    <thead><tr><th>Gr・役割</th>{% for l in wp_trends.labels %}<th class="text-end">{{ l|replace('年', '/')|replace('月度', '') }}</th>{% endfor %}</tr></thead>
     <tbody>
     {% for row in wp_trends.rows %}
     <tr>
@@ -9923,7 +9906,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
   <h5 class="card-title">回答一覧（{{ responses|length }} 件）</h5>
   <div class="table-responsive">
   <table class="table table-sm mb-0">
-    <thead><tr><th>社員ID</th><th>氏名</th><th>職場</th>{% for q in survey.questions if q.type == 'choice' %}<th class="small">{{ q.text|truncate(14, True, '…') }}</th>{% endfor %}<th>回答日</th></tr></thead>
+    <thead><tr><th>ユーザーID</th><th>氏名</th><th>Gr・役割</th>{% for q in survey.questions if q.type == 'choice' %}<th class="small">{{ q.text|truncate(14, True, '…') }}</th>{% endfor %}<th>回答日</th></tr></thead>
     <tbody>
     {% for r in responses %}
     <tr>
@@ -10027,7 +10010,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
 
 <form class="card mb-3" method="get"><div class="card-body d-flex flex-wrap align-items-end gap-3 py-3">
   <div>
-    <label class="form-label small mb-1" for="dx-wp">職場</label>
+    <label class="form-label small mb-1" for="dx-wp">Gr・役割</label>
     <select name="workplace_id" id="dx-wp" class="form-select form-select-sm">
       <option value="">すべて</option>
       {% for w in workplaces %}<option value="{{ w.id }}" {% if args.workplace_id == w.id %}selected{% endif %}>{{ w.name }}</option>{% endfor %}
@@ -10050,7 +10033,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
   <div class="table-responsive">
   <table class="table table-sm align-middle mb-0 dx-table">
     <thead><tr>
-      <th>氏名</th><th>職場</th><th>勤務形態</th><th>意欲（自動化を検討）</th><th>月次：改善の進め方</th>
+      <th>氏名</th><th>Gr・役割</th><th>勤務形態</th><th>意欲（自動化を検討）</th><th>月次：改善の進め方</th>
       <th>使える技術</th><th>学びたい技術</th><th>業務</th>
     </tr></thead>
     <tbody>
@@ -10150,7 +10133,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
 
   <section class="card rq-card rq-sec" id="sec-person">
     <div class="card-body">
-      <div class="rq-sec-head"><span class="rq-no">1</span><span class="rq-sec-title">あなたのこと</span></div>
+      <div class="rq-sec-head"><span class="rq-no">1</span><span class="rq-sec-title">基本情報</span></div>
       <div id="rq-person"></div>
     </div>
   </section>
@@ -11380,7 +11363,7 @@ document.addEventListener("DOMContentLoaded", function () {
     if (!meta.saved_at) setStatus("自動生成（未保存）。配置や名前を直して保存すると、再生成しても修正が残ります");
     if (newIds.length) setMode("新しく登録された業務など " + newIds.length + " 件を右端に追加しました。配置を整えて保存してください");
     else setMode("");
-    if (meta.truncated) setMode("業務が " + meta.task_count + " 件を超えるため一部のみ表示しています。職場や領域で絞り込んでください");
+    if (meta.truncated) setMode("業務が " + meta.task_count + " 件を超えるため一部のみ表示しています。Gr・役割や領域で絞り込んでください");
   }
 
   async function save() {
@@ -12191,12 +12174,6 @@ summary { transition: color 0.15s ease; }
 .mq-option input:checked + span { animation: ui-pick 0.32s cubic-bezier(0.3, 1.4, 0.4, 1); }
 
 /* 月次アンケート: 進み具合（あと何問か） */
-.mq-progress { position: sticky; top: calc(var(--ui-header-h, 56px) + 10px); z-index: 4; display: flex; align-items: center; gap: 0.8rem; margin: 0 0 0.75rem; padding: 0.5rem 0.95rem; border-radius: 999px; background: rgba(255, 255, 255, 0.9); -webkit-backdrop-filter: saturate(180%) blur(14px); backdrop-filter: saturate(180%) blur(14px); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05), 0 6px 18px rgba(0, 0, 0, 0.07); }
-.mq-progress-bar { flex: 1 1 auto; height: 6px; border-radius: 999px; background: var(--ui-fill); overflow: hidden; }
-.mq-progress-bar > span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--c-blue), var(--c-indigo)); transform-origin: left center; transform: scaleX(var(--p, 0)); transition: transform 0.5s cubic-bezier(0.2, 0.7, 0.2, 1), background 0.3s ease; }
-.mq-progress-text { flex: 0 0 auto; font-size: 0.82rem; font-weight: 600; color: var(--ui-text-2); font-variant-numeric: tabular-nums; }
-.mq-progress.is-complete .mq-progress-bar > span { background: linear-gradient(90deg, #28b24a, var(--c-green)); }
-.mq-progress.is-complete .mq-progress-text { color: var(--ui-green-text); }
 @keyframes ui-glow { 0%, 100% { box-shadow: 0 0 0 0 rgba(0, 113, 227, 0); } 50% { box-shadow: 0 0 0 6px rgba(0, 113, 227, 0.16); } }
 .mq-ready #mq-submit { animation: ui-glow 1.8s ease-in-out 2; }
 
@@ -12289,6 +12266,10 @@ summary { transition: color 0.15s ease; }
 .mq-sub { color: var(--ui-text-2); font-size: 0.95rem; margin: 0; }
 .mq-card .card-body { padding: 1.5rem 1.75rem; }
 .mq-identity { padding-bottom: 1.25rem; margin-bottom: 0.5rem; border-bottom: 1px solid var(--ui-line); }
+/* 回答済みのIDを入れたとき: 設問を隠してIDの欄だけ残す（打ち間違えたら直せるように） */
+#mq-form.mq-only-id { margin-bottom: 1rem; }
+#mq-form.mq-only-id .card-body > :not(.mq-identity), #mq-form.mq-only-id .mq-identity .row > :not(:first-child) { display: none !important; }
+#mq-form.mq-only-id .mq-identity { padding-bottom: 0; margin-bottom: 0; border-bottom: 0; }
 .mq-emp-ok { color: var(--ui-green-text); font-weight: 600; }
 .mq-emp-ng { color: #dc3545; }
 .mq-q { padding: 1.1rem 0; border-bottom: 1px solid var(--ui-line); }
@@ -12583,7 +12564,7 @@ summary { transition: color 0.15s ease; }
     if (f) markError(f, msg);
   }
 
-  // ---------- 入力欄（あなたのこと） ----------
+  // ---------- 入力欄（基本情報） ----------
   function renderField(f, onChange) {
     var wrap = el("div", "rq-field");
     wrap.dataset.key = f.key;
@@ -12635,7 +12616,7 @@ summary { transition: color 0.15s ease; }
     return !!first;
   }
 
-  // ---------- 1. あなたのこと（社員IDは確認だけ。職場・勤務形態は選ぶ） ----------
+  // ---------- 1. 基本情報（ユーザーIDは確認だけ。Gr・役割・勤務形態は選ぶ） ----------
   var personBox = $("rq-person");
   function personField(key) { return O.person.filter(function (f) { return f.key === key; })[0]; }
   function savePersonSoon() { debounce("person", function () { savePerson(false); }, 300); }
@@ -12651,8 +12632,8 @@ summary { transition: color 0.15s ease; }
   personBox.appendChild(prefillNote);
   var empInput = idWrap.querySelector("input");
   var found = null, idProblem = "", confirmedId = "";
-  var ID_OK = "社員IDを確認しました";
-  var NOT_FOUND = "この社員IDは見つかりません。IDを確かめてください";
+  var ID_OK = "ユーザーIDを確認しました";
+  var NOT_FOUND = "このユーザーIDは見つかりません。IDを確かめてください";
   function normId(v) { return (v || "").normalize("NFKC").trim().toLowerCase(); }
   function setIdentity(text, ng) { identity.textContent = text || ""; identity.classList.toggle("is-ng", !!ng); }
   function fillSelects(workplaceId, pattern) {
@@ -12675,7 +12656,7 @@ summary { transition: color 0.15s ease; }
     if (!j || !j.errors || j.errors._ !== "respondent") return false;
     forgetPerson();
     if (j.errors.emp_id) { found = false; idProblem = j.errors.emp_id; setIdentity(j.errors.emp_id, true); }
-    toast(j.message || "「あなたのこと」を入れ直してください");
+    toast(j.message || "「基本情報」を入れ直してください");
     $("sec-person").scrollIntoView({ behavior: "smooth", block: "start" });
     return true;
   }
@@ -12818,7 +12799,7 @@ summary { transition: color 0.15s ease; }
     if (!CFG.monthly || !box) return;
     box.innerHTML = "";
     box.appendChild(el("div", "rq-from-title", CFG.monthly.period_label + "の月次アンケートの続きです"));
-    box.appendChild(el("div", "small", "「なくしたい・自動化したい」と答えた業務を、1つずつ AI と整理します。あなたのことと業務名はアンケートの答えから入力済みです。"));
+    box.appendChild(el("div", "small", "「なくしたい・自動化したい」と答えた業務を、1つずつ AI と整理します。基本情報と業務名はアンケートの答えから入力済みです。"));
     var list = el("div", "rq-from-list");
     var done = doneNames();
     var current = conv ? normName(conv.monthlyName || conv.title) : "";
@@ -12838,7 +12819,7 @@ summary { transition: color 0.15s ease; }
       fillSelects(CFG.monthly.workplace_id, CFG.monthly.work_pattern);
       await lookupEmp();
       var ok = await savePerson(false);
-      if (!ok) { toast("「あなたのこと」の空欄を選ぶと始められます"); return; }
+      if (!ok) { toast("「基本情報」の空欄を選ぶと始められます"); return; }
     }
     startIntake(false, "monthly", next);
   }
@@ -13004,7 +12985,7 @@ summary { transition: color 0.15s ease; }
   async function startIntake(skipDup, origin, monthlyName) {
     if (!S.respondent) {
       var ok = await savePerson(true);
-      if (!ok) { toast("先に「あなたのこと」を入力してください"); return; }
+      if (!ok) { toast("先に「基本情報」を入力してください"); return; }
     }
     var title = titleInput.value.trim();
     if (!skipDup) {
@@ -13200,7 +13181,7 @@ summary { transition: color 0.15s ease; }
   $("rq-finish").addEventListener("click", async function () {
     if (!S.respondent) {
       var ok = await savePerson(true);
-      if (!ok) { toast("「あなたのこと」を入力してください"); return; }
+      if (!ok) { toast("「基本情報」を入力してください"); return; }
     }
     if (!S.tasks.length) {
       toast("業務を1件以上登録してください");
@@ -13208,7 +13189,7 @@ summary { transition: color 0.15s ease; }
       return;
     }
     var total = S.tasks.reduce(function (a, t) { return a + (t.monthly_minutes || 0); }, 0);
-    var sum = "ありがとうございました。登録した業務 " + S.tasks.length + " 件（月 約 " + (total / 60).toFixed(1) + " 時間）は改善案件として確認し、活動状況に載せます。次の人は上の「あなたのこと」から始められます。";
+    var sum = "ありがとうございました。登録した業務 " + S.tasks.length + " 件（月 約 " + (total / 60).toFixed(1) + " 時間）は改善案件として確認し、活動状況に載せます。";
     await api("POST", CFG.api.reset);
     resetPage();
     $("rq-done-sum").textContent = sum;
