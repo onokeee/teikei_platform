@@ -545,8 +545,13 @@ def smoke_board():
         emps = sorted(e.emp_id for e in app_module.Employee.query.filter_by(is_demo=True).all())
         check(emps == [f"DEMO-{i:03d}" for i in range(1, 13)] and Respondent.query.filter_by(emp_id="DEMO-001", is_demo=True).first() is not None, f"デモの社員IDは DEMO-001〜DEMO-012: {emps[:2]}…")
         irregular_id = irregular.id
+        sample = by["日報の実績をExcelの集計表に転記する"]
+        sample_id, sample_note = sample.id, sample.ai_plan_note
     code, html = page(f"/cases/{irregular_id}")
     check("不定期（月1回として計算）" in html, "案件詳細: 不定期は「月1回として計算」と出す")
+    code, html = page(f"/cases/{sample_id}")
+    check(sample_note == "デモ" and '<span class="badge bg-warning-subtle text-warning-emphasis">デモ</span> デモ用の見本の案です' in html and "改善後の流れ（AI案）" in html and ">ルールベース</span>" in html,
+          "デモ: ルールで分析した業務に付けた見本の改善案（AI案）には「デモ」の印を付ける")
 
     code, html = page("/board/")
     check(code == 200 and "デモデータを表示中" in html, "掲示板 200・デモデータを表示中の帯")
@@ -706,6 +711,30 @@ def smoke_board():
     code, html = page(f"/cases/{wk_id}")
     check('name="adopt_ai_domain"' in html and 'name="prev_task"' in html and 'name="next_task"' in html and 'name="actors"' in html and 'name="domain_id"' in html and 'name="headcount"' in html,
           "業務領域が空でも「AI推定にする」を選べ、更新フォームに業務情報の欄がある")
+    check(all(f'name="{k}"' in html for k in ("purpose", "output", "output_users", "output_users_note", "inputs", "inputs_note", "frequency", "duration"))
+          and all(f'id="f-{k}"' in html for k in ("domain_id", "purpose", "output", "output_users", "inputs", "frequency", "duration")),
+          "案件詳細の更新フォームに必須項目（目的・アウトプット・利用者と補足・入力元と補足・頻度・1回の時間）の欄がある")
+    with app.app_context():
+        wk = db.session.get(Task, wk_id)
+        marks_before = set(wk.ai_fields_list)
+    client.post(f"/cases/{wk_id}/update", data=dict(form, purpose="週の生産状況を佐藤さんと課長会議で報告するため", output="", output_users=["", "上司", "他部署"], output_users_note="課長、生産管理課",
+                                                      inputs=["", "他のExcel", "紙の帳票"], inputs_note="日次実績集計表、紙の日報", frequency="毎日", duration="15分未満"))
+    with app.app_context():
+        wk = db.session.get(Task, wk_id)
+        check(wk.purpose == "週の生産状況を担当者と課長会議で報告するため" and wk.output == "" and wk.output_users_list == ["上司", "他部署"] and wk.output_users_note == "課長、生産管理課"
+              and wk.inputs_list == ["紙の帳票", "他のExcel"] and wk.inputs_note == "日次実績集計表、紙の日報" and (wk.frequency, wk.duration) == ("毎日", "15分未満") and wk.monthly_minutes == 20 * 10 * 3,
+              f"案件詳細で必須項目を直せる（氏名は置き換え、頻度・1回の時間を変えると月間時間を計算し直す）: {wk.monthly_minutes}")
+        check({"output_users", "inputs"} <= marks_before and not {"output_users", "inputs", "purpose", "output"} & set(wk.ai_fields_list) and not {"output_users", "inputs"} & set(wk.ai_extra_dict.get("rule_fields") or [])
+              and "tools" in wk.ai_fields_list, f"保存した項目だけ推定の印が外れる（直していない項目の印は残る）: {wk.ai_fields_list}")
+    code, html = page(f"/cases/{wk_id}")
+    check('必須項目（<a href="#f-domain_id" class="alert-link">業務領域</a>・<a href="#f-output" class="alert-link">アウトプット</a>）が未入力です' in html and 'href="#case-info"' in html and 'id="case-info"' in html
+          and 'アウトプット（最終的にできるもの） <span class="badge text-bg-warning">未入力</span>' in html,
+          "必須項目が足りないときの案内は、案件管理の業務情報の欄（リンク）を指し、空の欄に「未入力」が付く")
+    client.post(f"/cases/{wk_id}/update", data=dict(form))
+    with app.app_context():
+        wk = db.session.get(Task, wk_id)
+        check(wk.output_users_list == ["上司", "他部署"] and wk.inputs_list == ["紙の帳票", "他のExcel"] and wk.purpose.startswith("週の生産状況") and wk.frequency == "毎日",
+              "業務情報の欄を送らないフォーム（段階・方針だけの更新）では、必須項目を変えない")
     client.post(f"/cases/{wk_id}/verify", data={"verified_by": "推進メンバー", "adopt_ai_domain": "1"})
     with app.app_context():
         wk = db.session.get(Task, wk_id)
@@ -759,12 +788,21 @@ def smoke_board():
         check(r.status_code == 302 and real is not None and real.respondent is not None and real.respondent.emp_id == "DEMO-001" and Respondent.query.filter_by(emp_id="DEMO-001").count() == 1
               and app_module.Employee.query.filter_by(emp_id="DEMO-001").count() == 1 and Task.query.filter_by(is_demo=True).count() == 26,
               "本物の業務がある社員IDのままデモを入れ直しても止まらない（同じIDの人は使い回す）")
-    client.post("/admin/demo/clear")
+    code, html = page("/admin/employees")
+    check(html.count("デモの社員IDで本物の業務あり") == 1, "デモを入れている間も、デモの社員IDで本物の業務を登録した人には対象者一覧で印が付く")
+    r = client.post("/admin/demo/clear", follow_redirects=True)
+    html = r.data.decode("utf-8")
     with app.app_context():
         real = Task.query.filter_by(name="本物の業務").first()
         check(real is not None and real.respondent is not None and real.respondent.emp_id == "DEMO-001" and not real.respondent.is_demo and Task.query.count() == 1 and Respondent.query.count() == 1
               and app_module.Employee.query.filter_by(emp_id="DEMO-001").first() is not None and app_module.Employee.query.filter_by(emp_id="DEMO-002").first() is None,
               "デモ削除: 本物の業務がある回答者は残してデモの印を外し、業務を付け替えない。ほかのデモの人は消す")
+    check("デモデータを削除しました" in html and "消さずに残しました: DEMO-001 田中 一郎（業務 1 件）" in html and "対象外にしてください" in html,
+          "デモ削除で残した人（デモの社員IDで本物の業務がある人）を、社員IDと氏名つきで知らせる")
+    code, html = page("/admin/employees")
+    row = next((x for x in html.split("<tr") if "DEMO-001" in x), "")
+    check(html.count("デモの社員IDで本物の業務あり") == 1 and "デモの社員IDで本物の業務あり" in row and "業務 1 件" in row,
+          "対象者一覧: デモ削除で残した人の行に「デモの社員IDで本物の業務あり」の印")
 
     return fails
 
@@ -2027,6 +2065,39 @@ def smoke_request():
             check({"日報", "実績", "excel", "集計表", "転記"} <= words and not any("の" in w or "を" in w for w in words), f"関連業務の語は、ひらがな・助詞・記号で区切った意味のある語: {sorted(words)}")
             t_week = Task.query.filter_by(name="週報の作成").first()
             check(any(o.name == "日報の実績をExcelの集計表に転記する" for o in app_module.related_tasks_for(t_week)), "関連業務の候補は、語で区切ってつなぐ（週報 ⇔ 日次実績の転記）")
+            kinds_a, kinds_b = app_module._word_kinds("設備の稼働状況を課長に報告する"), app_module._word_kinds("顧客クレームの対応状況を共有する")
+            check(kinds_a.get("状況") == "part" and app_module._pair_weight("状況", kinds_a, kinds_b) == 1 and app_module._pair_weight("excel", {"excel": "whole"}, {"excel": "whole"}) == 1
+                  and app_module._pair_weight("日次実績集計表", {"日次実績集計表": "whole"}, {"日次実績集計表": "whole"}) == 3,
+                  "関連業務の語の重み: 長い語から切り出した2文字どうし（状況）やツール・媒体の語（Excel）は1、3文字以上の語は3")
+            demo7 = Respondent.query.filter_by(emp_id="DEMO-007").first()
+            t_eq = Task(respondent=demo7, workplace_id=demo7.workplace_id, name="設備の稼働日報を作って課長に送る", purpose="設備の稼働状況を課長に報告するため", frequency="毎日", duration="15〜30分", wish="減らしたい",
+                        steps_json=json.dumps([{"no": 1, "action": "設備モニタで稼働状況を見る", "system": "設備モニタ"}, {"no": 2, "action": "稼働日報をExcelで作る", "system": "Excel（稼働日報）", "output": "稼働日報"},
+                                               {"no": 3, "action": "課長にメールで送る", "system": "メール", "to": "課長"}], ensure_ascii=False))
+            db.session.add(t_eq)
+            db.session.flush()
+            app_module._finalize_task(t_eq, app_module.task_state(t_eq), [], use_ai=False)
+            rel_eq = [o.name for o in app_module.related_tasks_for(t_eq)]
+            check("クレーム対応の進捗報告" not in rel_eq and "週報の作成" not in rel_eq and "月次保全報告書の作成" in rel_eq and t_eq.ai_related_list == rel_eq[:5],
+                  f"関連業務（ルール）: 2文字の切れ端（状況・報告）だけの重なりではつながず、設備・稼働の重なる業務だけ残す: {rel_eq}")
+            check(t_eq.inputs_list == ["設備データ"], f"ルールの分類: システムの語がなくても、設備モニタは情報の取り出し元（設備データ）にする: {t_eq.inputs_list}")
+            db.session.rollback()
+            by_name = {t.name: t for t in Task.query.all()}
+            check("生産実績の月報作成" in [o.name for o in app_module.related_tasks_for(by_name["生産性指標の報告（部へ）"])]
+                  and "保全部品の発注依頼書作成" not in [o.name for o in app_module.related_tasks_for(by_name["外注先への納期確認メール"])]
+                  and "週次生産計画の作成と配布" not in [o.name for o in app_module.related_tasks_for(t_week)],
+                  "関連業務: 前後の業務の名前（「の」の有無は問わない）でつながる業務は残し、短い語（発注）や頻度の語（週次）だけではつながない")
+            src = {n: app_module._source_category(n) for n in ("設備モニタ", "画面", "端末", "モニター", "品質の画面", "ファイルサーバ")}
+            check(src == {"設備モニタ": "設備データ", "画面": "その他", "端末": "その他", "モニター": "設備データ", "品質の画面": "品質システム", "ファイルサーバ": "他のExcel"},
+                  f"ルールの分類: モニタ・画面・端末はシステムの取り出し元として分類し、共有フォルダ・ファイルサーバはファイル（他のExcel）にする: {src}")
+            nat = {a: app_module._step_natures({"action": a}) for a in ("共有フォルダに保存する", "ファイルサーバに格納する", "共有フォルダに保存してメールで知らせる", "メールで共有する", "日報を課長と共有する")}
+            check(nat["共有フォルダに保存する"] == ["台帳更新"] and nat["ファイルサーバに格納する"] == ["台帳更新"] and "メール・配布" in nat["共有フォルダに保存してメールで知らせる"]
+                  and nat["メールで共有する"] == ["メール・配布"] and "メール・配布" not in nat["日報を課長と共有する"],
+                  f"ルールの分類: 共有フォルダへの保存はメール・配布にせず台帳更新（ファイリング）にし、メール・配布は「共有」とメール・送る・配るがそろったときだけ: {nat}")
+            cats = app_module.rule_categories(Task(name="x"), app_module._clean_state({"steps": [
+                {"no": 1, "action": "端末の画面で前日の不良数を見る", "system": "端末"}, {"no": 2, "action": "不良数を集計する", "system": "Excel（不良集計表）", "output": "不良集計表"},
+                {"no": 3, "action": "不良集計表を共有フォルダに保存する", "system": "共有フォルダ"}]}))
+            check(cats["inputs"] == ["その他"] and "メール・配布" not in cats["nature"] and "台帳更新" in cats["nature"],
+                  f"ルールの分類: 端末も取り出し元に数え、保存先の共有フォルダは取り出し元・メール・配布にしない: {cats}")
 
         client.post("/login", data={"emp_id": "admin", "password": "adminpass"})
         code, html, r = get(f"/cases/{tid}")
@@ -2590,6 +2661,25 @@ def smoke_ai():
         check("改善後の流れ（AI案）" in html and "新しい流れ1" in html and "AI の推定では 3人" in html, "再分析の改善後の流れと、人数の推定（参考）が案件詳細に出る")
         html = client.get("/admin/").data.decode("utf-8")
         check("直近のエラー" not in html, "成功すると直近のエラーは消える")
+        with app.app_context():
+            plan_at = db.session.get(Task, task_id).ai_extra_dict.get("ai_plan_at") or ""
+        script.append(http_error(401, '{"error":{"message":"invalid api key"}}'))
+        r = client.post(f"/cases/{task_id}/reanalyze", follow_redirects=True)
+        html = r.data.decode("utf-8")
+        with app.app_context():
+            t_fb = db.session.get(Task, task_id)
+            note, src = t_fb.ai_plan_note, t_fb.ai_source
+        check(plan_at.startswith("20") and src == "rules" and note == f"前回の AI 分析（{plan_at}）" and "AI から使える応答がなかったため、ルールベースで分析しました（HTTP 401" in html
+              and ">ルールベース</span>" in html and f'<span class="badge text-bg-light border">{note}</span> 前回の AI 分析で出た案です' in html and "新しい流れ1" in html
+              and '<span class="badge badge-flag">推定</span>' in html and '<span class="badge badge-flag">AI</span>' not in html,
+              f"再分析がルールに落ちたら、そのことを知らせ、前回の AI の改善案は日付つきで分けて出す（いまの分析のように見せない。関連業務もルールの推定と出す）: {note}")
+        csv_text = client.get("/cases/export.csv").data.decode("utf-8-sig")
+        check(f"［{note}］新しい流れ1" in csv_text, "CSV の改善後の流れ（AI案）にも、前回の AI 分析の案であることと日付を付ける")
+        script.append(message(ai_json))
+        r = client.post(f"/cases/{task_id}/reanalyze", follow_redirects=True)
+        html = r.data.decode("utf-8")
+        check("AI分析を更新しました（ChatGPT API）" in html and "前回の AI 分析" not in html and "改善後の流れ（AI案）" in html and '<span class="badge badge-flag">AI</span>' in html,
+              "AI で再分析し直すと、改善案はいまの分析の案に戻る（前回の印は消え、関連業務は AI の印）")
         script.append(message(json.dumps([{"kind": "調査", "title": "テスト提案のタイトル", "detail": "根拠 12 件"}], ensure_ascii=False)))
         r = client.post("/ai/suggest", follow_redirects=True)
         html = r.data.decode("utf-8")

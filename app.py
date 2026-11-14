@@ -148,6 +148,7 @@ ANALYSIS_LEVELS = [
 
 # ---- AI分析のフラグ ----
 AI_FLAGS = ["目的不明", "廃止候補", "統合候補", "重複入力候補", "自動化候補", "判断業務", "要ヒアリング"]
+AI_PLAN_KEYS = ("tobe_steps", "saving_minutes_per_month", "hearing_questions")
 
 # ---- 月次アンケート（voiceloop 方式: 月度ごとの設問セット。基本設問は毎月同じで KPI につなぐ） ----
 SHIFTS_PER_MONTH = 20
@@ -536,6 +537,17 @@ class Task(db.Model):
     def ai_extra_dict(self):
         data = _json_column(self.ai_extra, {})
         return data if isinstance(data, dict) else {}
+
+    @property
+    def ai_plan_note(self):
+        extra = self.ai_extra_dict
+        if not any(extra.get(k) for k in C.AI_PLAN_KEYS):
+            return ""
+        if extra.get("ai_plan_demo"):
+            return "デモ"
+        if self.ai_source not in ("openai", "claude"):
+            return "前回の AI 分析（" + (extra.get("ai_plan_at") or "日付不明") + "）"
+        return ""
 
     def apply_ai_result(self, result):
         mask = lambda v: [mask_person_names(x) for x in v] if isinstance(v, list) else (mask_person_names(v) if isinstance(v, str) else v)
@@ -1023,43 +1035,69 @@ def flow_rows(domain_id=None):
             rows.append(t)
     return rows
 
+RELATED_MIN_OVERLAP = 3
+
+
+def _related_text(t):
+    return t.name + " " + (t.output or "") + " " + (t.purpose or "")
+
+def _link_key(text):
+    return normalize_text(text).replace("の", "")
+
+def _links_to(a, b):
+    name = _link_key(b.name)
+    keys = [_link_key(p) for text in (a.next_task, a.prev_task) for p in task_names(text)]
+    return len(name) >= 3 and any(len(k) >= 3 and (k in name or name in k) for k in keys)
+
 def related_tasks_for(task, limit=8):
-    words = _content_words(task.name + " " + (task.output or "") + " " + (task.purpose or ""))
+    words = _word_kinds(_related_text(task))
     scored = []
     for other in Task.query.filter(Task.id != task.id).all():
-        score = 0
-        other_words = _content_words(other.name + " " + (other.output or "") + " " + (other.purpose or ""))
-        score += 2 * len(words & other_words)
+        other_words = _word_kinds(_related_text(other))
+        shared = [_pair_weight(w, words, other_words) for w in words.keys() & other_words.keys()]
+        link = 0
         if normalize_text(other.output) and normalize_text(other.output) == normalize_text(task.output):
-            score += 5
-        if task.next_task and normalize_text(task.next_task) in normalize_text(other.name):
-            score += 4
-        if task.prev_task and normalize_text(task.prev_task) in normalize_text(other.name):
-            score += 4
+            link += 5
+        if _links_to(task, other) or _links_to(other, task):
+            link += 4
+        if not link and (sum(shared) < C.RELATED_MIN_OVERLAP or max(shared, default=0) < 2):
+            continue
+        score = sum(shared) + link
         if other.domain_id and other.domain_id == task.domain_id:
             score += 1
         if set(task.inputs_list) & set(other.inputs_list):
             score += 1
-        if score >= 3:
-            scored.append((score, other))
+        scored.append((score, other))
     scored.sort(key=lambda x: -x[0])
     return [o for _, o in scored[:limit]]
 
 _WORD_RE = re.compile(r"[一-龥々〆]{2,}|[ァ-ヶー]{2,}|[A-Za-z0-9]{2,}")
 _STOPWORDS = {"作成", "業務", "確認", "管理", "対応", "実施", "内容", "情報", "毎日", "毎週", "毎月", "前日", "翌日"}
+# 関連業務の判定で重みを1にする語（ツール・媒体・どの業務にも出る動作や相手）
+_WEAK_WORDS = {"excel", "エクセル", "csv", "pdf", "word", "ワード", "powerpoint", "パワポ", "access", "vba", "マクロ", "rpa", "メール", "システム", "データ", "ファイル", "シート", "フォルダ",
+               "グラフ", "チェック", "報告", "状況", "共有", "提出", "連絡", "把握", "集計", "転記", "入力", "記録", "更新", "一覧", "資料", "会議",
+               "集計表", "一覧表", "報告書", "管理表", "日次", "週次", "月次", "年次", "課長", "部長", "上司", "職場", "各職場", "各部署", "関係部署", "担当者", "ライン"}
 
 
-def _content_words(text):
-    words = set()
+def _word_kinds(text):
+    kinds = {}
     for w in _WORD_RE.findall(unicodedata.normalize("NFKC", text or "")):
         if w in _STOPWORDS or re.fullmatch(r"ー+", w):
             continue
-        words.add(w.lower())
+        kinds[w.lower()] = "whole"
         if len(w) >= 4 and re.fullmatch(r"[一-龥々〆]+", w):
             for i in range(0, len(w) - 1):
                 if w[i : i + 2] not in _STOPWORDS:
-                    words.add(w[i : i + 2])
-    return words
+                    kinds.setdefault(w[i : i + 2], "part")
+    return kinds
+
+def _content_words(text):
+    return set(_word_kinds(text))
+
+def _pair_weight(w, a, b):
+    if w in _WEAK_WORDS or (a[w] == "part" and b[w] == "part"):
+        return 1
+    return 3 if len(w) >= 3 else 2
 
 # ----- 回答した人（業務を1件以上登録したか、月次アンケートに回答した人。対象外は除く。対象者一覧と同じ決まり） -----
 def person_key(emp_id, name=""):
@@ -4909,7 +4947,7 @@ def seed_demo():
     for t, state in made:
         _finalize_task(t, state, t.intake, use_ai=False)
         if t.name in DEMO_AI_EXTRA:
-            t.ai_extra = json.dumps(dict(t.ai_extra_dict, **DEMO_AI_EXTRA[t.name]), ensure_ascii=False)
+            t.ai_extra = json.dumps(dict(t.ai_extra_dict, **DEMO_AI_EXTRA[t.name], ai_plan_demo=True), ensure_ascii=False)
     _seed_employees_and_monthly(resp_by_name, wp_by_name, created)
     Setting.set(DEMO_MASTERS_KEY, json.dumps(created))
     db.session.commit()
@@ -5025,6 +5063,31 @@ def _clear_demo_masters():
     if row is not None:
         db.session.delete(row)
 
+DEMO_ID_RX = re.compile(r"^demo-\d+$", re.I)
+
+
+def is_demo_id(emp_id):
+    return bool(DEMO_ID_RX.match(norm_emp_id(emp_id)))
+
+def demo_ids_with_real_data():
+    found = OrderedDict()
+
+    def add(emp_id, name, kind):
+        row = found.setdefault(emp_key(emp_id), {"emp_id": norm_emp_id(emp_id), "name": "", "tasks": 0, "monthly": 0})
+        row["name"] = row["name"] or (name or "")
+        row[kind] += 1
+
+    for t in Task.query.join(Respondent, Task.respondent_id == Respondent.id).filter(Respondent.emp_id.like("demo-%")).order_by(Respondent.emp_id, Task.id).all():
+        if not t.is_demo and is_demo_id(t.respondent.emp_id):
+            add(t.respondent.emp_id, t.respondent.name, "tasks")
+    for m in MonthlyResponse.query.filter(MonthlyResponse.emp_id.like("demo-%")).order_by(MonthlyResponse.emp_id, MonthlyResponse.id).all():
+        if not m.is_demo and is_demo_id(m.emp_id):
+            add(m.emp_id, m.name, "monthly")
+    for row in found.values():
+        row["label"] = "デモの社員IDで本物の業務あり" if row["tasks"] else "デモの社員IDで本物の回答あり"
+        row["detail"] = "・".join(x for x in (f"業務 {row['tasks']} 件" if row["tasks"] else "", f"月次 {row['monthly']} 回" if row["monthly"] else "") if x)
+    return found
+
 def clear_demo():
     db.session.flush()
     task_ids = [i for (i,) in db.session.query(Task.id).filter_by(is_demo=True).all()]
@@ -5047,6 +5110,7 @@ def clear_demo():
             db.session.delete(e)
     _clear_demo_masters()
     db.session.commit()
+    return list(demo_ids_with_real_data().values())
 
 # ===== 画面: ログイン =====
 bp_auth = Blueprint("auth", __name__)
@@ -5448,9 +5512,12 @@ def api_reset():
 # ----- API: 検討する業務（AI の聞き取り → 登録） -----
 _IMAGE_PREFIX = re.compile(r"^data:image/(png|jpe?g|webp|gif);base64,")
 _SOURCE_WORDS = [("紙", "紙の帳票"), ("帳票", "紙の帳票"), ("手書き", "紙の帳票"), ("メール", "メール"), ("Excel", "他のExcel"), ("エクセル", "他のExcel"), ("聞", "人から聞く"), ("口頭", "人から聞く")]
-_SYSTEM_WORDS = [("生産管理", "生産管理システム"), ("品質", "品質システム"), ("設備", "設備データ")]
+_SYSTEM_WORDS = [("生産管理", "生産管理システム"), ("品質", "品質システム"), ("設備", "設備データ"), ("モニタ", "設備データ")]
+_SCREEN_RX = re.compile(r"モニタ|画面|端末|ディスプレイ|タブレット|表示器|表示盤|パネル|HMI", re.I)
 _MEDIUM_SOURCES = {"paper": "紙の帳票", "excel": "他のExcel", "mail": "メール", "verbal": "人から聞く"}
 _METHOD_SOURCES = {"mail": "メール", "verbal": "人から聞く", "phone": "人から聞く", "phs": "人から聞く", "meeting": "人から聞く", "hand": "紙の帳票", "fax": "紙の帳票"}
+_FOLDER_SOURCE = "他のExcel"
+_SAVE_RX = re.compile(r"保存|格納|保管|置く|置い|置き|入れ|アップ|上げ")
 _TOOL_WORDS = [("Excel", "Excel"), ("エクセル", "Excel"), ("Access", "Access"), ("メール", "メール"), ("システム", "社内システム"), ("紙", "紙"), ("手書き", "紙"), ("印刷", "紙"), ("マクロ", "VBA・マクロ"), ("VBA", "VBA・マクロ"), ("RPA", "RPA")]
 NATURE_WORDS = [
     ("転記・コピー", r"転記|書き写|写す|写し|コピー|貼り付|貼りつ|入力|入れ直|打ち込|記入|登録"),
@@ -5458,7 +5525,7 @@ NATURE_WORDS = [
     ("資料作成", r"作成|まとめ|作る|書く|コメント|資料を"),
     ("確認・チェック", r"確認|確かめ|照合|見比べ|突き合わせ|探す|チェック(する|して|を)|点検(する|して)"),
     ("データ取得", r"出力|(?<![提送差届])出す|ダウンロード|抽出|取り出|取得|集める|回収|拾う|抜き出|調べ"),
-    ("メール・配布", r"送る|送付|配布|配る|渡す|提出|共有|掲示|貼り出|知らせ|伝え|回覧"),
+    ("メール・配布", r"送る|送付|送信|配信|配布|配る|渡す|提出|掲示|貼り出|知らせ|伝え|回覧|メール(する|して|した)|共有.*(メール|チャット|Teams)|(メール|チャット|Teams).*共有"),
     ("台帳更新", r"(台帳|管理表|一覧)[^、。]{0,12}(入力|更新|記入|追加|登録)|ファイリング"),
     ("判断を伴う", r"判断|決め|判定|調整|振り分"),
 ]
@@ -5485,10 +5552,28 @@ def _ordered(values, choices):
 
 
 def _source_category(name, method=""):
-    medium = medium_of(name) if (name or "").strip() else "unknown"
-    if medium == "system":
+    name = (name or "").strip()
+    medium = medium_of(name) if name else "unknown"
+    method = method or (method_of(name) if name else "")
+    if medium in ("system", "web") or (medium == "unknown" and _SCREEN_RX.search(vnorm(name))):
         return _guess(name, _SYSTEM_WORDS, "その他")
-    return _MEDIUM_SOURCES.get(medium) or _guess(name, _SOURCE_WORDS, None) or _METHOD_SOURCES.get(method)
+    found = _MEDIUM_SOURCES.get(medium) or _guess(name, _SOURCE_WORDS, None)
+    if not found and method == "folder" and medium in ("unknown", "doc"):
+        return _FOLDER_SOURCE
+    return found or _METHOD_SOURCES.get(method)
+
+
+def _mentions_folder(text):
+    row = vocab_row("methods", "folder")
+    return bool(row and row.get("_rx") and row["_rx"].search(_masked(text, row)))
+
+
+def _step_natures(x):
+    text = (x.get("action") or "") + " " + (x.get("how") or "")
+    found = [cat for cat, rx in NATURE_WORDS if re.search(rx, text)]
+    if _SAVE_RX.search(x.get("action") or "") and _mentions_folder(text + " " + (x.get("system") or "")):
+        found.append("台帳更新")
+    return found
 
 
 def _state_sources(state):
@@ -5526,7 +5611,7 @@ def rule_categories(task, state):
     users = users_from_names(names, task.workplace.name if task.workplace else "") or (["分からない"] if unknown else [])
     texts = [x.get(k) or "" for x in steps for k in ("system", "action", "how", "how_from")] + list(state["sources"])
     tools = [v for word, v in _TOOL_WORDS if any(word.lower() in t.lower() for t in texts)]
-    nature = [cat for cat, rx in NATURE_WORDS if any(re.search(rx, (x.get("action") or "") + " " + (x.get("how") or "")) for x in steps)]
+    nature = [cat for x in steps for cat in _step_natures(x)]
     if any((x.get("to") or "").strip() for x in steps):
         nature.append("メール・配布")
     return {
@@ -5656,6 +5741,8 @@ def _finalize_task(task, state, messages, refresh=False, use_ai=True):
         cands = related_tasks_for(task, limit=40)
         data = ai_finalize(state, messages, task.wish, domains, cands, task.shift or "", handlers=finalize_handlers(task), current=task_payload(task) if refresh else None)
     if data is None:
+        if any(extra.get(k) for k in C.AI_PLAN_KEYS) and not extra.get("ai_plan_at") and task.ai_source == "openai" and task.ai_at:
+            extra["ai_plan_at"] = task.ai_at.strftime("%Y/%m/%d %H:%M")
         for key in _fill_from_state(task, state):
             mark(key, True)
         set_domain(rule_domain(task, domains), True)
@@ -5704,7 +5791,9 @@ def _finalize_task(task, state, messages, refresh=False, use_ai=True):
             first_impression=clean(data.get("first_impression") or "", 120) or extra.get("first_impression") or "",
             hearing_questions=[clean(q, 200) for q in (data.get("hearing_questions") or []) if str(q).strip()][:5],
             unknowns=state.get("unknowns") or [],
+            ai_plan_at=datetime.now().strftime("%Y/%m/%d %H:%M"),
         )
+        extra.pop("ai_plan_demo", None)
         try:
             guess = int(data.get("headcount") or 1)
         except (TypeError, ValueError):
@@ -5882,6 +5971,7 @@ def _update_task_info(task, f):
         if (d.id if d else None) != task.domain_id:
             task.domain = d
             unmark_estimate(task, "domain")
+    minutes = False
     if "headcount" in f:
         try:
             head = max(1, int(f.get("headcount") or 1))
@@ -5889,10 +5979,24 @@ def _update_task_info(task, f):
             head = task.headcount or 1
         if head != (task.headcount or 1):
             task.headcount = head
-            task.compute_minutes()
-    for key in ("prev_task", "next_task", "actors"):
+            minutes = True
+    for key, choices in (("frequency", C.FREQUENCIES), ("duration", C.DURATIONS)):
+        value = f.get(key)
+        if value in choices and value != getattr(task, key):
+            setattr(task, key, value)
+            unmark_estimate(task, key)
+            minutes = True
+    if minutes:
+        task.compute_minutes()
+    for key in ("purpose", "output", "output_users_note", "inputs_note", "prev_task", "next_task", "actors"):
         if key in f:
             value = mask_person_names((f.get(key) or "").strip())[:500]
+            if value != (getattr(task, key) or ""):
+                setattr(task, key, value)
+                unmark_estimate(task, key)
+    for key, choices in (("output_users", C.OUTPUT_USERS), ("inputs", C.INPUT_SOURCES)):
+        if key in f:
+            value = C.join_list(_ordered(f.getlist(key), choices))
             if value != (getattr(task, key) or ""):
                 setattr(task, key, value)
                 unmark_estimate(task, key)
@@ -5982,7 +6086,11 @@ def reanalyze(task_id):
     task = _get_or_404(Task, task_id)
     _finalize_task(task, task_state(task), task.intake, refresh=True)
     db.session.commit()
-    flash("AI分析を更新しました（" + ("ChatGPT API" if task.ai_source == "openai" else "ルールベース") + "）。", "success")
+    if ai_enabled() and task.ai_source != "openai":
+        flash("AI から使える応答がなかったため、ルールベースで分析しました（" + (_LAST_ERROR["text"] or "応答を読めませんでした") + "）。"
+              + ("前回の AI の案は日付を付けて分けて表示しています。" if task.ai_plan_note else ""), "warning")
+    else:
+        flash("AI分析を更新しました（" + ("ChatGPT API" if task.ai_source == "openai" else "ルールベース") + "）。", "success")
     return redirect(url_for("cases.detail", task_id=task.id))
 
 def _csv_response(buf, filename):
@@ -6018,7 +6126,8 @@ def export_csv():
                 t.ai_domain or "", t.ai_priority or "", "・".join(t.ai_flags_list), t.ai_summary or "",
                 t.created_at.strftime("%Y-%m-%d %H:%M") if t.created_at else "",
                 t.shift or "", "\n".join(_step_line(x) for x in t.steps), "・".join(t.ai_fields_list),
-                "・".join(extra.get("unknowns") or []), " → ".join(extra.get("tobe_steps") or []), *[getattr(t, "ecrs_" + key) or "" for key, _label, _q in C.ECRS],
+                "・".join(extra.get("unknowns") or []), (f"［{t.ai_plan_note}］" if t.ai_plan_note and extra.get("tobe_steps") else "") + " → ".join(extra.get("tobe_steps") or []),
+                *[getattr(t, "ecrs_" + key) or "" for key, _label, _q in C.ECRS],
                 t.result_note or "", t.verified_by or "",
             ]
         )
@@ -6455,6 +6564,7 @@ def employees():
         active_count=len([r for r in rows if r["emp"].active]),
         ldap_status=ldap_status_text(),
         workplaces=_workplaces(),
+        demo_real=demo_ids_with_real_data(),
     )
 
 def _upsert_employee(emp_id, name, department, email, workplace_id=None, source="manual", work_pattern=None):
@@ -6635,8 +6745,11 @@ def load_demo():
 
 @bp_admin.post("/demo/clear")
 def remove_demo():
-    clear_demo()
+    kept = clear_demo()
     flash("デモデータを削除しました。", "info")
+    if kept:
+        who = "、".join(" ".join(x for x in (p["emp_id"], p["name"]) if x) + f"（{p['detail']}）" for p in kept)
+        flash(f"デモの社員IDで本物の業務・回答がある人は消さずに残しました: {who}。対象者一覧のその行に印を付けています。回答率に入れないときは対象外にしてください。", "warning")
     return redirect(url_for("admin.index"))
 
 @bp_admin.route("/export/respondents.csv")
@@ -7086,7 +7199,7 @@ TEMPLATES = {
     {% for r in rows %}
     <tr class="{% if not r.emp.active %}is-excluded{% endif %}">
       <td class="text-center"><input class="form-check-input member-exclude" type="checkbox" data-url="{{ url_for('admin.toggle_employee', employee_id=r.emp.id) }}" {% if not r.emp.active %}checked{% endif %} aria-label="{{ r.emp.emp_id }} を対象外にする"></td>
-      <td>{{ r.emp.emp_id }}</td>
+      <td>{{ r.emp.emp_id }}{% set dr = demo_real.get(C.emp_key(r.emp.emp_id)) %}{% if dr %} <span class="badge bg-warning-subtle text-warning-emphasis" title="{{ dr.detail }}。デモデータを消してもこの人は残ります。回答率に入れないときは対象外にしてください">{{ dr.label }}</span>{% endif %}</td>
       <td>{{ r.emp.name or '' }}{% if r.deletable %}
         <form method="post" action="{{ url_for('admin.delete_employee', employee_id=r.emp.id) }}" class="d-inline" data-confirm="{{ r.emp.emp_id }} を対象者一覧から削除しますか？（まだ回答のない人だけ削除できます）"><button class="btn btn-link btn-sm text-danger p-0 ms-1">削除</button></form>{% endif %}</td>
       <td class="text-end">{{ r.considered }} 回</td>
@@ -8192,8 +8305,8 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
         <tr><th class="w-25">業務領域</th><td>{{ mark('domain') }}{{ task.domain.name if task.domain else '未選択' }}{% if task.ai_domain and (not task.domain or task.ai_domain != task.domain.name) %} <span class="badge badge-flag">AI推定: {{ task.ai_domain }}</span>{% endif %}</td></tr>
         <tr><th>目的</th><td>{{ mark('purpose') }}{{ task.purpose }}{% if task.purpose_unknown %} <span class="badge text-bg-danger">目的不明</span>{% endif %}</td></tr>
         <tr><th>アウトプット</th><td>{{ mark('output') }}{{ task.output }}</td></tr>
-        <tr><th>利用者</th><td>{{ mark('output_users') }}{{ task.output_users_list|join('・') }}{% if task.output_users_note %}<div class="small text-muted">{{ task.output_users_note }}</div>{% endif %}</td></tr>
-        <tr><th>入力情報</th><td>{{ mark('inputs') }}{{ task.inputs_list|join('・') }}{% if task.inputs_note %}<div class="small text-muted">{{ task.inputs_note }}</div>{% endif %}</td></tr>
+        <tr><th>利用者</th><td>{{ mark('output_users') or mark('output_users_note') }}{{ task.output_users_list|join('・') }}{% if task.output_users_note %}<div class="small text-muted">{{ task.output_users_note }}</div>{% endif %}</td></tr>
+        <tr><th>入力情報</th><td>{{ mark('inputs') or mark('inputs_note') }}{{ task.inputs_list|join('・') }}{% if task.inputs_note %}<div class="small text-muted">{{ task.inputs_note }}</div>{% endif %}</td></tr>
         <tr><th>前後の業務</th><td>{{ mark('prev_task') or mark('next_task') }}{{ task.prev_task or '－' }} → <strong>{{ task.name }}</strong> → {{ task.next_task or '－' }}</td></tr>
         <tr><th>関わる人・部署</th><td>{{ mark('actors') }}{{ task.actors_list|join('・') or '－' }}</td></tr>
         <tr><th>情報の受け取り元</th><td>{{ mark('info_from') }}{{ task.info_from or '－' }}</td></tr>
@@ -8262,20 +8375,26 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
       {% endif %}
       {% endif %}
       {% set extra = task.ai_extra_dict %}
-      {% if extra.get('tobe_steps') %}
-      <div class="small mt-2"><strong>改善後の流れ（AI案）</strong>
-        <ol class="mb-1 ps-3">{% for x in extra.tobe_steps %}<li>{{ x }}</li>{% endfor %}</ol>
-        {% if extra.get('saving_minutes_per_month') %}<div class="text-success">削減の見込み 約 {{ extra.saving_minutes_per_month }} 分/月</div>{% endif %}
-      </div>
-      {% endif %}
       {% if extra.get('unknowns') %}
       <div class="small mt-2"><strong>聞き取りで分からなかったこと（担当者に確認）</strong>
         <ul class="mb-0">{% for q in extra.unknowns %}<li>{{ q }}</li>{% endfor %}</ul>
       </div>
       {% endif %}
-      {% if extra.get('hearing_questions') %}
-      <div class="small mt-2"><strong>ヒアリングで聞くこと（まずは相談したい）</strong>
-        <ul class="mb-0">{% for q in extra.hearing_questions %}<li>{{ q }}</li>{% endfor %}</ul>
+      {% set plan_note = task.ai_plan_note %}
+      {% if extra.get('tobe_steps') or extra.get('saving_minutes_per_month') or extra.get('hearing_questions') %}
+      <div class="small mt-2{% if plan_note %} pt-2 border-top{% endif %}">
+        {% if plan_note == 'デモ' %}<div class="text-muted mb-1"><span class="badge bg-warning-subtle text-warning-emphasis">デモ</span> デモ用の見本の案です（AI で分析したものではありません）。</div>
+        {% elif plan_note %}<div class="text-muted mb-1"><span class="badge text-bg-light border">{{ plan_note }}</span> 前回の AI 分析で出た案です。いまの分析（ルールベース）とは別で、再分析では更新していません。</div>{% endif %}
+        {% if extra.get('tobe_steps') %}
+        <strong>改善後の流れ（AI案）</strong>
+        <ol class="mb-1 ps-3">{% for x in extra.tobe_steps %}<li>{{ x }}</li>{% endfor %}</ol>
+        {% endif %}
+        {% if extra.get('saving_minutes_per_month') %}<div class="text-success">削減の見込み 約 {{ extra.saving_minutes_per_month }} 分/月</div>{% endif %}
+        {% if extra.get('hearing_questions') %}
+        <div class="mt-2"><strong>ヒアリングで聞くこと（まずは相談したい）</strong>
+          <ul class="mb-0">{% for q in extra.hearing_questions %}<li>{{ q }}</li>{% endfor %}</ul>
+        </div>
+        {% endif %}
       </div>
       {% endif %}
       {% if not task.ai_source %}
@@ -8289,7 +8408,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
       {% set shown = [] %}
       <ul class="mb-0">
         {% for r in related_by_ai %}{% if r.id not in shown %}{% set _ = shown.append(r.id) %}
-        <li><a href="{{ url_for('cases.detail', task_id=r.id) }}">{{ r.name }}</a> <span class="badge badge-flag">AI</span> <span class="small text-muted">{{ r.workplace.name if r.workplace else '' }}／{{ r.monthly_minutes|hours }} h</span></li>
+        <li><a href="{{ url_for('cases.detail', task_id=r.id) }}">{{ r.name }}</a> <span class="badge badge-flag">{{ 'AI' if task.ai_source in ('openai', 'claude') else '推定' }}</span> <span class="small text-muted">{{ r.workplace.name if r.workplace else '' }}／{{ r.monthly_minutes|hours }} h</span></li>
         {% endif %}{% endfor %}
         {% for r in related %}{% if r.id not in shown %}{% set _ = shown.append(r.id) %}
         <li><a href="{{ url_for('cases.detail', task_id=r.id) }}">{{ r.name }}</a> <span class="small text-muted">{{ r.workplace.name if r.workplace else '' }}／{{ r.monthly_minutes|hours }} h</span></li>
@@ -8346,11 +8465,13 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
         </div>
       </div>
 
-      <label class="form-label small mb-1 mt-2"><strong>業務情報</strong>（直すと推定の印が外れます）</label>
+      {% set missing = task.missing_required %}
+      {% macro need(label) %}{% if label in missing %} <span class="badge text-bg-warning">未入力</span>{% endif %}{% endmacro %}
+      <label class="form-label small mb-1 mt-2" id="case-info"><strong>業務情報</strong>（直すと推定の印が外れます。必須項目が空なら <span class="badge text-bg-warning">未入力</span> が付きます）</label>
       <div class="row g-2 mb-2">
         <div class="col-8">
-          <label class="form-label small mb-0">業務領域</label>
-          <select name="domain_id" class="form-select form-select-sm">
+          <label class="form-label small mb-0" for="f-domain_id">業務領域{{ need('業務領域') }}</label>
+          <select name="domain_id" id="f-domain_id" class="form-select form-select-sm">
             <option value="">未選択</option>
             {% for d in domains %}<option value="{{ d.id }}" {% if task.domain_id == d.id %}selected{% endif %}>{{ d.name }}</option>{% endfor %}
           </select>
@@ -8360,6 +8481,41 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
           <input type="number" name="headcount" class="form-control form-control-sm" min="1" step="1" value="{{ task.headcount or 1 }}">
         </div>
         {% if task.ai_extra_dict.get('headcount_guess') %}<div class="col-12 small text-muted mt-0">AI の推定は {{ task.ai_extra_dict.headcount_guess }}人（参考）。同じ作業をしている人数が分かったら担当人数に入れてください（月間時間に掛けます）。</div>{% endif %}
+        <div class="col-12">
+          <label class="form-label small mb-0" for="f-purpose">目的（なぜやるのか・誰が何に使うか）{{ need('目的') }}</label>
+          <textarea name="purpose" id="f-purpose" class="form-control form-control-sm" rows="2" maxlength="500">{{ task.purpose or '' }}</textarea>
+        </div>
+        <div class="col-12">
+          <label class="form-label small mb-0" for="f-output">アウトプット（最終的にできるもの）{{ need('アウトプット') }}</label>
+          <input type="text" name="output" id="f-output" class="form-control form-control-sm" value="{{ task.output or '' }}" maxlength="500">
+        </div>
+        <div class="col-12" id="f-output_users">
+          <div class="form-label small mb-0">利用者{{ need('利用者') }}</div>
+          <input type="hidden" name="output_users" value="">
+          {% for u in C.OUTPUT_USERS %}<div class="form-check form-check-inline small mb-0"><input class="form-check-input" type="checkbox" name="output_users" value="{{ u }}" id="f-ou-{{ loop.index }}" {% if u in task.output_users_list %}checked{% endif %}><label class="form-check-label" for="f-ou-{{ loop.index }}">{{ u }}</label></div>{% endfor %}
+          <input type="text" name="output_users_note" class="form-control form-control-sm mt-1" value="{{ task.output_users_note or '' }}" maxlength="500" placeholder="渡す相手の職場・部署・役職（「、」区切り。氏名は書かない）" aria-label="利用者の補足">
+        </div>
+        <div class="col-12" id="f-inputs">
+          <div class="form-label small mb-0">入力元（情報のもと）{{ need('入力元') }}</div>
+          <input type="hidden" name="inputs" value="">
+          {% for s in C.INPUT_SOURCES %}<div class="form-check form-check-inline small mb-0"><input class="form-check-input" type="checkbox" name="inputs" value="{{ s }}" id="f-in-{{ loop.index }}" {% if s in task.inputs_list %}checked{% endif %}><label class="form-check-label" for="f-in-{{ loop.index }}">{{ s }}</label></div>{% endfor %}
+          <input type="text" name="inputs_note" class="form-control form-control-sm mt-1" value="{{ task.inputs_note or '' }}" maxlength="500" placeholder="具体的なシステム名・ファイル名・帳票名（「、」区切り）" aria-label="入力元の補足">
+        </div>
+        <div class="col-6">
+          <label class="form-label small mb-0" for="f-frequency">頻度{{ need('頻度') }}</label>
+          <select name="frequency" id="f-frequency" class="form-select form-select-sm">
+            {% if task.frequency not in C.FREQUENCIES %}<option value="">未選択</option>{% endif %}
+            {% for v in C.FREQUENCIES %}<option value="{{ v }}" {% if task.frequency == v %}selected{% endif %}>{{ C.FREQUENCY_HINTS.get(v, v) }}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="col-6">
+          <label class="form-label small mb-0" for="f-duration">1回の時間{{ need('時間') }}</label>
+          <select name="duration" id="f-duration" class="form-select form-select-sm">
+            {% if task.duration not in C.DURATIONS %}<option value="">未選択</option>{% endif %}
+            {% for v in C.DURATIONS %}<option value="{{ v }}" {% if task.duration == v %}selected{% endif %}>{{ v }}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="col-12 small text-muted mt-0">頻度・1回の時間・担当人数を変えると、保存したときに月間時間を計算し直します。</div>
         <div class="col-6">
           <label class="form-label small mb-0">前の業務</label>
           <input type="text" name="prev_task" class="form-control form-control-sm" value="{{ task.prev_task or '' }}" maxlength="500">
@@ -8420,7 +8576,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
       <h5 class="card-title">担当者確認（推進メンバー）</h5>
       <p class="small text-muted">必須項目の内容とAIの推定を本人・推進メンバーが確認すると、業務情報の充足率に算入されます。</p>
       {% if not task.required_filled %}
-      <div class="alert alert-warning py-1 small">必須項目（{{ task.missing_required|join('・') }}）が未入力です。ヒアリングで補完してください。</div>
+      <div class="alert alert-warning py-1 small">必須項目（{% for key, label in C.REQUIRED_FIELDS if label in task.missing_required %}<a href="#f-{{ key }}" class="alert-link">{{ label }}</a>{% if not loop.last %}・{% endif %}{% endfor %}）が未入力です。ヒアリングで確かめて、上の「案件管理」の<a href="#case-info" class="alert-link">業務情報</a>に入れて「保存する」を押してください。</div>
       {% endif %}
       {% if task.verified %}
         <div class="small mb-2">確認者: {{ task.verified_by or '－' }}</div>
