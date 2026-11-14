@@ -4497,36 +4497,44 @@ def seed_masters():
         if row is not None:
             db.session.delete(row)
             changed = True
-    for t in Task.query.filter(Task.wish.in_(list(C.LEGACY_WISHES))).all():
-        t.wish = C.LEGACY_WISHES[t.wish]
-        changed = True
-    patterns = {emp_key(e.emp_id): e.work_pattern for e in Employee.query.filter(Employee.work_pattern != "").all()}
-    if patterns:
-        for model in (Respondent, MonthlyResponse):
-            for row in model.query.filter(db.or_(model.work_pattern.is_(None), model.work_pattern == "")).all():
-                if emp_key(row.emp_id) in patterns:
-                    row.work_pattern = patterns[emp_key(row.emp_id)]
-                    changed = True
-    changed = _backfill_member_since() or changed
-    changed = _merge_employees() or changed
-    changed = _sync_members() or changed
-    changed = _migrate_monthly_questions() or changed
-    changed = _migrate_task_minutes() or changed
-    changed = _migrate_self_improve() or changed
-    for m in FlowMap.query.filter(FlowMap.kind != "info").all():
-        db.session.delete(m)
-        changed = True
+    for migrate in (_migrate_wishes, _backfill_work_patterns, _backfill_member_since, _merge_employees, _sync_members,
+                    _migrate_monthly_questions, _migrate_task_minutes, _migrate_self_improve, _drop_old_flow_maps):
+        changed = migrate() or changed
     if changed:
         db.session.commit()
+
+def _migrate_wishes():
+    rows = Task.query.filter(Task.wish.in_(list(C.LEGACY_WISHES))).all()
+    for t in rows:
+        t.wish = C.LEGACY_WISHES[t.wish]
+    return bool(rows)
+
+def _backfill_work_patterns():
+    patterns = {emp_key(e.emp_id): e.work_pattern for e in Employee.query.filter(Employee.work_pattern != "").all()}
+    if not patterns:
+        return False
+    changed = False
+    for model in (Respondent, MonthlyResponse):
+        for row in model.query.filter(db.or_(model.work_pattern.is_(None), model.work_pattern == "")).all():
+            if emp_key(row.emp_id) in patterns:
+                row.work_pattern = patterns[emp_key(row.emp_id)]
+                changed = True
+    return changed
+
+def _drop_old_flow_maps():
+    rows = FlowMap.query.filter(FlowMap.kind != "info").all()
+    for m in rows:
+        db.session.delete(m)
+    return bool(rows)
 
 def _sync_members():
     answered = {}
     for m in MonthlyResponse.query.order_by(MonthlyResponse.created_at, MonthlyResponse.id).all():
-        if norm_emp_id(m.emp_id):
-            answered[norm_emp_id(m.emp_id).lower()] = (m.emp_id, m.name, m.workplace_id, m.work_pattern)
+        if emp_key(m.emp_id):
+            answered[emp_key(m.emp_id)] = (m.emp_id, m.name, m.workplace_id, m.work_pattern)
     for r in Respondent.query.all():
-        if norm_emp_id(r.emp_id) and r.tasks:
-            answered.setdefault(norm_emp_id(r.emp_id).lower(), (r.emp_id, r.name, r.workplace_id, r.work_pattern))
+        if emp_key(r.emp_id) and r.tasks:
+            answered.setdefault(emp_key(r.emp_id), (r.emp_id, r.name, r.workplace_id, r.work_pattern))
     existing = {emp_key(e.emp_id): e for e in Employee.query.all()}
     changed = False
     for key, (emp_id, name, wp, pat) in answered.items():
@@ -4695,6 +4703,12 @@ _PREVIOUS_TEXTS = {
 }
 
 
+def _core_copy(q):
+    item = dict(q, options=list(q.get("options", [])))
+    if q.get("depends"):
+        item["depends"] = dict(q["depends"])
+    return item
+
 def _core_in_order(qs):
     core_order = [q["key"] for q in C.MONTHLY_CORE_QUESTIONS]
     slots = [i for i, q in enumerate(qs) if q.get("key") in core_order]
@@ -4708,7 +4722,6 @@ def _core_in_order(qs):
 
 def _migrate_monthly_questions():
     core = {q["key"]: q for q in C.MONTHLY_CORE_QUESTIONS}
-    stance_q = core["stance"]
     changed = False
     for survey in MonthlySurvey.query.all():
         qs = survey.questions
@@ -4716,7 +4729,7 @@ def _migrate_monthly_questions():
         for q in qs:
             if q.get("key") in ("ask", "self"):
                 if not placed:
-                    new_qs.append(dict(stance_q, options=list(stance_q["options"])))
+                    new_qs.append(_core_copy(core["stance"]))
                     placed = True
                 touched = True
                 continue
@@ -4749,10 +4762,7 @@ def _migrate_monthly_questions():
                 continue
             before = {c["key"] for c in C.MONTHLY_CORE_QUESTIONS[:idx]}
             pos = max([i for i, q in enumerate(new_qs) if q.get("key") in before], default=-1) + 1
-            item = dict(cq, options=list(cq.get("options", [])))
-            if cq.get("depends"):
-                item["depends"] = dict(cq["depends"])
-            new_qs.insert(pos, item)
+            new_qs.insert(pos, _core_copy(cq))
             present.add(cq["key"])
             touched = True
         new_qs, reordered = _core_in_order(new_qs)
@@ -5104,7 +5114,7 @@ def seed_demo():
     for i, (name, wp, c1, skills, learn, c4, c6) in enumerate(DEMO_RESPONDENTS):
         workplace = _demo_master(wp_by_name, Workplace, wp, 100 + i, created["workplaces"])
         emp_id = f"DEMO-{i + 1:03d}"
-        r = Respondent.query.filter(db.func.lower(Respondent.emp_id) == emp_id.lower()).first()
+        r = _respondent_for(emp_id)
         if r is None:
             d = DEMO_D.get(name, ("", "", "", ""))
             r = Respondent(
@@ -5239,10 +5249,7 @@ def _seed_employees_and_monthly(resp_by_name, wp_by_name, created):
             )
 
 def _clear_demo_masters():
-    try:
-        made = json.loads(Setting.get(DEMO_MASTERS_KEY, "") or "{}")
-    except ValueError:
-        made = {}
+    made = _json_column(Setting.get(DEMO_MASTERS_KEY), {})
     for sid in made.get("surveys") or []:
         s = db.session.get(MonthlySurvey, sid)
         used = s is not None and MonthlyResponse.query.filter(db.or_(MonthlyResponse.survey_id == s.id, MonthlyResponse.period == s.period)).first() is not None
@@ -5252,9 +5259,10 @@ def _clear_demo_masters():
         d = db.session.get(Domain, did)
         if d is not None and Task.query.filter_by(domain_id=d.id).first() is None and Domain.query.filter_by(parent_id=d.id).first() is None:
             db.session.delete(d)
+    used = _workplace_usage()
     for wid in made.get("workplaces") or []:
         w = db.session.get(Workplace, wid)
-        if w is not None and not any(m.query.filter_by(workplace_id=w.id).first() is not None for m in (Respondent, Task, Employee, MonthlyResponse)):
+        if w is not None and not used.get(w.id):
             db.session.delete(w)
     row = db.session.get(Setting, DEMO_MASTERS_KEY)
     if row is not None:
@@ -5297,17 +5305,16 @@ def clear_demo():
     for r in Respondent.query.filter_by(is_demo=True).all():
         if Task.query.filter_by(respondent_id=r.id).first() is not None or MonthlyResponse.query.filter_by(respondent_id=r.id).first() is not None:
             r.is_demo = False
-            kept.add(norm_emp_id(r.emp_id).lower())
+            kept.add(emp_key(r.emp_id))
         else:
             db.session.delete(r)
     for e in Employee.query.filter_by(is_demo=True).all():
-        if e.emp_id.lower() in kept or MonthlyResponse.query.filter(db.func.lower(MonthlyResponse.emp_id) == e.emp_id.lower()).first() is not None:
+        if emp_key(e.emp_id) in kept or MonthlyResponse.query.filter(same_emp_id(MonthlyResponse.emp_id, e.emp_id)).first() is not None:
             e.is_demo = False
         else:
             db.session.delete(e)
     _clear_demo_masters()
     db.session.commit()
-    return list(demo_ids_with_real_data().values())
 
 # ===== 画面: ログイン =====
 bp_auth = Blueprint("auth", __name__)
@@ -5393,10 +5400,7 @@ def index():
     k = kpis()
     charts = dashboard_chart_data()
     suggestions = _resolve_urls(suggest_actions())
-    try:
-        ai_suggestions = json.loads(Setting.get("ai_suggestions", "[]") or "[]")
-    except ValueError:
-        ai_suggestions = []
+    ai_suggestions = _json_column(Setting.get("ai_suggestions"), [])
     recent = Task.query.order_by(Task.created_at.desc()).limit(8).all()
     monthly_rows = monthly_summary()
     charts["monthly"] = {
@@ -5471,7 +5475,7 @@ def ai_suggest():
 bp_survey = Blueprint("survey", __name__, url_prefix="/survey")
 
 
-def _current():
+def _session_respondent():
     rid = session.get("respondent_id")
     return db.session.get(Respondent, rid) if rid else None
 
@@ -5494,6 +5498,31 @@ class _JsonForm(dict):
             except (TypeError, ValueError):
                 return default
         return value if isinstance(value, str) else str(value)
+
+def _int_or(value, default):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+def _skill_list(values):
+    picked = [v for v in values or [] if v in C.SKILLS]
+    return [v for v in picked if v != C.SKILL_NONE] if len(picked) > 1 else picked
+
+def _check_emp_id(raw, missing):
+    info = lookup(raw)
+    emp_id = info["emp_id"] if info else norm_emp_id(raw)
+    errors = {}
+    if not emp_id:
+        errors["emp_id"] = missing
+    elif not info:
+        errors["emp_id"] = EMP_NOT_FOUND
+    elif not info["active"]:
+        errors["emp_id"] = EMP_EXCLUDED
+    return emp_id, (info["name"] if info else ""), errors
+
+def _respondent_for(emp_id):
+    return Respondent.query.filter(same_emp_id(Respondent.emp_id, emp_id)).order_by(Respondent.id).first()
 
 def _respondent_json(r):
     return {
@@ -5566,14 +5595,16 @@ def monthly_task_names(text, vocab=None):
             out.append(name)
     return out
 
+def _monthly_of(emp_id, row_id):
+    row = db.session.get(MonthlyResponse, row_id) if row_id else None
+    if row is not None and emp_key(row.emp_id) == emp_key(emp_id):
+        return row
+    return MonthlyResponse.query.filter(same_emp_id(MonthlyResponse.emp_id, emp_id)).order_by(MonthlyResponse.period.desc(), MonthlyResponse.id.desc()).first()
+
 def monthly_for(r):
     if r is None or not emp_key(r.emp_id):
         return None
-    handed = session.get("monthly_handoff") if has_request_context() else None
-    row = db.session.get(MonthlyResponse, handed) if handed else None
-    if row is not None and emp_key(row.emp_id) == emp_key(r.emp_id):
-        return row
-    return MonthlyResponse.query.filter(same_emp_id(MonthlyResponse.emp_id, r.emp_id)).order_by(MonthlyResponse.period.desc(), MonthlyResponse.id.desc()).first()
+    return _monthly_of(r.emp_id, session.get("monthly_handoff") if has_request_context() else None)
 
 def _suggested_tasks(r):
     row = monthly_for(r)
@@ -5608,14 +5639,7 @@ def _monthly_context(emp, src, m=None):
     key = emp_key(emp)
     if src != "monthly" or not key:
         return None
-    if m:
-        row = db.session.get(MonthlyResponse, m)
-    else:
-        row = db.session.get(MonthlyResponse, session["monthly_last"]) if session.get("monthly_last") else None
-        if row is not None and emp_key(row.emp_id) != key:
-            row = None
-        if row is None:
-            row = MonthlyResponse.query.filter(db.func.lower(MonthlyResponse.emp_id) == key).order_by(MonthlyResponse.period.desc(), MonthlyResponse.id.desc()).first()
+    row = db.session.get(MonthlyResponse, m) if m else _monthly_of(emp, session.get("monthly_last"))
     if row is None or emp_key(row.emp_id) != key or row.answer("wants") != "ある":
         return None
     wants = monthly_task_names(row.answer("wants_tasks"))
@@ -5642,13 +5666,15 @@ def _options():
         "max_questions": C.INTAKE_MAX_QUESTIONS,
     }
 
+def _entry_args():
+    args = request.args
+    return norm_emp_id(args.get("emp")), (args.get("task") or "").strip()[:200], (args.get("src") or "").strip(), args.get("m", type=int)
+
 @bp_survey.route("/")
 def index():
-    emp = norm_emp_id(request.args.get("emp"))
-    task = (request.args.get("task") or "").strip()[:200]
-    src = (request.args.get("src") or "").strip()
+    emp, task, src, m = _entry_args()
     session.pop("respondent_id", None)
-    monthly = _monthly_context(emp, src, request.args.get("m", type=int))
+    monthly = _monthly_context(emp, src, m)
     if monthly is not None:
         session.pop("monthly_last", None)
         session["monthly_handoff"] = monthly["id"]
@@ -5658,10 +5684,7 @@ def index():
 
 @bp_survey.route("/start")
 def start():
-    emp = norm_emp_id(request.args.get("emp"))
-    task = (request.args.get("task") or "").strip()[:200]
-    src = (request.args.get("src") or "").strip()
-    m = request.args.get("m", type=int)
+    emp, task, src, m = _entry_args()
     return redirect(url_for("survey.index", emp=emp or None, task=task or None, src=src or None, m=m or None))
 
 # ----- API: あなたのこと -----
@@ -5670,16 +5693,7 @@ def api_respondent():
     f = _JsonForm(request.get_json(silent=True) or {})
     workplace_id = f.get("workplace_id", type=int)
     work_pattern = (f.get("work_pattern") or "").strip()
-    info = lookup(f.get("emp_id"))
-    emp_id = info["emp_id"] if info else norm_emp_id(f.get("emp_id"))
-    name = info["name"] if info else ""
-    errors = {}
-    if not emp_id:
-        errors["emp_id"] = "入力してください"
-    elif not info:
-        errors["emp_id"] = EMP_NOT_FOUND
-    elif not info["active"]:
-        errors["emp_id"] = EMP_EXCLUDED
+    emp_id, name, errors = _check_emp_id(f.get("emp_id"), "入力してください")
     if not workplace_id:
         errors["workplace_id"] = "選択してください"
     elif db.session.get(Workplace, workplace_id) is None:
@@ -5689,7 +5703,7 @@ def api_respondent():
     if errors:
         return jsonify({"success": False, "errors": errors}), 400
     newest = current_period() >= newest_period(emp_id)
-    r = Respondent.query.filter(same_emp_id(Respondent.emp_id, emp_id)).order_by(Respondent.id).first()
+    r = _respondent_for(emp_id)
     resumed = r is not None
     if r is None:
         r = Respondent(emp_id=emp_id)
@@ -5835,7 +5849,7 @@ def _clean_messages(items):
 
 
 def _need_respondent(emp_id=None):
-    r = _current()
+    r = _session_respondent()
     if r is None:
         return None, (jsonify({"success": False, "message": "先に「あなたのこと」を保存してください", "errors": {"_": "respondent"}}), 400)
     if emp_id is not None and emp_key(emp_id) != emp_key(r.emp_id):
@@ -5869,10 +5883,7 @@ def api_intake():
         return jsonify({"success": False, "message": "AI から応答がありませんでした。もう一度送ってください（" + (_LAST_ERROR["text"] or "原因不明") + "）"}), 502
     result["state"]["checked"] = sorted(set(state["checked"]) | used)[:20]
     steps = result["state"]["steps"]
-    try:
-        shown = max(0, min(int(data.get("shown") or 0), len(steps)))
-    except (TypeError, ValueError):
-        shown = 0
+    shown = max(0, min(_int_or(data.get("shown") or 0, 0), len(steps)))
     own = r.workplace.name if r.workplace else ""
     purpose = result["state"].get("purpose") or ""
     result["frames"] = [build_steps_flow(steps[:i], own, purpose).render() for i in range(shown + 1, len(steps) + 1)]
@@ -6046,21 +6057,15 @@ def api_task_create():
             "duplicate": {"id": dup.id, "name": dup.name, "hours": round((dup.monthly_minutes or 0) / 60, 1), "created_at": dup.created_at.strftime("%Y/%m/%d") if dup.created_at else "",
                           "can_delete": _withdrawable(dup)},
         }), 409
-    try:
-        headcount = max(1, int(data.get("headcount") or 1))
-    except (TypeError, ValueError):
-        headcount = 1
+    headcount = max(1, _int_or(data.get("headcount") or 1, 1))
     task = Task(
         respondent_id=r.id, workplace_id=r.workplace_id, name=name, frequency=frequency, duration=duration, headcount=headcount, wish=wish, shift=shift,
         self_improve=C.SELF_IMPROVE_YES if data.get("self_improve") else "", monthly_name=mask_person_names(str(data.get("monthly_name") or "").strip())[:200],
         steps_json=json.dumps(state["steps"], ensure_ascii=False), intake_json=json.dumps(messages, ensure_ascii=False),
     )
     if data.get("self_improve"):
-        skills = [v for v in (data.get("skills") or []) if v in C.SKILLS]
-        learn = [v for v in (data.get("learn") or []) if v in C.SKILLS]
-        skills, learn = [[v for v in vals if v != C.SKILL_NONE] if len(vals) > 1 else vals for vals in (skills, learn)]
-        r.c2_skills = C.join_list(skills)
-        r.c3_learn = C.join_list(learn)
+        r.c2_skills = C.join_list(_skill_list(data.get("skills")))
+        r.c3_learn = C.join_list(_skill_list(data.get("learn")))
         r.part_c_done = True
         task.assignment = "自主改善"
     db.session.add(task)
@@ -6143,8 +6148,8 @@ def index():
     return render_template(
         "cases/index.html",
         tasks=tasks,
-        workplaces=Workplace.query.order_by(Workplace.sort).all(),
-        domains=Domain.query.filter_by(parent_id=None).order_by(Domain.sort).all(),
+        workplaces=_workplaces(),
+        domains=_domains(),
         args=request.args,
         total_minutes=sum(t.monthly_minutes or 0 for t in tasks),
     )
@@ -6157,13 +6162,15 @@ def detail(task_id):
     names = set(task.ai_related_list)
     if names:
         related_by_ai = Task.query.filter(Task.name.in_(list(names)), Task.id != task.id).all()
+    task_flow, task_legend = flow_view(build_task_flow(task))
     return render_template(
         "cases/detail.html",
         task=task,
         related=related,
         related_by_ai=related_by_ai,
         domains=_domains(),
-        **dict(zip(("task_flow", "task_legend"), flow_view(build_task_flow(task)))),
+        task_flow=task_flow,
+        task_legend=task_legend,
     )
 
 def _update_task_info(task, f):
@@ -6235,10 +6242,8 @@ def update(task_id):
         task.assignment = assignment
     task.assignee = (f.get("assignee") or "").strip()
     task.steps_done = C.join_list(sorted(set(f.getlist("steps")), key=lambda s: int(s) if s.isdigit() else 0))
-    task.ecrs_eliminate = (f.get("ecrs_eliminate") or "").strip()
-    task.ecrs_combine = (f.get("ecrs_combine") or "").strip()
-    task.ecrs_rearrange = (f.get("ecrs_rearrange") or "").strip()
-    task.ecrs_simplify = (f.get("ecrs_simplify") or "").strip()
+    for key, _label, _q in C.ECRS:
+        setattr(task, "ecrs_" + key, (f.get("ecrs_" + key) or "").strip())
     after = (f.get("after_minutes") or "").strip()
     if after == "":
         task.after_minutes = None
@@ -6677,13 +6682,17 @@ def test_ai_settings():
     ping = [{"type": "function", "function": {"name": "ping", "description": "接続確認用。呼ぶと pong を返す", "parameters": {"type": "object", "properties": {}}}}]
     text2 = _call_ai("接続確認です。道具 ping を1回呼び、その結果を見てから「OK」とだけ返してください。", "ping を呼んでください。",
                      tools=ping, handlers={"ping": lambda args: called.append(1) or {"pong": True}})
+    reply = "接続できました。応答: " + " ".join(text.split())[:60]
     if called and text2:
-        flash("接続できました。応答: " + " ".join(text.split())[:60] + "／道具の呼び出し（tool calling）も通りました", "success")
+        flash(reply + "／道具の呼び出し（tool calling）も通りました", "success")
     else:
-        flash("接続できました。応答: " + " ".join(text.split())[:60] + "／道具の呼び出しは通りませんでした（" + (_LAST_ERROR["text"] or "tools が中継されていない可能性") + "）。聞き取りは道具なしで動きます", "warning")
+        flash(reply + "／道具の呼び出しは通りませんでした（" + (_LAST_ERROR["text"] or "tools が中継されていない可能性") + "）。聞き取りは道具なしで動きます", "warning")
     return redirect(url_for("admin.index"))
 
 # ----- 職場・業務領域 -----
+def _next_sort(model):
+    return (db.session.query(db.func.max(model.sort)).scalar() or 0) + 1
+
 @bp_admin.post("/workplace/add")
 def add_workplace():
     name = (request.form.get("name") or "").strip()
@@ -6692,8 +6701,7 @@ def add_workplace():
     elif Workplace.query.filter_by(name=name).first():
         flash("同じ名前の職場があります。", "warning")
     else:
-        max_sort = db.session.query(db.func.max(Workplace.sort)).scalar() or 0
-        db.session.add(Workplace(name=name, sort=max_sort + 1))
+        db.session.add(Workplace(name=name, sort=_next_sort(Workplace)))
         db.session.commit()
         flash("職場を追加しました。", "success")
     return redirect(url_for("admin.index"))
@@ -6743,8 +6751,7 @@ def add_domain():
     elif Domain.query.filter_by(name=name, parent_id=None).first():
         flash("同じ名前の領域があります。", "warning")
     else:
-        max_sort = db.session.query(db.func.max(Domain.sort)).scalar() or 0
-        db.session.add(Domain(name=name, description=(request.form.get("description") or "").strip(), sort=max_sort + 1))
+        db.session.add(Domain(name=name, description=(request.form.get("description") or "").strip(), sort=_next_sort(Domain)))
         db.session.commit()
         flash("業務領域を追加しました。", "success")
     return redirect(url_for("admin.index"))
@@ -6777,24 +6784,23 @@ def delete_domain(domain_id):
 def _member_payload():
     rows = member_rows()
     periods = member_periods()
-    return rows, periods, member_stats(rows, periods)
+    return rows, periods, member_stats(rows, periods), len([r for r in rows if r["emp"].active])
 
 @bp_admin.route("/employees")
 def employees():
-    rows, periods, stats = _member_payload()
+    rows, periods, stats, active = _member_payload()
     return render_template(
         "admin/employees.html",
         rows=rows,
         periods=periods,
         stats=stats,
-        active_count=len([r for r in rows if r["emp"].active]),
+        active_count=active,
         ldap_status=ldap_status_text(),
         workplaces=_workplaces(),
         demo_real=demo_ids_with_real_data(),
     )
 
 def _upsert_employee(emp_id, name, department, email, workplace_id=None, source="manual", work_pattern=None):
-    emp_id = norm_emp_id(emp_id)
     emp = find_employee(emp_id)
     created = emp is None
     if emp is None:
@@ -6841,8 +6847,7 @@ def toggle_employee(employee_id):
         e.excluded_at = datetime.now()
     db.session.commit()
     if _wants_json():
-        rows, periods, stats = _member_payload()
-        active = len([r for r in rows if r["emp"].active])
+        rows, periods, stats, active = _member_payload()
         return jsonify({"success": True, "active": e.active, "active_count": active, "excluded_count": len(rows) - active,
                         "stats": [dict(period=p, **stats[p]) for p in periods]})
     return redirect(url_for("admin.employees"))
@@ -6885,12 +6890,12 @@ def import_employees():
         return redirect(url_for("admin.employees"))
     raw = file.read()
     text = None
-    for enc in ("utf-8-sig", "cp932", "utf-8"):
+    for enc in ("utf-8-sig", "cp932"):
         try:
             text = raw.decode(enc)
             break
         except UnicodeDecodeError:
-            continue
+            pass
     if text is None:
         flash("文字コードを判別できませんでした（UTF-8 または Shift_JIS で保存してください）。", "danger")
         return redirect(url_for("admin.employees"))
@@ -6899,16 +6904,17 @@ def import_employees():
     if "emp_id" not in cols or "name" not in cols:
         flash("見出し行に「社員ID」と「氏名」が必要です。", "danger")
         return redirect(url_for("admin.employees"))
+
+    def cell(row, key):
+        return (row.get(cols[key]) or "").strip() if key in cols else None
+
     created = updated = 0
     for row in reader:
         emp_id = norm_emp_id(row.get(cols["emp_id"]))
-        name = (row.get(cols["name"]) or "").strip()
+        name = cell(row, "name")
         if not emp_id or not name:
             continue
-        dept = (row.get(cols["department"]) or "").strip() if "department" in cols else None
-        email = (row.get(cols["email"]) or "").strip() if "email" in cols else None
-        pattern = (row.get(cols["work_pattern"]) or "").strip() if "work_pattern" in cols else None
-        if _upsert_employee(emp_id, name, dept, email, None, "csv", pattern):
+        if _upsert_employee(emp_id, name, cell(row, "department"), cell(row, "email"), None, "csv", cell(row, "work_pattern")):
             created += 1
         else:
             updated += 1
@@ -6971,7 +6977,8 @@ def load_demo():
 
 @bp_admin.post("/demo/clear")
 def remove_demo():
-    kept = clear_demo()
+    clear_demo()
+    kept = list(demo_ids_with_real_data().values())
     flash("デモデータを削除しました。", "info")
     if kept:
         who = "、".join(" ".join(x for x in (p["emp_id"], p["name"]) if x) + f"（{p['detail']}）" for p in kept)
@@ -7033,7 +7040,7 @@ def shift_period(period, months):
     return f"{y:04d}-{m:02d}"
 
 def default_questions():
-    return [dict(q, options=list(q.get("options", []))) for q in C.MONTHLY_CORE_QUESTIONS]
+    return [_core_copy(q) for q in C.MONTHLY_CORE_QUESTIONS]
 
 def questions_for_new(period):
     prev = MonthlySurvey.query.filter(MonthlySurvey.period < period).order_by(MonthlySurvey.period.desc()).first()
@@ -7051,6 +7058,9 @@ def get_or_create_survey(period):
 def _wants_json():
     return request.is_json or "application/json" in (request.headers.get("Accept") or "")
 
+def _response_for(period, emp_id):
+    return MonthlyResponse.query.filter(MonthlyResponse.period == period, same_emp_id(MonthlyResponse.emp_id, emp_id)).first()
+
 # ----- 回答（ログイン不要） -----
 @bp_monthly.route("/")
 def form():
@@ -7058,7 +7068,6 @@ def form():
     survey = get_or_create_survey(period)
     emp_id = norm_emp_id(request.args.get("emp"))
     info = lookup(emp_id)
-    existing = MonthlyResponse.query.filter(MonthlyResponse.period == period, same_emp_id(MonthlyResponse.emp_id, info["emp_id"])).first() if info else None
     return render_template(
         "monthly/form.html",
         period=period,
@@ -7066,8 +7075,7 @@ def form():
         survey=survey,
         questions=survey.questions,
         emp_id=emp_id,
-        info=info,
-        existing=existing,
+        existing=_response_for(period, info["emp_id"]) if info else None,
         workplaces=_workplaces(),
     )
 
@@ -7077,22 +7085,9 @@ def submit():
     data = data or {}
     period = public_period(data.get("period"))
     survey = get_or_create_survey(period)
-    try:
-        workplace_id = int(data.get("workplace_id") or 0) or None
-    except (TypeError, ValueError):
-        workplace_id = None
+    workplace_id = _int_or(data.get("workplace_id") or 0, 0) or None
     work_pattern = (data.get("work_pattern") or "").strip()
-    info = lookup(data.get("emp_id"))
-    emp_id = info["emp_id"] if info else norm_emp_id(data.get("emp_id"))
-    name = info["name"] if info else ""
-
-    errors = {}
-    if not emp_id:
-        errors["emp_id"] = "社員IDを入力してください"
-    elif not info:
-        errors["emp_id"] = EMP_NOT_FOUND
-    elif not info["active"]:
-        errors["emp_id"] = EMP_EXCLUDED
+    emp_id, name, errors = _check_emp_id(data.get("emp_id"), "社員IDを入力してください")
     if not workplace_id or db.session.get(Workplace, workplace_id) is None:
         errors["workplace_id"] = "職場を選んでください"
     if work_pattern not in C.WORK_PATTERNS:
@@ -7133,7 +7128,7 @@ def submit():
     comment = (data.get("comment") or "").strip()[:500]
     if not survey.is_active:
         errors["survey"] = "この月度のアンケートは受け付けていません"
-    if not errors and MonthlyResponse.query.filter(MonthlyResponse.period == period, same_emp_id(MonthlyResponse.emp_id, emp_id)).first():
+    if not errors and _response_for(period, emp_id):
         errors["answered"] = f"{period_label(period)}はすでに回答済みです（1人1回）"
     if errors:
         message = next(iter(errors.values()))
@@ -7147,7 +7142,7 @@ def submit():
         period=period, emp_id=emp_id, name=name, workplace_id=workplace_id, work_pattern=work_pattern, survey_id=survey.id,
         answers_json=json.dumps(answers, ensure_ascii=False), comment=comment,
     )
-    respondent = Respondent.query.filter(same_emp_id(Respondent.emp_id, emp_id)).order_by(Respondent.id).first()
+    respondent = _respondent_for(emp_id)
     row.respondent_id = respondent.id if respondent else None
     if respondent is not None and newest:
         respondent.workplace_id = workplace_id
@@ -7176,7 +7171,7 @@ def done():
     last = session.pop("monthly_last", None)
     row = db.session.get(MonthlyResponse, last) if last else None
     if row is not None and row.period != period:
-        row = MonthlyResponse.query.filter(MonthlyResponse.period == period, same_emp_id(MonthlyResponse.emp_id, row.emp_id)).first()
+        row = _response_for(period, row.emp_id)
     wants = monthly_task_names(row.answer("wants_tasks")) if row is not None and row.answer("wants") == "ある" else []
     return render_template("monthly/done.html", period_label=period_label(period), row=row, wants_tasks=wants)
 
@@ -7187,7 +7182,7 @@ def api_employee(emp_id):
     info = lookup(emp_id)
     if not info:
         return jsonify({"found": False, "emp_id": emp_id, "answered": False})
-    answered = MonthlyResponse.query.filter(MonthlyResponse.period == period, same_emp_id(MonthlyResponse.emp_id, info["emp_id"])).first() is not None
+    answered = _response_for(period, info["emp_id"]) is not None
     if not info["active"]:
         return jsonify({"found": True, "excluded": True, "message": EMP_EXCLUDED, "answered": answered, "emp_id": info["emp_id"]})
     return jsonify({"found": True, "answered": answered, "emp_id": info["emp_id"]})
@@ -13287,7 +13282,7 @@ def _persistent_secret(instance_path):
     return value
 
 def create_app(test_config=None):
-    app = Flask(__name__, static_folder=None, instance_path=os.path.join(BASE_DIR, "instance"), instance_relative_config=True)
+    app = Flask(__name__, static_folder=None, instance_path=os.path.join(BASE_DIR, "instance"))
     os.makedirs(app.instance_path, exist_ok=True)
     app.jinja_loader = DictLoader(TEMPLATES)
 
