@@ -72,7 +72,7 @@ INTAKE_MAX_QUESTIONS = 6
 INTAKE_STEP_LIMIT = 12
 WORK_PATTERNS = ["普通勤務", "交代勤務"]
 SHIFT_OPTIONS = ["昼勤", "夜勤", "昼勤・夜勤の両方"]
-FREQUENCY_HINTS = {"毎日": "毎日（出勤のたび）"}
+FREQUENCY_HINTS = {"毎日": "毎日（出勤のたび）", "不定期": "不定期（月1回として計算）"}
 
 # ---- パートC 改善への参加意欲とスキル ----
 C1_OPTIONS = ["ぜひ取り組みたい", "教えてもらえれば取り組みたい", "興味はあるが時間がない", "今は考えていない"]
@@ -86,7 +86,7 @@ FREQ_COEF = {
     "毎週": 4.0,
     "毎月": 1.0,
     "四半期・年次": 0.3,
-    "不定期": 0.0,
+    "不定期": 1.0,
 }
 DURATION_MINUTES = {
     "15分未満": 10.0,
@@ -100,6 +100,7 @@ DURATION_MINUTES = {
 STATUSES = ["受付", "対応中", "完了", "保留"]
 DECISIONS = ["未定", "廃止", "統合", "簡素化", "自動化", "高度化", "現状維持"]
 ASSIGNMENTS = ["未定", "改善チーム主導", "自主改善"]
+REQUIRED_FIELDS = [("domain_id", "業務領域"), ("purpose", "目的"), ("output", "アウトプット"), ("output_users", "利用者"), ("inputs", "入力元"), ("frequency", "頻度"), ("duration", "時間")]
 STEPS = [
     (1, "アウトプットの確認", "その仕事が何を生み出し、誰がどう使っているかを確認する"),
     (2, "目的の明確化", "なぜやるのかを明確にする。目的不明・未利用なら廃止する"),
@@ -127,10 +128,11 @@ STAGES = [
 STAGE_KEYS = [s[0] for s in STAGES]
 STAGE_INDEX = {k: i for i, k in enumerate(STAGE_KEYS)}
 STAGE_NAMES = {s[0]: s[1] for s in STAGES}
+STAGE_STEPS = {"request": (1, 2), "spec": (3,)}
 BUILD_STAGE_SELF = "伴走"
 
 # ---- 案件候補・改善意欲の判定 ----
-CANDIDATE_WISHES = {"なくしたい", "減らしたい", "まずは相談したい", "自動化したい"}
+CANDIDATE_WISHES = {"なくしたい", "減らしたい", "自動化したい"}
 SELF_IMPROVE_POSITIVE = {SELF_IMPROVE_YES, "取り組みたい", "教えてもらえれば取り組みたい"}
 C1_POSITIVE = {"ぜひ取り組みたい", "教えてもらえれば取り組みたい"}
 
@@ -194,7 +196,7 @@ MONTHLY_KPI_LABELS = {
     "hours": "推計 月間時間",
     "trend": "減った率・増えた率",
     "wants": "自動化したい率",
-    "wants_tasks": "挙げられた業務（本登録へ誘導）",
+    "wants_tasks": "挙げられた業務（自動化を検討へ誘導）",
     "stance": "依頼したい率・一緒に取り組みたい率・自分で取り組みたい率",
     "new_tasks": "新規業務の件数",
     "task_names": "挙げられた定型・定期業務",
@@ -407,16 +409,12 @@ class Task(db.Model):
         return bool(self.actors or self.info_from)
 
     @property
+    def missing_required(self):
+        return [label for key, label in C.REQUIRED_FIELDS if not str(getattr(self, key) or "").strip()]
+
+    @property
     def required_filled(self):
-        return bool(
-            self.domain_id
-            and (self.purpose or "").strip()
-            and (self.output or "").strip()
-            and self.output_users
-            and self.inputs
-            and self.frequency
-            and self.duration
-        )
+        return not self.missing_required
 
     @property
     def is_sufficient(self):
@@ -461,6 +459,11 @@ class Task(db.Model):
     @property
     def is_on_hold(self):
         return self.status == "保留"
+
+    @property
+    def steps_lagging(self):
+        done = set(self.steps_done_list)
+        return [n for key in C.STAGE_KEYS[:self.stage_index] for n in C.STAGE_STEPS.get(key, ()) if n not in done]
 
     @property
     def stage_dates(self):
@@ -532,10 +535,11 @@ class Task(db.Model):
         return data if isinstance(data, dict) else {}
 
     def apply_ai_result(self, result):
+        mask = lambda v: [mask_person_names(x) for x in v] if isinstance(v, list) else (mask_person_names(v) if isinstance(v, str) else v)
         self.ai_domain = result.get("domain")
         self.ai_related = json.dumps(result.get("related") or [], ensure_ascii=False)
-        self.ai_summary = result.get("summary") or ""
-        self.ai_ecrs = json.dumps(result.get("ecrs") or {}, ensure_ascii=False)
+        self.ai_summary = mask_person_names(result.get("summary") or "")
+        self.ai_ecrs = json.dumps({k: mask(v) for k, v in (result.get("ecrs") or {}).items()}, ensure_ascii=False)
         self.ai_flags = json.dumps(result.get("flags") or [], ensure_ascii=False)
         self.ai_priority = result.get("priority") or ""
         self.ai_source = result.get("source") or ""
@@ -974,19 +978,20 @@ def related_tasks_for(task, limit=8):
     scored.sort(key=lambda x: -x[0])
     return [o for _, o in scored[:limit]]
 
-_WORD_RE = re.compile(r"[一-龥ぁ-んァ-ヶーA-Za-z0-9]{2,}")
-_STOPWORDS = {"する", "した", "して", "ため", "こと", "もの", "から", "まで", "ます", "です", "いる", "ある", "など", "作成", "業務", "確認"}
+_WORD_RE = re.compile(r"[一-龥々〆]{2,}|[ァ-ヶー]{2,}|[A-Za-z0-9]{2,}")
+_STOPWORDS = {"作成", "業務", "確認", "管理", "対応", "実施", "内容", "情報", "毎日", "毎週", "毎月", "前日", "翌日"}
 
 
 def _content_words(text):
     words = set()
-    for w in _WORD_RE.findall(text or ""):
-        if w in _STOPWORDS:
+    for w in _WORD_RE.findall(unicodedata.normalize("NFKC", text or "")):
+        if w in _STOPWORDS or re.fullmatch(r"ー+", w):
             continue
-        words.add(w)
-        if len(w) >= 4 and re.fullmatch(r"[一-龥]+", w):
+        words.add(w.lower())
+        if len(w) >= 4 and re.fullmatch(r"[一-龥々〆]+", w):
             for i in range(0, len(w) - 1):
-                words.add(w[i : i + 2])
+                if w[i : i + 2] not in _STOPWORDS:
+                    words.add(w[i : i + 2])
     return words
 
 # ----- 回答した人（業務を1件以上登録したか、月次アンケートに回答した人。対象外は除く。対象者一覧と同じ決まり） -----
@@ -3163,34 +3168,6 @@ def kind_icon_html(text, hint=None):
 # ===== AI連携（社内 Azure OpenAI の ChatGPT API を Responses API で呼ぶ。なければルールベース） =====
 AI_SETTING_LABELS = (("openai_api_url", "URL"), ("openai_api_key", "API キー"), ("openai_model", "モデル名"))
 
-SYSTEM_PROMPT = """あなたは製造部の「PC定型業務ゼロ化プロジェクト」を支援する業務分析アシスタントです。
-現場から登録された1件のPCの定型・定期業務を分析し、業務全体像の把握と改善検討に使う情報をJSONで返します。
-
-プロジェクトの原則:
-- 受けた案件をそのまま自動化しない。まずアウトプットと「なぜやるのか」を確認し、
-  ECRS（排除・結合・入替・簡素化）の観点でムリ・ムダ・ムラを取り除いて業務プロセスを最適化してから自動化する。
-- 目的が不明、アウトプットの利用者が分からない業務は廃止候補として扱う。
-- 同じ情報を何度も入力している業務、同じアウトプットを複数人が作っている業務は結合候補として扱う。
-- AIの推定は担当者が確認して確定する。断定せず、確認すべき点も示す。
-
-出力は次のキーを持つJSONオブジェクトのみ（前後に説明文を付けない）:
-{
-  "domain": "<与えられた業務領域リストの中から最も近い1つ>",
-  "related": ["<候補リストにある関連業務名>", ...],   // 最大5件。候補リストにない名前は書かない
-  "summary": "<この業務の要点と業務全体の中での位置づけを2文以内で>",
-  "ecrs": {
-    "eliminate": "<排除の観点で検討すべきこと。該当なしなら null>",
-    "combine": "<結合の観点。該当なしなら null>",
-    "rearrange": "<入替（順序・担当・場所・発生源での入力）の観点。該当なしなら null>",
-    "simplify": "<簡素化の観点。該当なしなら null>"
-  },
-  "automation": "<最適化後に残る作業を自動化するなら、どのツール（Python/Excel VBA/RPA/BI/生成AI等）でどう自動化するか。該当なしなら null>",
-  "flags": ["<次の中から該当するもの: 目的不明, 廃止候補, 統合候補, 重複入力候補, 自動化候補, 判断業務, 要ヒアリング>"],
-  "priority": "<高 | 中 | 低>",
-  "questions": ["<担当者に確認すべき質問（最大3件）>"]
-}
-日本語で、簡潔に書いてください。"""
-
 
 def _api_url():
     return (Setting.get("openai_api_url") or "").strip()
@@ -3500,6 +3477,8 @@ FINALIZE_PROMPT = """あなたは製造部「PC定型業務ゼロ化プロジェ
 - 勤務が「夜勤」「昼勤・夜勤の両方」の業務は、間接部門が不在の時間帯でも回る対策（自動配信、翌朝の確認に寄せる、引き継ぎ資料の自動作成など）を優先して考える。
 - 本人の希望（wish）が「なくしたい」なら目的と利用者の確認を最優先にし排除の案から、「減らしたい」なら結合・入替・簡素化の案を出して残る作業に自動化の手段を付け、「まずは相談したい」なら改善チームがヒアリングで聞くべき質問を用意する。
 - 使える道具: search_similar_tasks（登録済みの業務から似たものを探す。related はここで実際に見つかった業務名だけにする）、duplicate_outputs（同じできるものを複数人が作っている組）。結合の案はこの結果に基づいて書き、結果に無い業務名を作らない。道具は各1回まで。
+- 「登録済みの内容」があるときは再分析。改善チームが直した内容を前提にして、分析と改善の案を出し直す。
+- 人の名前（氏名・〇〇さん）は書かない。職場・役職・部署で書く。
 
 次のキーを持つ JSON オブジェクトだけを返す（前後に説明文を付けない）:
 {
@@ -3554,7 +3533,7 @@ def _clean_state(data):
     base = _intake_state_default()
     if not isinstance(data, dict):
         return base
-    base["title"] = str(data.get("title") or "").strip()[:200]
+    base["title"] = mask_person_names(str(data.get("title") or "").strip())[:200]
     steps = []
     for x in data.get("steps") or []:
         if not isinstance(x, dict):
@@ -3621,7 +3600,7 @@ def ai_intake(messages, state, image=None, work_pattern="", handlers=None, tools
     }
 
 
-def ai_finalize(state, messages, wish, domains, candidates, shift="", handlers=None):
+def ai_finalize(state, messages, wish, domains, candidates, shift="", handlers=None, current=None):
     domain_names = [d.name for d in domains]
     cand = [{"業務名": t.name, "領域": t.domain.name if t.domain else "", "アウトプット": t.output or ""} for t in candidates[:40]]
     log_text = "\n".join(("AI: " if m.get("role") == "ai" else "本人: ") + str(m.get("text") or "") for m in messages[-40:])
@@ -3630,8 +3609,9 @@ def ai_finalize(state, messages, wish, domains, candidates, shift="", handlers=N
         + "\n\n## 会話の記録\n" + (log_text or "（なし）")
         + "\n\n## 本人の希望\n" + (wish or "")
         + "\n\n## 勤務\n" + (shift or "不明")
+        + ("\n\n## 登録済みの内容（再分析）\n" + json.dumps(current, ensure_ascii=False, indent=1) if current else "")
         + "\n\n## 業務領域リスト（domain はこの中から選ぶ）\n" + json.dumps(domain_names, ensure_ascii=False)
-        + "\n\n## 関連候補の業務（related はこの中から選ぶ）\n" + json.dumps(cand, ensure_ascii=False, indent=1)
+        + "\n\n## 関連候補の業務（related はこの中か、search_similar_tasks で見つかった業務から選ぶ）\n" + json.dumps(cand, ensure_ascii=False, indent=1)
     )
     data = _extract_json(_call_ai(_finalize_prompt(), user_text, tools=FINALIZE_TOOLS, handlers=handlers))
     return data if isinstance(data, dict) else None
@@ -3811,7 +3791,7 @@ def _extract_json(text, brackets="{}"):
 def task_payload(task):
     return {
         "業務名": task.name,
-        "業務領域（回答者の選択）": task.domain.name if task.domain else "未選択",
+        "業務領域（推定）": task.domain.name if task.domain else "未選択",
         "目的": task.purpose or "",
         "アウトプット": task.output or "",
         "アウトプットの利用者": task.output_users_list + ([task.output_users_note] if task.output_users_note else []),
@@ -3834,58 +3814,12 @@ def task_payload(task):
         "手順（聞き取り）": [f"{x['no']}. {x['action']}" + (f"［{x['system']}］" if x.get("system") else "") + (f" → {x['output']}" if x.get("output") else "") for x in task.steps],
     }
 
-def analyze_task(task, domains, candidate_tasks):
-    result = None
-    if ai_enabled():
-        try:
-            result = _ai_analyze(task, domains, candidate_tasks)
-        except Exception as e:
-            log.exception("AI分析に失敗しました: %s", e)
-            result = None
-    if result is None:
-        result = rule_analyze(task, domains, candidate_tasks)
-        result["source"] = "rules"
-    else:
-        result["source"] = "openai"
-    return result
-
-def _ai_analyze(task, domains, candidate_tasks):
-    domain_names = [d.name for d in domains]
-    candidates = [
-        {"業務名": t.name, "領域": t.domain.name if t.domain else "", "アウトプット": t.output or "", "入力情報": t.inputs_list}
-        for t in candidate_tasks[:40]
-    ]
-    user_text = (
-        "## 分析対象の業務\n"
-        + json.dumps(task_payload(task), ensure_ascii=False, indent=1)
-        + "\n\n## 業務領域リスト（domain はこの中から選ぶ）\n"
-        + json.dumps(domain_names, ensure_ascii=False)
-        + "\n\n## 関連候補の業務（related はこの中から選ぶ）\n"
-        + json.dumps(candidates, ensure_ascii=False, indent=1)
-    )
-    text = _call_ai(SYSTEM_PROMPT, user_text)
-    data = _extract_json(text)
-    if not data:
-        return None
-    related = [r for r in (data.get("related") or []) if isinstance(r, str)]
-    candidate_names = {t.name for t in candidate_tasks}
-    related = [r for r in related if r in candidate_names][:5]
-    ecrs = data.get("ecrs") or {}
-    return {
-        "domain": data.get("domain") if data.get("domain") in domain_names else None,
-        "related": related,
-        "summary": data.get("summary") or "",
-        "ecrs": {
-            "eliminate": ecrs.get("eliminate"),
-            "combine": ecrs.get("combine"),
-            "rearrange": ecrs.get("rearrange"),
-            "simplify": ecrs.get("simplify"),
-            "automation": data.get("automation"),
-            "questions": [q for q in (data.get("questions") or []) if isinstance(q, str)][:3],
-        },
-        "flags": [f for f in (data.get("flags") or []) if f in C.AI_FLAGS],
-        "priority": data.get("priority") if data.get("priority") in ("高", "中", "低") else "中",
-    }
+def task_state(task):
+    return _clean_state({
+        "title": task.name, "steps": task.steps, "sources": _names(task.inputs_note), "outputs": _names(task.output), "recipients": _names(task.output_users_note),
+        "purpose": "" if task.purpose_unknown else task.purpose, "frequency": task.frequency, "duration": task.duration, "shift": task.shift or None,
+        "pains": _names(task.pains_note), "unknowns": task.ai_extra_dict.get("unknowns") or [],
+    })
 
 # ----- ルールベース（APIキーなしでも同じ形式で動く） -----
 DOMAIN_KEYWORDS = {
@@ -3898,20 +3832,31 @@ DOMAIN_KEYWORDS = {
     "安全・環境管理": ["安全", "ヒヤリ", "災害", "環境", "廃棄", "KY", "5S", "パトロール"],
     "改善・技術開発": ["改善", "提案", "技術", "開発", "試作", "標準", "手順書"],
 }
+_DOMAIN_GENERIC_WORDS = {"管理", "業務", "関する", "その他", "全般"}
 
+
+def _domain_keywords(d):
+    words = DOMAIN_KEYWORDS.get(d.name)
+    if words is None:
+        original = next((name for name, desc in DEFAULT_DOMAINS if desc and desc == (d.description or "").strip()), None)
+        words = DOMAIN_KEYWORDS.get(original, [])
+    own = re.split(r"[、,，・／/（）()\s]+", d.name + "、" + re.sub(r"(に関する|の)?業務$", "", (d.description or "").strip()))
+    return list(dict.fromkeys(list(words) + [w for w in own if len(w) >= 2 and w not in _DOMAIN_GENERIC_WORDS]))
+
+def rule_domain(task, domains):
+    texts = [task.name, "" if task.purpose_unknown else task.purpose, task.output, task.note, task.inputs_note]
+    texts += [x.get(k) or "" for x in task.steps for k in ("action", "system", "input", "output")]
+    text = " ".join(t or "" for t in texts)
+    best, best_score = None, 0
+    for d in domains:
+        score = sum(text.count(w) for w in _domain_keywords(d))
+        if score > best_score:
+            best, best_score = d, score
+    return best
 
 def rule_analyze(task, domains, candidate_tasks):
-    text = " ".join([task.name or "", task.purpose or "", task.output or "", task.note or ""])
-    best, best_score = None, 0
-    domain_names = [d.name for d in domains]
-    for name, words in DOMAIN_KEYWORDS.items():
-        if name not in domain_names:
-            continue
-        score = sum(text.count(w) for w in words)
-        if score > best_score:
-            best, best_score = name, score
-    if best is None and task.domain:
-        best = task.domain.name
+    found = rule_domain(task, domains)
+    best = found.name if found else (task.domain.name if task.domain else None)
 
     flags = []
     ecrs = {"eliminate": None, "combine": None, "rearrange": None, "simplify": None, "automation": None, "questions": []}
@@ -3939,7 +3884,7 @@ def rule_analyze(task, domains, candidate_tasks):
         ecrs["simplify"] = "確認工程でミスが起きやすい状態です。チェック項目を絞り、システムによる自動チェックに置き換えられないか検討してください。"
     if "判断を伴う" in nature:
         flags.append("判断業務")
-    if ("転記・コピー" in nature or "集計・グラフ作成" in nature or "データ取得" in nature) and task.wish != "このままでよい":
+    if "転記・コピー" in nature or "集計・グラフ作成" in nature or "データ取得" in nature:
         flags.append("自動化候補")
         tool = "Python または Power Query"
         if "Excel" in task.tools_list and "VBA・マクロ" not in task.tools_list:
@@ -3947,9 +3892,10 @@ def rule_analyze(task, domains, candidate_tasks):
         if "社内システム" in task.tools_list:
             tool = "RPA またはシステムのデータ出力機能"
         ecrs["automation"] = f"最適化後に残る転記・集計は {tool} での自動化が候補です。"
-    if not task.required_filled:
+    missing = task.missing_required
+    if missing:
         flags.append("要ヒアリング")
-        ecrs["questions"].append("必須項目（目的・アウトプット・利用者・入力元・頻度・時間）を担当者と確認してください。")
+        ecrs["questions"].append(f"必須項目（{'・'.join(missing)}）を担当者と確認してください。")
 
     related = [t.name for t in candidate_tasks[:5]]
     minutes = task.monthly_minutes or 0
@@ -4082,6 +4028,7 @@ def seed_masters():
     changed = _merge_employees() or changed
     changed = _sync_members() or changed
     changed = _migrate_monthly_questions() or changed
+    changed = _migrate_task_minutes() or changed
     for m in FlowMap.query.filter(FlowMap.kind != "info").all():
         db.session.delete(m)
         changed = True
@@ -4157,6 +4104,19 @@ def _backfill_member_since():
     for e in rows:
         e.created_at = min([x for x in (first.get(emp_key(e.emp_id)), e.updated_at) if x], default=None) or datetime.now()
     return True
+
+def _migrate_task_minutes():
+    changed = False
+    for t in Task.query.filter(db.or_(Task.frequency == "不定期", Task.ai_fields.like("%headcount%"))).all():
+        if "headcount" in t.ai_fields_list and not t.verified:
+            t.ai_extra = json.dumps(dict(t.ai_extra_dict, headcount_guess=t.headcount), ensure_ascii=False)
+            t.headcount = 1
+            t.ai_fields = C.join_list([k for k in t.ai_fields_list if k != "headcount"])
+            changed = True
+        before = t.monthly_minutes
+        if t.compute_minutes() != before:
+            changed = True
+    return changed
 
 def _stance_from_old(ask, self_answer):
     if self_answer == "取り組みたい":
@@ -4291,32 +4251,175 @@ DEMO_RESPONDENTS = [
 ]
 
 DEMO_TASKS = [
-    ("日報の実績をExcelの集計表に転記する", "田中 一郎", "製造実行・管理", "日次の生産実績を職場の朝会で確認するため", "日次実績集計表（Excel）", ["職場内", "上司"], ["紙の帳票"], "各ラインの日報記入", "週報の作成", "毎日", "15〜30分", 2, ["Excel", "紙"], ["転記・コピー", "集計・グラフ作成"], ["時間がかかる", "同じ情報を何度も入力する"], "自動化したい", "教えてもらえれば取り組みたい", "日報を直接システムに入力できれば転記がなくなる"),
-    ("週報の作成", "田中 一郎", "製造実行・管理", "週次の生産状況を課長に報告するため", "週報（Excel）", ["上司"], ["他のExcel"], "日次実績集計表の転記", "月報の作成", "毎週", "30分〜1時間", 1, ["Excel"], ["集計・グラフ作成", "資料作成"], ["時間がかかる"], "減らしたい", "改善チームに任せたい", ""),
-    ("残業予定表の提出", "田中 一郎", "人員・労務管理", "翌日の残業人員を総務に伝えるため", "残業予定表（Excel）をメール送付", ["他部署"], ["人から聞く"], "", "", "毎日", "15分未満", 1, ["Excel", "メール"], ["資料作成", "メール・配布"], ["急ぎで割り込まれる"], "減らしたい", "分からない", ""),
-    ("生産実績の月報作成", "佐藤 花子", "製造実行・管理", "月次の生産実績・稼働率を部長会議に報告するため", "月報（PowerPoint・Excel）", ["上司", "他部署"], ["他のExcel", "生産管理システム"], "週報の作成", "部長会議", "毎月", "2時間以上", 1, ["Excel"], ["集計・グラフ作成", "資料作成"], ["時間がかかる", "ミスが起きやすい"], "自動化したい", "取り組みたい", ""),
-    ("不良品発生報告のメール配信", "佐藤 花子", "品質管理", "不良発生を関係部署に共有するため", "不良報告メール", ["他部署", "上司"], ["紙の帳票", "人から聞く"], "品質システムへの不良登録", "", "週に数回", "15〜30分", 1, ["メール", "紙"], ["転記・コピー", "メール・配布"], ["同じ情報を何度も入力する"], "なくしたい", "取り組みたい", "品質システムに入力した内容と同じことをメールにも書いている"),
-    ("出勤簿の集計", "佐藤 花子", "人員・労務管理", "月次の勤怠を総務に提出するため", "勤怠集計表", ["他部署"], ["紙の帳票"], "", "総務での給与計算", "毎月", "1〜2時間", 1, ["Excel", "紙"], ["転記・コピー", "集計・グラフ作成"], ["時間がかかる", "ミスが起きやすい"], "自動化したい", "教えてもらえれば取り組みたい", ""),
-    ("安全パトロール結果の入力", "佐藤 花子", "安全・環境管理", "パトロール指摘事項を記録し是正を管理するため", "指摘事項台帳", ["職場内", "上司"], ["紙の帳票"], "安全パトロール", "是正確認", "毎週", "15〜30分", 1, ["Excel", "紙"], ["台帳更新"], ["特になし"], "このままでよい", "改善チームに任せたい", ""),
-    ("段取り替え時間の記録と集計", "鈴木 健", "原価・生産性管理", "段取り時間の推移を把握し改善テーマを決めるため", "段取り時間推移グラフ", ["職場内", "上司"], ["紙の帳票"], "段取り替え作業", "改善会議", "毎日", "15〜30分", 1, ["Excel", "紙"], ["転記・コピー", "集計・グラフ作成"], ["時間がかかる"], "自動化したい", "教えてもらえれば取り組みたい", ""),
-    ("設備日常点検表のファイリング確認", "鈴木 健", "設備管理", "点検漏れがないか確認するため", "点検実施チェック表", ["職場内"], ["紙の帳票"], "日常点検", "", "毎日", "15分未満", 1, ["紙", "Excel"], ["確認・チェック"], ["特になし"], "分からない", "分からない", ""),
-    ("原材料の払出し依頼票の作成", "鈴木 健", "生産計画・管理", "翌日分の材料を倉庫に依頼するため", "払出し依頼票（Excel）を印刷", ["他部署"], ["生産管理システム", "他のExcel"], "週次生産計画の受領", "倉庫での払出し", "毎日", "15〜30分", 2, ["Excel", "紙"], ["転記・コピー", "資料作成"], ["同じ情報を何度も入力する"], "なくしたい", "教えてもらえれば取り組みたい", "生産計画の数字を手で入れ直している"),
-    ("課内会議資料の作成", "中村 翔太", "製造実行・管理", "週次の課内会議で実績と課題を共有するため", "会議資料（PowerPoint）", ["職場内"], ["他のExcel"], "週報の作成", "課内会議", "毎週", "1〜2時間", 1, ["Excel"], ["資料作成", "集計・グラフ作成"], ["時間がかかる"], "減らしたい", "改善チームに任せたい", ""),
-    ("生産性指標の報告（部へ）", "中村 翔太", "原価・生産性管理", "部の生産性会議に課の指標を提出するため", "生産性指標シート", ["他部署", "上司"], ["他のExcel"], "月報の作成", "部の生産性会議", "毎月", "30分〜1時間", 1, ["Excel", "メール"], ["転記・コピー"], ["同じ情報を何度も入力する"], "なくしたい", "改善チームに任せたい", "月報と同じ数字を別フォーマットに入れ直している"),
-    ("組立実績の日次入力（生産管理システム）", "高橋 美咲", "製造実行・管理", "進捗管理と在庫引き落としのため", "システム上の実績データ", ["他部署", "職場内"], ["紙の帳票"], "組立作業の日報記入", "生産管理課の進捗確認", "毎日", "30分〜1時間", 1, ["社内システム", "紙"], ["転記・コピー"], ["時間がかかる", "ミスが起きやすい"], "自動化したい", "教えてもらえれば取り組みたい", ""),
-    ("外注先への納期確認メール", "高橋 美咲", "生産計画・管理", "外注部品の納期遅れを早めに把握するため", "納期確認メールと回答一覧", ["職場内", "上司"], ["メール", "他のExcel"], "発注", "組立計画の調整", "週に数回", "30分〜1時間", 1, ["メール", "Excel"], ["メール・配布", "確認・チェック"], ["急ぎで割り込まれる", "手順が人によって違う"], "減らしたい", "教えてもらえれば取り組みたい", ""),
-    ("作業手順書の改訂管理台帳の更新", "高橋 美咲", "改善・技術開発", "手順書の版数を管理するため", "改訂管理台帳", ["職場内"], ["人から聞く"], "手順書の改訂", "", "不定期", "15〜30分", 1, ["Excel"], ["台帳更新"], ["特になし"], "このままでよい", "分からない", ""),
-    ("日次実績のグラフ更新（掲示用）", "高橋 美咲", "製造実行・管理", "不明", "掲示板の実績グラフ", ["分からない"], ["他のExcel"], "日次実績集計表", "", "毎日", "15分未満", 1, ["Excel"], ["集計・グラフ作成"], ["何のためか分からない"], "分からない", "分からない", "前任者から引き継いだが誰が見ているか分からない"),
-    ("検査成績書の作成", "伊藤 大輔", "品質管理", "出荷時に顧客へ品質を証明するため", "検査成績書（PDF）", ["顧客・社外"], ["品質システム", "他のExcel"], "出荷検査", "出荷", "毎日", "30分〜1時間", 2, ["Excel", "社内システム"], ["転記・コピー", "資料作成"], ["時間がかかる", "ミスが起きやすい"], "自動化したい", "取り組みたい", ""),
-    ("不良データの集計とパレート図作成", "伊藤 大輔", "品質管理", "月次品質会議で重点不良を決めるため", "不良パレート図", ["職場内", "上司", "他部署"], ["品質システム"], "不良登録", "品質会議", "毎月", "1〜2時間", 1, ["Excel"], ["集計・グラフ作成"], ["時間がかかる"], "自動化したい", "取り組みたい", ""),
-    ("測定器の校正期限チェック", "伊藤 大輔", "設備管理", "校正切れの測定器を使わないため", "校正期限一覧", ["職場内"], ["他のExcel"], "", "校正依頼", "毎週", "15分未満", 1, ["Excel"], ["確認・チェック"], ["特になし"], "自動化したい", "教えてもらえれば取り組みたい", ""),
-    ("クレーム対応の進捗報告", "伊藤 大輔", "品質管理", "顧客クレームの対応状況を上司・営業に共有するため", "進捗報告メール", ["上司", "他部署"], ["人から聞く", "メール"], "クレーム受付", "顧客への回答", "週に数回", "15〜30分", 1, ["メール", "Excel"], ["資料作成", "メール・配布"], ["急ぎで割り込まれる"], "減らしたい", "改善チームに任せたい", ""),
-    ("週次生産計画の作成と配布", "渡辺 由美", "生産計画・管理", "各課に翌週の生産順序を指示するため", "週次生産計画表", ["他部署"], ["生産管理システム", "メール"], "受注一覧の更新", "各課の段取り・材料手配", "毎週", "2時間以上", 1, ["Excel", "社内システム", "メール"], ["集計・グラフ作成", "資料作成", "メール・配布"], ["時間がかかる", "急ぎで割り込まれる"], "減らしたい", "改善チームに任せたい", ""),
-    ("受注情報のExcel転記", "渡辺 由美", "生産計画・管理", "営業からの受注を計画表に反映するため", "受注一覧（Excel）", ["自分", "職場内"], ["メール"], "営業の受注入力", "週次生産計画の作成", "毎日", "30分〜1時間", 1, ["Excel", "メール"], ["転記・コピー"], ["同じ情報を何度も入力する", "ミスが起きやすい"], "自動化したい", "改善チームに任せたい", "営業が販売システムに入れた情報をメールで受けて転記している"),
-    ("在庫報告書の作成", "渡辺 由美", "生産計画・管理", "月末在庫を経理に報告するため", "在庫報告書", ["他部署"], ["生産管理システム"], "月末棚卸", "経理の決算処理", "毎月", "1〜2時間", 1, ["Excel", "社内システム"], ["集計・グラフ作成", "資料作成"], ["時間がかかる"], "自動化したい", "改善チームに任せたい", ""),
-    ("設備故障記録の台帳入力", "山本 剛", "設備管理", "故障履歴を残し予防保全に活かすため", "故障履歴台帳", ["職場内", "上司"], ["紙の帳票", "人から聞く"], "故障対応", "月次保全報告書の作成", "週に数回", "15〜30分", 1, ["Excel", "紙"], ["台帳更新", "転記・コピー"], ["手順が人によって違う"], "減らしたい", "教えてもらえれば取り組みたい", ""),
-    ("保全部品の発注依頼書作成", "山本 剛", "設備管理", "部品を購買に発注してもらうため", "発注依頼書", ["他部署"], ["人から聞く", "他のExcel"], "故障対応・点検", "購買での発注", "週に数回", "15〜30分", 1, ["Excel", "メール"], ["資料作成", "メール・配布"], ["同じ情報を何度も入力する"], "減らしたい", "分からない", ""),
-    ("月次保全報告書の作成", "山本 剛", "設備管理", "設備稼働率と故障件数を部長に報告するため", "月次保全報告書", ["上司"], ["他のExcel"], "故障履歴台帳の入力", "部長への報告", "毎月", "1〜2時間", 1, ["Excel"], ["集計・グラフ作成", "資料作成"], ["時間がかかる"], "自動化したい", "教えてもらえれば取り組みたい", ""),
+    dict(name="日報の実績をExcelの集計表に転記する", who="田中 一郎", domain="製造実行・管理", purpose="日次の生産実績を職場の朝会で確認するため", output="日次実績集計表（Excel）",
+         sources=["紙の日報"], freq="毎日", dur="15〜30分", head=2, wish="減らしたい", self=True, prev="各ラインの日報記入", next="週報の作成",
+         pains=["時間がかかる", "日報の数字を日次表・週報・月報に3回入れている"],
+         steps=[("各ラインから手書きの日報を集める", "紙の日報", "前日の生産実績", "", "", ""),
+                ("日報の数字を日次実績集計表に転記する", "Excel（日次実績集計表）", "日報", "", "", ""),
+                ("不良件数と稼働時間を手で集計する", "Excel（日次実績集計表）", "", "日次実績集計表", "", ""),
+                ("朝会用に印刷して課長に渡す", "", "", "印刷した集計表", "課長", "")]),
+    dict(name="週報の作成", who="田中 一郎", purpose="週次の生産状況を課長に報告するため", output="週報（Excel）",
+         sources=["日次実績集計表（Excel）"], freq="毎週", dur="30分〜1時間", head=1, wish="減らしたい", self=False, prev="日次実績集計表の転記", next="月報の作成",
+         pains=["前週の数字を集めるのに時間がかかる"],
+         steps=[("日次実績集計表から1週間分の数字を週報に転記する", "Excel（週報）", "日次実績集計表", "", "", ""),
+                ("前週比のコメントを書く", "Excel（週報）", "", "週報", "", ""),
+                ("課長にメールで送る", "メール", "", "", "課長", "")]),
+    dict(name="残業予定表の提出", who="田中 一郎", purpose="翌日の残業人員を総務に伝えるため", output="残業予定表（Excel）",
+         sources=["各ラインリーダー（口頭）"], freq="毎日", dur="15分未満", head=1, wish="減らしたい", self=False, prev="", next="",
+         pains=["夕方に急ぎで集めることが多い"],
+         steps=[("各ラインリーダーに翌日の残業予定を聞く", "口頭", "翌日の残業予定", "", "", ""),
+                ("残業予定表に人数と時間を入力する", "Excel（残業予定表）", "", "残業予定表（Excel）", "", ""),
+                ("総務にメールで送る", "メール", "", "", "総務", "")]),
+    dict(name="生産実績の月報作成", who="佐藤 花子", purpose="月次の生産実績・稼働率を部長会議に報告するため", output="月報（Excel）",
+         sources=["生産管理システム", "週報（Excel）"], freq="毎月", dur="2時間以上", head=1, wish="減らしたい", self=True, prev="週報の作成", next="部長会議",
+         pains=["数字が多くて時間がかかる", "集計のミスが起きやすい"],
+         steps=[("生産管理システムから月間の生産実績をダウンロードする", "生産管理システム", "月間の生産実績", "実績データ（CSV）", "", ""),
+                ("週報4週分の数字と合わせて稼働率を集計する", "Excel（月報集計表）", "週報（Excel）", "月報集計表", "", ""),
+                ("グラフを付けて月報にまとめる", "Excel（月報）", "月報集計表", "月報（Excel）", "", ""),
+                ("部長と生産管理課にメールで送る", "メール", "", "", "部長、生産管理課", "")]),
+    dict(name="不良品発生報告のメール配信", who="佐藤 花子", domain="品質管理", purpose="不良発生を関係部署に共有するため", output="不良報告メール",
+         sources=["検査員の不良報告書（紙）"], freq="週に数回", dur="15〜30分", head=1, wish="なくしたい", self=True, prev="品質システムへの不良登録", next="",
+         pains=["品質システムに入力した内容と同じことをメールにも書いている"],
+         steps=[("検査員から紙の不良報告書を受け取る", "紙の不良報告書", "", "", "", ""),
+                ("不良の内容を不良報告メールに書き写す", "", "紙の不良報告書", "不良報告メール", "", ""),
+                ("生産管理課と課長にメールで送る", "メール", "", "", "生産管理課、課長", "")]),
+    dict(name="出勤簿の集計", who="佐藤 花子", domain="人員・労務管理", purpose="月次の勤怠を総務に提出するため", output="勤怠集計表",
+         sources=["紙の出勤簿"], freq="毎月", dur="1〜2時間", head=1, wish="減らしたい", self=True, prev="", next="総務での給与計算",
+         pains=["人数が多く時間がかかる", "写し間違いが起きやすい"],
+         steps=[("紙の出勤簿を全員分回収する", "紙の出勤簿", "", "", "", ""),
+                ("出勤日数と残業時間をExcelに転記する", "Excel（勤怠集計表）", "紙の出勤簿", "", "", ""),
+                ("月の合計を集計する", "Excel（勤怠集計表）", "", "勤怠集計表", "", ""),
+                ("総務に提出する", "", "", "", "総務", "社内便")]),
+    dict(name="安全パトロール結果の入力", who="佐藤 花子", purpose="パトロール指摘事項を記録し是正を管理するため", output="指摘事項台帳",
+         sources=["紙のチェックシート"], freq="毎週", dur="15〜30分", head=1, wish="減らしたい", self=False, prev="安全パトロール", next="是正確認",
+         pains=["特にない"],
+         steps=[("パトロールの指摘を書いたチェックシートを受け取る", "紙のチェックシート", "", "", "", ""),
+                ("指摘事項台帳に指摘と担当を入力する", "Excel（指摘事項台帳）", "紙のチェックシート", "指摘事項台帳", "", ""),
+                ("是正が済んだ項目を更新する", "Excel（指摘事項台帳）", "", "", "", ""),
+                ("課長と職場のみんなに知らせる", "", "", "", "課長、職場内", "共有フォルダ")]),
+    dict(name="段取り替え時間の記録と集計", who="鈴木 健", purpose="段取り時間の推移を把握し、生産性の改善テーマを決めるため", output="段取り時間推移グラフ",
+         sources=["紙の記録用紙"], freq="毎日", dur="15〜30分", head=1, wish="減らしたい", self=True, prev="段取り替え作業", next="改善会議",
+         pains=["毎日の入力と集計に時間がかかる"],
+         steps=[("段取り替えの開始と終了の時刻を記録用紙に書く", "紙の記録用紙", "", "", "", ""),
+                ("記録用紙の時刻をExcelの段取り時間表に入力する", "Excel（段取り時間表）", "紙の記録用紙", "段取り時間表", "", ""),
+                ("段取り工数の推移グラフを更新する", "Excel（段取り時間表）", "", "段取り時間推移グラフ", "", ""),
+                ("改善会議で課長に見せる", "", "", "", "課長", "会議")]),
+    dict(name="設備日常点検表のファイリング確認", who="鈴木 健", purpose="点検漏れがないか確認するため", output="点検実施チェック表",
+         sources=["紙の日常点検表"], freq="毎日", dur="15分未満", head=1, wish="まずは相談したい", self=False, prev="日常点検", next="",
+         pains=["特にない"],
+         steps=[("各設備の日常点検表を集める", "紙の日常点検表", "", "", "", ""),
+                ("点検漏れがないか見比べて確認する", "", "紙の日常点検表", "", "", ""),
+                ("点検実施チェック表に済の印を付ける", "Excel（点検実施チェック表）", "", "点検実施チェック表", "", ""),
+                ("点検漏れがあれば班長に伝える", "", "", "", "班長", "口頭")]),
+    dict(name="原材料の払出し依頼票の作成", who="鈴木 健", domain="生産計画・管理", purpose="翌日分の材料を倉庫に依頼するため", output="払出し依頼票",
+         sources=["週次生産計画表（Excel）", "生産管理システム"], freq="毎日", dur="15〜30分", head=2, wish="なくしたい", self=True, prev="週次生産計画の受領", next="倉庫での払出し",
+         pains=["生産計画の数字を手で入れ直している"],
+         steps=[("週次生産計画表から翌日分の品番と数量を確認する", "週次生産計画表（Excel）", "", "", "", ""),
+                ("生産管理システムで品番ごとの材料を調べる", "生産管理システム", "", "", "", ""),
+                ("払出し依頼票に品番と数量を入力して印刷する", "Excel（払出し依頼票）", "", "払出し依頼票", "", ""),
+                ("倉庫に持っていく", "", "", "", "倉庫", "手渡し")]),
+    dict(name="課内会議資料の作成", who="中村 翔太", purpose="週次の課内会議で実績と課題を共有するため", output="会議資料（PowerPoint）",
+         sources=["週報（Excel）"], freq="毎週", dur="1〜2時間", head=1, wish="減らしたい", self=False, prev="週報の作成", next="課内会議",
+         pains=["資料づくりに時間がかかる"],
+         steps=[("週報から実績の数字を拾う", "週報（Excel）", "", "", "", ""),
+                ("実績のグラフをExcelで作る", "Excel（実績グラフ）", "", "実績グラフ", "", ""),
+                ("課題とあわせて会議資料にまとめる", "PowerPoint（会議資料）", "実績グラフ", "会議資料（PowerPoint）", "", ""),
+                ("課内会議で全員に配る", "", "", "", "課内メンバー", "会議")]),
+    dict(name="生産性指標の報告（部へ）", who="中村 翔太", purpose="部の生産性会議に課の指標を提出するため", output="生産性指標シート",
+         sources=["月報（Excel）"], freq="毎月", dur="30分〜1時間", head=1, wish="なくしたい", self=False, prev="月報の作成", next="部の生産性会議",
+         pains=["月報と同じ数字を別のフォーマットに入れ直している"],
+         steps=[("月報から課の数字を拾う", "月報（Excel）", "", "", "", ""),
+                ("部の生産性指標シートに入れ直す", "Excel（生産性指標シート）", "", "生産性指標シート", "", ""),
+                ("部長にメールで提出する", "メール", "", "", "部長", "")]),
+    dict(name="組立実績の日次入力（生産管理システム）", who="高橋 美咲", domain="製造実行・管理", purpose="進捗管理と在庫引き落としのため", output="システム上の実績データ",
+         sources=["紙の実績票"], freq="毎日", dur="30分〜1時間", head=1, wish="減らしたい", self=True, prev="組立作業の日報記入", next="生産管理課の進捗確認",
+         pains=["手書きの数字が読みにくく時間がかかる", "入力ミスが起きやすい"],
+         steps=[("組立作業者の手書き実績票を回収する", "紙の実績票", "組立数・不良数", "", "", ""),
+                ("生産管理システムに品番ごとの実績を入力する", "生産管理システム", "実績票", "システム上の実績データ", "生産管理課", ""),
+                ("入力後に紙の実績票をファイリングする", "", "", "", "", "")]),
+    dict(name="外注先への納期確認メール", who="高橋 美咲", purpose="外注部品の納期遅れを早めに把握するため", output="納期回答一覧",
+         sources=["発注一覧（Excel）", "外注先からの回答メール"], freq="週に数回", dur="30分〜1時間", head=1, wish="減らしたい", self=True, prev="発注", next="組立計画の調整",
+         pains=["急ぎの問い合わせで割り込まれる", "人によって聞き方が違う"],
+         steps=[("発注一覧から納期が近い部品を探す", "発注一覧（Excel）", "", "", "", ""),
+                ("外注先に納期確認のメールを送る", "メール", "", "", "", ""),
+                ("届いた回答を納期回答一覧に入力する", "Excel（納期回答一覧）", "外注先からの回答メール", "納期回答一覧", "", ""),
+                ("遅れそうな部品を班長に伝える", "", "", "", "班長", "口頭")]),
+    dict(name="作業手順書の改訂管理台帳の更新", who="高橋 美咲", purpose="手順書の版数を管理するため", output="改訂管理台帳",
+         sources=["手順書を改訂した人（口頭）"], freq="不定期", dur="15〜30分", head=1, wish="なくしたい", self=False, prev="手順書の改訂", next="",
+         pains=["文書管理システムでも版数が分かるので二重管理になっている"],
+         steps=[("手順書を改訂した人から改訂の内容を聞く", "口頭", "改訂の内容", "", "", ""),
+                ("改訂管理台帳に版数と改訂日を入力する", "Excel（改訂管理台帳）", "", "改訂管理台帳", "", ""),
+                ("職場のみんなに改訂を知らせる", "", "", "", "職場内", "掲示")]),
+    dict(name="日次実績のグラフ更新（掲示用）", who="高橋 美咲", purpose="", output="掲示板の実績グラフ",
+         sources=["日次実績集計表（Excel）"], freq="毎日", dur="15分未満", head=1, wish="まずは相談したい", self=False, prev="日次実績集計表", next="",
+         pains=["前任者から引き継いだが、誰が見ているか分からない"], unknowns=["誰が見ているか（渡す相手・使いみち）"],
+         steps=[("日次実績集計表から前日の出来高を写す", "日次実績集計表（Excel）", "", "", "", ""),
+                ("掲示用の実績グラフをExcelで更新して印刷する", "", "", "掲示板の実績グラフ", "", ""),
+                ("掲示板に貼り出す", "", "", "", "", "")]),
+    dict(name="検査成績書の作成", who="伊藤 大輔", domain="品質管理", purpose="出荷時に顧客へ品質を証明するため", output="検査成績書（PDF）",
+         sources=["品質システム"], recipients=["顧客"], freq="毎日", dur="30分〜1時間", head=2, wish="減らしたい", self=True, prev="出荷検査", next="出荷",
+         pains=["測定値が多くて時間がかかる", "写し間違いが起きやすい"],
+         steps=[("品質システムから出荷ロットの検査データを出力する", "品質システム", "出荷ロットの検査データ", "検査データ（CSV）", "", ""),
+                ("成績書の様式に測定値を転記する", "Excel（検査成績書の様式）", "検査データ（CSV）", "", "", ""),
+                ("PDFにして営業にメールで送る", "メール", "", "検査成績書（PDF）", "営業", "")]),
+    dict(name="不良データの集計とパレート図作成", who="伊藤 大輔", purpose="月次品質会議で重点不良を決めるため", output="不良パレート図",
+         sources=["品質システム"], freq="毎月", dur="1〜2時間", head=1, wish="減らしたい", self=True, prev="不良登録", next="品質会議",
+         pains=["グラフを作るのに時間がかかる"],
+         steps=[("品質システムから1か月分の不良データをダウンロードする", "品質システム", "不良データ", "不良データ（CSV）", "", ""),
+                ("不良項目ごとに件数を集計する", "Excel（不良集計表）", "不良データ（CSV）", "不良集計表", "", ""),
+                ("パレート図を作る", "Excel（不良集計表）", "不良集計表", "不良パレート図", "", ""),
+                ("品質会議で課長と製造各課に見せる", "", "", "", "課長、製造各課", "会議")]),
+    dict(name="測定器の校正期限チェック", who="伊藤 大輔", purpose="校正切れの測定器を使わないため", output="校正期限一覧",
+         sources=["校正台帳（Excel）"], freq="毎週", dur="15分未満", head=1, wish="減らしたい", self=True, prev="", next="校正依頼",
+         pains=["特にない"],
+         steps=[("校正台帳から期限が近い測定器を探す", "校正台帳（Excel）", "", "", "", ""),
+                ("校正期限一覧にまとめる", "Excel（校正期限一覧）", "", "校正期限一覧", "", ""),
+                ("各職場に期限が近いことをメールで知らせる", "メール", "", "", "各職場", "")]),
+    dict(name="クレーム対応の進捗報告", who="伊藤 大輔", purpose="顧客クレームの対応状況を上司・営業に共有するため", output="進捗報告メール",
+         sources=["顧客からのクレームメール", "担当者からの聞き取り"], freq="週に数回", dur="15〜30分", head=1, wish="減らしたい", self=False, prev="クレーム受付", next="顧客への回答",
+         pains=["急ぎの問い合わせで作業が中断する"],
+         steps=[("顧客からのクレームメールで内容を確かめる", "メール", "顧客からのクレームメール", "", "", ""),
+                ("担当者から対応の状況を聞く", "口頭", "対応の状況", "", "", ""),
+                ("クレーム管理表を更新する", "Excel（クレーム管理表）", "", "クレーム管理表", "", ""),
+                ("進捗報告メールを書いて課長と営業に送る", "メール", "", "進捗報告メール", "課長、営業", "")]),
+    dict(name="週次生産計画の作成と配布", who="渡辺 由美", domain="生産計画・管理", purpose="各課に翌週の生産順序を指示するため", output="週次生産計画表",
+         sources=["受注一覧（Excel）", "生産管理システム"], freq="毎週", dur="2時間以上", head=1, wish="減らしたい", self=False, prev="受注一覧の更新", next="各課の段取り・材料手配",
+         pains=["計画の作成に時間がかかる", "急な変更で割り込まれる"],
+         steps=[("受注一覧から翌週分の受注を抜き出す", "受注一覧（Excel）", "", "", "", ""),
+                ("生産管理システムで在庫と設備の空きを確認する", "生産管理システム", "", "", "", ""),
+                ("生産順序を決めて週次生産計画表を作る", "Excel（週次生産計画表）", "", "週次生産計画表", "", ""),
+                ("製造各課にメールで配布する", "メール", "", "", "製造各課", "")]),
+    dict(name="受注情報のExcel転記", who="渡辺 由美", domain="生産計画・管理", purpose="営業からの受注を計画表に反映するため", output="受注一覧（Excel）",
+         sources=["営業からの受注メール"], recipients=["生産管理課の計画担当"], freq="毎日", dur="30分〜1時間", head=1, wish="減らしたい", self=False, prev="営業の受注入力", next="週次生産計画の作成",
+         pains=["営業が販売システムに入れた情報を、メールで受けて転記している", "入力ミスが起きやすい"],
+         steps=[("営業から届いた受注メールを開く", "メール", "受注メール", "", "", ""),
+                ("品番・数量・納期を受注一覧に転記する", "Excel（受注一覧）", "受注メール", "受注一覧（Excel）", "", "")]),
+    dict(name="在庫報告書の作成", who="渡辺 由美", purpose="月末在庫を経理に報告するため", output="在庫報告書",
+         sources=["生産管理システム"], freq="毎月", dur="1〜2時間", head=1, wish="減らしたい", self=False, prev="月末棚卸", next="経理の決算処理",
+         pains=["月末に作業が集中して時間がかかる"],
+         steps=[("生産管理システムから月末の在庫データを出力する", "生産管理システム", "月末の在庫データ", "在庫データ（CSV）", "", ""),
+                ("品目別に在庫金額を集計する", "Excel（在庫報告書）", "在庫データ（CSV）", "", "", ""),
+                ("在庫報告書にまとめて経理に提出する", "", "", "在庫報告書", "経理", "メール")]),
+    dict(name="設備故障記録の台帳入力", who="山本 剛", purpose="故障履歴を残し予防保全に活かすため", output="故障履歴台帳",
+         sources=["オペレーターからの故障連絡（口頭）"], freq="週に数回", dur="15〜30分", head=1, wish="減らしたい", self=True, prev="故障対応", next="月次保全報告書の作成",
+         pains=["人によって書き方が違う"],
+         steps=[("オペレーターから故障の連絡を受ける", "PHS", "故障の内容", "", "", ""),
+                ("修理の内容を作業メモに書く", "紙の作業メモ", "", "作業メモ", "", ""),
+                ("作業メモを見て故障履歴台帳に入力する", "Excel（故障履歴台帳）", "作業メモ", "故障履歴台帳", "", ""),
+                ("台帳を課長と共有する", "", "", "", "課長", "共有フォルダ")]),
+    dict(name="保全部品の発注依頼書作成", who="山本 剛", purpose="部品を購買に発注してもらうため", output="発注依頼書",
+         sources=["保全担当からの聞き取り", "部品台帳（Excel）"], freq="週に数回", dur="15〜30分", head=1, wish="減らしたい", self=False, prev="故障対応・点検", next="購買での発注",
+         pains=["部品台帳と同じ内容を発注依頼書に書き写している"],
+         steps=[("保全担当から必要な部品を聞く", "口頭", "必要な部品", "", "", ""),
+                ("部品台帳で品番と価格を調べる", "部品台帳（Excel）", "", "", "", ""),
+                ("発注依頼書に品番・数量を書き写す", "Excel（発注依頼書）", "", "発注依頼書", "", ""),
+                ("購買にメールで送る", "メール", "", "", "購買", "")]),
+    dict(name="月次保全報告書の作成", who="山本 剛", purpose="設備稼働率と故障件数を部長に報告するため", output="月次保全報告書",
+         sources=["故障履歴台帳（Excel）"], freq="毎月", dur="1〜2時間", head=1, wish="減らしたい", self=True, prev="故障履歴台帳の入力", next="部長への報告",
+         pains=["グラフ作りに時間がかかる"],
+         steps=[("故障履歴台帳から1か月分の故障件数を数える", "故障履歴台帳（Excel）", "", "", "", ""),
+                ("設備稼働率を計算してグラフにする", "Excel（月次保全報告書）", "", "", "", ""),
+                ("月次保全報告書にまとめて部長に提出する", "", "", "月次保全報告書", "部長", "メール")]),
 ]
 
 DEMO_PROGRESS = {
@@ -4389,25 +4492,6 @@ DEMO_D = {
 }
 
 
-_DEMO_WISH = {"自動化したい": "減らしたい", "分からない": "まずは相談したい", "このままでよい": "まずは相談したい"}
-DEMO_STEPS = {
-    "日報の実績をExcelの集計表に転記する": [
-        {"no": 1, "action": "各ラインから手書きの日報を集める", "system": "紙の日報", "input": "前日の生産実績", "output": "", "to": ""},
-        {"no": 2, "action": "日報の数字を日次実績集計表に転記する", "system": "Excel（日次実績集計表）", "input": "日報", "output": "", "to": ""},
-        {"no": 3, "action": "不良件数と稼働時間を手で集計する", "system": "Excel（日次実績集計表）", "input": "", "output": "日次実績集計表", "to": ""},
-        {"no": 4, "action": "朝会用に印刷して課長に渡す", "system": "", "input": "", "output": "印刷した集計表", "to": "課長"},
-    ],
-    "週報の作成": [
-        {"no": 1, "action": "日次実績集計表から1週間分の数字を週報に転記する", "system": "Excel（週報）", "input": "日次実績集計表", "output": "", "to": ""},
-        {"no": 2, "action": "前週比のコメントを書く", "system": "Excel（週報）", "input": "", "output": "週報", "to": ""},
-        {"no": 3, "action": "課長にメールで送る", "system": "メール", "input": "", "output": "", "to": "課長"},
-    ],
-    "組立実績の日次入力（生産管理システム）": [
-        {"no": 1, "action": "組立作業者の手書き実績票を回収する", "system": "紙の実績票", "input": "組立数・不良数", "output": "", "to": ""},
-        {"no": 2, "action": "生産管理システムに品番ごとの実績を入力する", "system": "生産管理システム", "input": "実績票", "output": "システム上の実績データ", "to": "生産管理課"},
-        {"no": 3, "action": "入力後に紙の実績票をファイリングする", "system": "", "input": "", "output": "", "to": ""},
-    ],
-}
 DEMO_INTAKE = {
     "日報の実績をExcelの集計表に転記する": [
         {"role": "ai", "text": "「日報の実績をExcelの集計表に転記する」ですね。最初に何をしますか？"},
@@ -4433,83 +4517,91 @@ DEMO_AI_EXTRA = {
     },
 }
 
-def _demo_master(cache, model, name, sort):
+DEMO_MASTERS_KEY = "demo_masters"
+
+
+def _demo_master(cache, model, name, sort, created):
     obj = cache.get(name)
     if obj is None:
         obj = model(name=name, sort=sort)
         db.session.add(obj)
         db.session.flush()
         cache[name] = obj
+        created.append(obj.id)
     return obj
+
+def _demo_state(row):
+    steps = [{"no": i, "action": a, "system": s, "input": inp, "output": o, "to": to, "how": how} for i, (a, s, inp, o, to, how) in enumerate(row["steps"], 1)]
+    return _clean_state({
+        "title": row["name"], "steps": steps, "sources": row["sources"], "outputs": [row["output"]], "recipients": row.get("recipients") or [n for x in steps for n in _names(x["to"])],
+        "purpose": row["purpose"], "frequency": row["freq"], "duration": row["dur"], "pains": row["pains"], "unknowns": row.get("unknowns") or [],
+    })
+
+def demo_loaded():
+    return any(db.session.query(m.id).filter_by(is_demo=True).first() is not None for m in (Task, Respondent, MonthlyResponse, Employee))
 
 def seed_demo():
     clear_demo()
     wp_by_name = {w.name: w for w in Workplace.query.all()}
     dom_by_name = {d.name: d for d in Domain.query.all()}
+    created = {"workplaces": [], "domains": [], "surveys": []}
     base = datetime.now() - timedelta(days=20)
 
     resp_by_name = {}
     for i, (name, wp, c1, skills, learn, c4, c6) in enumerate(DEMO_RESPONDENTS):
-        workplace = _demo_master(wp_by_name, Workplace, wp, 100 + i)
-        d = DEMO_D.get(name, ("", "", "", ""))
-        r = Respondent(
-            emp_id=f"E{i + 1:03d}",
-            name=name, workplace=workplace, is_demo=True, work_pattern=("交代勤務" if i % 2 else "普通勤務"),
-            c1_wish=c1, c2_skills=C.join_list(skills), c3_learn=C.join_list(learn), c4_hours=c4, c6_share=c6,
-            part_c_done=True, part_d_done=any(d),
-            d1=d[0], d2=d[1], d3=d[2], d4=d[3],
-            created_at=base + timedelta(days=i),
-        )
-        db.session.add(r)
+        workplace = _demo_master(wp_by_name, Workplace, wp, 100 + i, created["workplaces"])
+        emp_id = f"DEMO-{i + 1:03d}"
+        r = Respondent.query.filter(db.func.lower(Respondent.emp_id) == emp_id.lower()).first()
+        if r is None:
+            d = DEMO_D.get(name, ("", "", "", ""))
+            r = Respondent(
+                emp_id=emp_id,
+                name=name, workplace=workplace, is_demo=True, work_pattern=("交代勤務" if i % 2 else "普通勤務"),
+                c1_wish=c1, c2_skills=C.join_list(skills), c3_learn=C.join_list(learn), c4_hours=c4, c6_share=c6,
+                part_c_done=True, part_d_done=any(d),
+                d1=d[0], d2=d[1], d3=d[2], d4=d[3],
+                created_at=base + timedelta(days=i),
+            )
+            db.session.add(r)
         resp_by_name[name] = r
     db.session.flush()
 
-    tasks = []
+    made = []
     for i, row in enumerate(DEMO_TASKS):
-        (name, rname, dname, purpose, output, users, inputs, prev, nxt, freq, dur, head, tools, nature, pains, wish, selfimp, note) = row
-        r = resp_by_name[rname]
-        domain = _demo_master(dom_by_name, Domain, dname, 100 + i)
+        r = resp_by_name[row["who"]]
+        state = _demo_state(row)
         t = Task(
-            respondent=r, workplace_id=r.workplace_id, is_demo=True,
-            name=name, domain=domain, purpose=purpose, output=output,
-            output_users=C.join_list(users), inputs=C.join_list(inputs), prev_task=prev, next_task=nxt,
-            frequency=freq, duration=dur, headcount=head, tools=C.join_list(tools), nature=C.join_list(nature),
-            pains=C.join_list(pains), wish=_DEMO_WISH.get(wish, wish), self_improve=(C.SELF_IMPROVE_YES if selfimp in C.SELF_IMPROVE_POSITIVE else C.SELF_IMPROVE_NO), note=note,
+            respondent=r, workplace_id=r.workplace_id, is_demo=True, name=row["name"], frequency=row["freq"], duration=row["dur"], headcount=row["head"],
+            wish=row["wish"], self_improve=C.SELF_IMPROVE_YES if row["self"] else C.SELF_IMPROVE_NO, prev_task=row["prev"], next_task=row["next"],
             shift=("普通勤務" if r.work_pattern != "交代勤務" else C.SHIFT_OPTIONS[i % 3]),
+            steps_json=json.dumps(state["steps"], ensure_ascii=False), intake_json=json.dumps(DEMO_INTAKE.get(row["name"], []), ensure_ascii=False),
             created_at=base + timedelta(days=i % 15, hours=i),
         )
-        t.compute_minutes()
-        if name in DEMO_STEPS:
-            t.steps_json = json.dumps(DEMO_STEPS[name], ensure_ascii=False)
-            t.intake_json = json.dumps(DEMO_INTAKE.get(name, []), ensure_ascii=False)
-            t.ai_extra = json.dumps(DEMO_AI_EXTRA.get(name, {}), ensure_ascii=False)
-            t.ai_fields = C.join_list(["inputs", "tools", "nature", "actors"])
-        flow = DEMO_FLOWS.get(name, {})
-        for k, v in flow.items():
-            setattr(t, k, C.join_list(v) if isinstance(v, list) else v)
-        prog = DEMO_PROGRESS.get(name, {})
-        for k, v in prog.items():
+        if row.get("domain"):
+            t.domain = _demo_master(dom_by_name, Domain, row["domain"], 100 + i, created["domains"])
+        for k, v in DEMO_FLOWS.get(row["name"], {}).items():
+            setattr(t, k, v)
+        for k, v in DEMO_PROGRESS.get(row["name"], {}).items():
             setattr(t, k, v)
         _seed_stage_history(t, datetime.now())
         db.session.add(t)
-        tasks.append(t)
+        made.append((t, state))
     db.session.flush()
 
-    domains = Domain.query.filter_by(parent_id=None).order_by(Domain.sort).all()
-    for t in tasks:
-        cands = related_tasks_for(t, limit=8)
-        result = rule_analyze(t, domains, cands)
-        result["source"] = "rules"
-        t.apply_ai_result(result)
-    _seed_employees_and_monthly(resp_by_name, wp_by_name)
+    for t, state in made:
+        _finalize_task(t, state, t.intake, use_ai=False)
+        if t.name in DEMO_AI_EXTRA:
+            t.ai_extra = json.dumps(dict(t.ai_extra_dict, **DEMO_AI_EXTRA[t.name]), ensure_ascii=False)
+    _seed_employees_and_monthly(resp_by_name, wp_by_name, created)
+    Setting.set(DEMO_MASTERS_KEY, json.dumps(created))
     db.session.commit()
-    return len(tasks)
+    return len(made)
 
 DEMO_EXTRA_EMPLOYEES = [
-    ("E009", "小林 直樹", "製造1課"),
-    ("E010", "加藤 恵", "組立課"),
-    ("E011", "吉田 悠", "検査・品質保証課"),
-    ("E012", "松本 玲奈", "生産管理課"),
+    ("DEMO-009", "小林 直樹", "製造1課"),
+    ("DEMO-010", "加藤 恵", "組立課"),
+    ("DEMO-011", "吉田 悠", "検査・品質保証課"),
+    ("DEMO-012", "松本 玲奈", "生産管理課"),
 ]
 
 
@@ -4517,25 +4609,19 @@ def recent_periods(n=4):
     cur = current_period()
     return [shift_period(cur, -k) for k in range(n - 1, -1, -1)]
 
-def _seed_employees_and_monthly(resp_by_name, wp_by_name):
+def _seed_employees_and_monthly(resp_by_name, wp_by_name, created):
+    rows = [(r.emp_id, name, r.workplace, r.work_pattern or "") for name, r in resp_by_name.items()]
+    rows += [(emp_id, name, wp_by_name.get(wp), "交代勤務" if j % 2 else "普通勤務") for j, (emp_id, name, wp) in enumerate(DEMO_EXTRA_EMPLOYEES)]
     employees = []
-    for i, (name, r) in enumerate(resp_by_name.items()):
-        employees.append(
-            Employee(
-                emp_id=r.emp_id, name=name, department=r.workplace.name if r.workplace else "", work_pattern=r.work_pattern or "",
-                workplace_id=r.workplace_id, email=f"user{i + 1:02d}@example.local", active=True, source="csv", is_demo=True,
+    for i, (emp_id, name, workplace, pattern) in enumerate(rows):
+        emp = find_employee(emp_id)
+        if emp is None:
+            emp = Employee(
+                emp_id=emp_id, name=name, department=workplace.name if workplace else "", work_pattern=pattern,
+                workplace_id=workplace.id if workplace else None, email=f"user{i + 1:02d}@example.local", active=True, source="csv", is_demo=True,
             )
-        )
-    for j, (emp_id, name, wp) in enumerate(DEMO_EXTRA_EMPLOYEES):
-        workplace = wp_by_name.get(wp)
-        employees.append(
-            Employee(
-                emp_id=emp_id, name=name, department=wp, workplace_id=workplace.id if workplace else None, work_pattern=("交代勤務" if j % 2 else "普通勤務"),
-                email=f"user{len(resp_by_name) + j + 1:02d}@example.local", active=True, source="csv", is_demo=True,
-            )
-        )
-    for e in employees:
-        db.session.add(e)
+            db.session.add(emp)
+        employees.append(emp)
     db.session.flush()
 
     resp_by_emp = {r.emp_id: r for r in resp_by_name.values()}
@@ -4550,11 +4636,13 @@ def _seed_employees_and_monthly(resp_by_name, wp_by_name):
             survey = MonthlySurvey(period=period, is_active=True)
             survey.set_questions(default_questions())
             db.session.add(survey)
+            db.session.flush()
+            created["surveys"].append(survey.id)
         surveys[period] = survey
-    db.session.flush()
+    answered = {(p, e) for p, e in db.session.query(MonthlyResponse.period, MonthlyResponse.emp_id).all()}
     for i, emp in enumerate(employees):
         for p_idx, period in enumerate(periods):
-            if (i * 7 + p_idx * 3) % 9 == 0 and p_idx != last:
+            if ((i * 7 + p_idx * 3) % 9 == 0 and p_idx != last) or (period, emp.emp_id) in answered:
                 continue
             level = max(0, (i % 3) + 2 - p_idx)
             prev_level = max(0, (i % 3) + 2 - (p_idx - 1))
@@ -4597,13 +4685,49 @@ def _seed_employees_and_monthly(resp_by_name, wp_by_name):
                 )
             )
 
+def _clear_demo_masters():
+    try:
+        made = json.loads(Setting.get(DEMO_MASTERS_KEY, "") or "{}")
+    except ValueError:
+        made = {}
+    for sid in made.get("surveys") or []:
+        s = db.session.get(MonthlySurvey, sid)
+        used = s is not None and MonthlyResponse.query.filter(db.or_(MonthlyResponse.survey_id == s.id, MonthlyResponse.period == s.period)).first() is not None
+        if s is not None and not used and s.questions == default_questions():
+            db.session.delete(s)
+    for did in made.get("domains") or []:
+        d = db.session.get(Domain, did)
+        if d is not None and Task.query.filter_by(domain_id=d.id).first() is None and Domain.query.filter_by(parent_id=d.id).first() is None:
+            db.session.delete(d)
+    for wid in made.get("workplaces") or []:
+        w = db.session.get(Workplace, wid)
+        if w is not None and not any(m.query.filter_by(workplace_id=w.id).first() is not None for m in (Respondent, Task, Employee, MonthlyResponse)):
+            db.session.delete(w)
+    row = db.session.get(Setting, DEMO_MASTERS_KEY)
+    if row is not None:
+        db.session.delete(row)
+
 def clear_demo():
-    demo_ids = db.session.query(Task.id).filter_by(is_demo=True)
-    StageLog.query.filter(StageLog.task_id.in_(demo_ids)).delete(synchronize_session=False)
-    Task.query.filter_by(is_demo=True).delete(synchronize_session=False)
-    Respondent.query.filter_by(is_demo=True).delete(synchronize_session=False)
+    db.session.flush()
+    task_ids = [i for (i,) in db.session.query(Task.id).filter_by(is_demo=True).all()]
+    if task_ids:
+        StageLog.query.filter(StageLog.task_id.in_(task_ids)).delete(synchronize_session=False)
+        Task.query.filter(Task.id.in_(task_ids)).delete(synchronize_session=False)
     MonthlyResponse.query.filter_by(is_demo=True).delete(synchronize_session=False)
-    Employee.query.filter_by(is_demo=True).delete(synchronize_session=False)
+    db.session.expire_all()
+    kept = set()
+    for r in Respondent.query.filter_by(is_demo=True).all():
+        if Task.query.filter_by(respondent_id=r.id).first() is not None or MonthlyResponse.query.filter_by(respondent_id=r.id).first() is not None:
+            r.is_demo = False
+            kept.add(norm_emp_id(r.emp_id).lower())
+        else:
+            db.session.delete(r)
+    for e in Employee.query.filter_by(is_demo=True).all():
+        if e.emp_id.lower() in kept or MonthlyResponse.query.filter(db.func.lower(MonthlyResponse.emp_id) == e.emp_id.lower()).first() is not None:
+            e.is_demo = False
+        else:
+            db.session.delete(e)
+    _clear_demo_masters()
     db.session.commit()
 
 # ===== 画面: ログイン =====
@@ -4982,8 +5106,30 @@ def api_reset():
 
 # ----- API: 検討する業務（AI の聞き取り → 登録） -----
 _IMAGE_PREFIX = re.compile(r"^data:image/(png|jpe?g|webp|gif);base64,")
-_SOURCE_WORDS = [("生産管理", "生産管理システム"), ("品質", "品質システム"), ("設備", "設備データ"), ("紙", "紙の帳票"), ("帳票", "紙の帳票"), ("手書き", "紙の帳票"), ("メール", "メール"), ("Excel", "他のExcel"), ("エクセル", "他のExcel"), ("聞", "人から聞く"), ("口頭", "人から聞く")]
-_TOOL_WORDS = [("Excel", "Excel"), ("エクセル", "Excel"), ("Access", "Access"), ("メール", "メール"), ("システム", "社内システム"), ("紙", "紙"), ("マクロ", "VBA・マクロ"), ("VBA", "VBA・マクロ"), ("RPA", "RPA")]
+_SOURCE_WORDS = [("紙", "紙の帳票"), ("帳票", "紙の帳票"), ("手書き", "紙の帳票"), ("メール", "メール"), ("Excel", "他のExcel"), ("エクセル", "他のExcel"), ("聞", "人から聞く"), ("口頭", "人から聞く")]
+_SYSTEM_WORDS = [("生産管理", "生産管理システム"), ("品質", "品質システム"), ("設備", "設備データ")]
+_MEDIUM_SOURCES = {"paper": "紙の帳票", "excel": "他のExcel", "mail": "メール", "verbal": "人から聞く"}
+_METHOD_SOURCES = {"mail": "メール", "verbal": "人から聞く", "phone": "人から聞く", "phs": "人から聞く", "meeting": "人から聞く", "hand": "紙の帳票", "fax": "紙の帳票"}
+_TOOL_WORDS = [("Excel", "Excel"), ("エクセル", "Excel"), ("Access", "Access"), ("メール", "メール"), ("システム", "社内システム"), ("紙", "紙"), ("手書き", "紙"), ("印刷", "紙"), ("マクロ", "VBA・マクロ"), ("VBA", "VBA・マクロ"), ("RPA", "RPA")]
+NATURE_WORDS = [
+    ("転記・コピー", r"転記|書き写|写す|写し|コピー|貼り付|貼りつ|入力|入れ直|打ち込|記入|登録"),
+    ("集計・グラフ作成", r"集計(?!表)|グラフ|合計|計算|数え|平均|パレート|ピボット"),
+    ("資料作成", r"作成|まとめ|作る|書く|コメント|資料を"),
+    ("確認・チェック", r"確認|確かめ|照合|見比べ|突き合わせ|探す|チェック(する|して|を)|点検(する|して)"),
+    ("データ取得", r"出力|(?<![提送差届])出す|ダウンロード|抽出|取り出|取得|集める|回収|拾う|抜き出|調べ"),
+    ("メール・配布", r"送る|送付|配布|配る|渡す|提出|共有|掲示|貼り出|知らせ|伝え|回覧"),
+    ("台帳更新", r"(台帳|管理表|一覧)[^、。]{0,12}(入力|更新|記入|追加|登録)|ファイリング"),
+    ("判断を伴う", r"判断|決め|判定|調整|振り分"),
+]
+PAIN_WORDS = [
+    ("時間がかかる", r"時間が?かか|時間を取ら|手間|面倒|遅い|遅く|長い|集中して|追われ|残業"),
+    ("ミスが起きやすい", r"ミス|間違|まちが|誤り|誤記|漏れ|抜け|見落と"),
+    ("同じ情報を何度も入力する", r"何度も|何回も|[2-9二三]回|二重|重複|書き写|転記|入れ直|打ち直|再入力|同じ(情報|内容|数字|こと|もの)"),
+    ("手順が人によって違う", r"人によ|人それぞれ|属人|バラバラ|ばらばら|やり方が違|決まっていない|その人しか"),
+    ("急ぎで割り込まれる", r"急ぎ|急な|急に|割り込|突発|至急|中断"),
+    ("何のためか分からない", r"何のため|目的が(分から|わから|不明)|誰が見て|だれが見て|見ているか分から|使われているか|必要か分から|いらないかも"),
+]
+_NO_PAIN_RX = re.compile(r"(特に)?(ない|なし|無し|ありません|ないです)。?")
 
 
 def _guess(text, table, default):
@@ -4991,6 +5137,61 @@ def _guess(text, table, default):
         if word.lower() in (text or "").lower():
             return value
     return default
+
+
+def _ordered(values, choices):
+    return [c for c in choices if c in values]
+
+
+def _source_category(name, method=""):
+    medium = medium_of(name) if (name or "").strip() else "unknown"
+    if medium == "system":
+        return _guess(name, _SYSTEM_WORDS, "その他")
+    return _MEDIUM_SOURCES.get(medium) or _guess(name, _SOURCE_WORDS, None) or _METHOD_SOURCES.get(method)
+
+
+def _state_sources(state):
+    made = [v for v in [x.get("output") or "" for x in state["steps"]] + list(state["outputs"]) if v.strip()]
+    internal = lambda v: any(same_thing(v, m) for m in made)
+    found = [(v, "") for v in state["sources"]]
+    for x in state["steps"]:
+        system, inp, action, to = [(x.get(k) or "").strip() for k in ("system", "input", "action", "to")]
+        role, m = field_role(system) if system else ("box", "")
+        if system and role == "line":
+            if inp and not to and not internal(inp):
+                found.append((inp, m))
+        elif system and not internal(system) and not _is_destination(system, action):
+            found.append((system, m))
+        elif inp and not to and not internal(inp):
+            found.append((inp, method_of(x.get("how_from") or "")))
+    return found
+
+
+def map_pains(texts):
+    found = [cat for cat, rx in PAIN_WORDS if any(re.search(rx, t or "") for t in texts)]
+    if not found and any(_NO_PAIN_RX.fullmatch((t or "").strip()) for t in texts):
+        found = ["特になし"]
+    return found
+
+
+def rule_categories(task, state):
+    steps = state["steps"]
+    sources = _state_sources(state)
+    inputs = [c for c in (_source_category(n, m) for n, m in sources) if c]
+    if sources and not inputs:
+        inputs = ["その他"]
+    names = list(state["recipients"]) + [n for x in steps for n in _names(x.get("to"))]
+    unknown = any(re.search(r"渡す|使う|使い|相手|利用", u) for u in state.get("unknowns") or [])
+    users = users_from_names(names, task.workplace.name if task.workplace else "") or (["分からない"] if unknown else [])
+    texts = [x.get(k) or "" for x in steps for k in ("system", "action", "how", "how_from")] + list(state["sources"])
+    tools = [v for word, v in _TOOL_WORDS if any(word.lower() in t.lower() for t in texts)]
+    nature = [cat for cat, rx in NATURE_WORDS if any(re.search(rx, (x.get("action") or "") + " " + (x.get("how") or "")) for x in steps)]
+    if any((x.get("to") or "").strip() for x in steps):
+        nature.append("メール・配布")
+    return {
+        "inputs": _ordered(inputs, C.INPUT_SOURCES), "output_users": list(dict.fromkeys(users)), "tools": _ordered(tools, C.TOOLS),
+        "nature": _ordered(nature, C.NATURES), "pains": map_pains(state["pains"]),
+    }
 
 
 def _clean_messages(items):
@@ -5021,7 +5222,7 @@ def api_intake():
     messages = _clean_messages(data.get("messages"))
     state = _clean_state(data.get("state") or {})
     if not state["title"] and data.get("title"):
-        state["title"] = str(data.get("title")).strip()[:200]
+        state["title"] = mask_person_names(str(data.get("title")).strip())[:200]
     image = data.get("image") or None
     if image is not None and (not isinstance(image, str) or len(image) > 6_000_000 or not _IMAGE_PREFIX.match(image)):
         return jsonify({"success": False, "message": "写真は PNG・JPEG・WebP・GIF で、4MB までにしてください"}), 400
@@ -5057,83 +5258,119 @@ def _fill_from_state(task, state, only_missing=False):
     if (state.get("purpose") or "").strip() and (task.purpose or "").strip() in ("", "不明"):
         task.purpose = state["purpose"].strip()[:500]
     if only_missing:
-        return
-    systems = [x.get("system") for x in state["steps"] if x.get("system")]
+        return []
     if not (task.purpose or "").strip():
         task.purpose = "不明"
-    if not task.inputs:
-        task.inputs = C.join_list(list(dict.fromkeys(_guess(v, _SOURCE_WORDS, "その他") for v in (state["sources"] + systems))) or ["その他"])
-    if not task.output_users:
-        names = list(state["recipients"]) + [n for x in state["steps"] for n in _names(x.get("to"))]
-        unknown = any(re.search(r"渡す|使う|使い|相手|利用", u) for u in state.get("unknowns") or [])
-        task.output_users = C.join_list(users_from_names(names, task.workplace.name if task.workplace else "") or (["分からない"] if unknown else []))
-    if not task.tools:
-        task.tools = C.join_list(list(dict.fromkeys(_guess(v, _TOOL_WORDS, "その他") for v in systems)) or ["その他"])
-    if not task.nature:
-        task.nature = C.join_list(["転記・コピー"])
-    if not task.actors and state["recipients"]:
-        task.actors = "、".join(state["recipients"])[:300]
+    return _fill_categories(task, state)
 
 
-def _finalize_task(task, state, messages):
+def _fill_categories(task, state):
+    filled = []
+    for key, values in rule_categories(task, state).items():
+        if values and not getattr(task, key):
+            setattr(task, key, C.join_list(values))
+            filled.append(key)
+    return filled
+
+
+def unmark_estimate(task, key):
+    task.ai_fields = C.join_list([k for k in task.ai_fields_list if k != key])
+    extra = task.ai_extra_dict
+    if key in (extra.get("rule_fields") or []):
+        extra["rule_fields"] = [k for k in extra["rule_fields"] if k != key]
+        task.ai_extra = json.dumps(extra, ensure_ascii=False)
+
+
+def _finalize_task(task, state, messages, refresh=False, use_ai=True):
+    task.compute_minutes()
     domains = _domains()
-    cands = related_tasks_for(task, limit=40)
-    data = ai_finalize(state, messages, task.wish, domains, cands, task.shift or "", handlers=finalize_handlers(task)) if ai_enabled() else None
+    extra = task.ai_extra_dict if refresh else {}
+    fields = task.ai_fields_list if refresh else []
+    rules = list(extra.get("rule_fields") or [])
+
+    def may(key):
+        current = task.domain_id if key == "domain" else getattr(task, key)
+        return not refresh or not str(current or "").strip() or (key in fields and not task.verified)
+
+    def mark(key, by_rule):
+        if key not in fields:
+            fields.append(key)
+        if by_rule and key not in rules:
+            rules.append(key)
+        elif not by_rule and key in rules:
+            rules.remove(key)
+
+    def set_domain(d, by_rule):
+        if d is not None and (not task.domain_id or ("domain" in fields and not task.verified)):
+            task.domain = d
+            mark("domain", by_rule)
+
+    _fill_from_state(task, state, only_missing=True)
+    data = None
+    if use_ai and ai_enabled():
+        cands = related_tasks_for(task, limit=40)
+        data = ai_finalize(state, messages, task.wish, domains, cands, task.shift or "", handlers=finalize_handlers(task), current=task_payload(task) if refresh else None)
     if data is None:
-        _fill_from_state(task, state)
-        result = rule_analyze(task, domains, cands)
+        for key in _fill_from_state(task, state):
+            mark(key, True)
+        set_domain(rule_domain(task, domains), True)
+        result = rule_analyze(task, domains, related_tasks_for(task, limit=40))
         result["source"] = "rules"
         task.apply_ai_result(result)
-        task.ai_extra = json.dumps({"first_impression": "受け付けました。改善チームが内容を確認して連絡します", "unknowns": state.get("unknowns") or []}, ensure_ascii=False)
-        return
-    ai_fields = []
-    for key in ("purpose", "output", "output_users_note", "inputs_note", "info_from", "actors", "prev_task", "next_task", "pains_note"):
-        value = mask_person_names(str(data.get(key) or "").strip())[:500]
-        if value:
-            setattr(task, key, value)
-            ai_fields.append(key)
-    for key, allowed in (("output_users", C.OUTPUT_USERS), ("inputs", C.INPUT_SOURCES), ("tools", C.TOOLS), ("nature", C.NATURES), ("pains", C.PAINS)):
-        values = [v for v in (data.get(key) or []) if isinstance(v, str) and v in allowed]
-        if values:
-            setattr(task, key, C.join_list(values))
-            ai_fields.append(key)
-    try:
-        hc = int(data.get("headcount") or 1)
-        if hc > 1 and task.headcount == 1:
-            task.headcount = hc
-            ai_fields.append("headcount")
-    except (TypeError, ValueError):
-        pass
-    if not (task.name or "").strip() and data.get("name"):
-        task.name = str(data["name"]).strip()[:200]
-    by_name = {d.name: d for d in domains}
-    if data.get("domain") in by_name:
-        task.domain = by_name[data["domain"]]
-        ai_fields.append("domain")
-    _fill_from_state(task, state, only_missing=True)
-    task.ai_fields = C.join_list(ai_fields)
-    cand_names = {t.name for t in cands}
-    ecrs = data.get("ecrs") if isinstance(data.get("ecrs"), dict) else {}
-    task.apply_ai_result({
-        "domain": data.get("domain") if data.get("domain") in by_name else None,
-        "related": [x for x in (data.get("related") or []) if isinstance(x, str) and x in cand_names][:5],
-        "summary": str(data.get("summary") or ""),
-        "ecrs": {
-            "eliminate": ecrs.get("eliminate"), "combine": ecrs.get("combine"), "rearrange": ecrs.get("rearrange"), "simplify": ecrs.get("simplify"),
-            "automation": data.get("automation"), "questions": [q for q in (data.get("questions") or []) if isinstance(q, str)][:3],
-        },
-        "flags": [f for f in (data.get("flags") or []) if f in C.AI_FLAGS],
-        "priority": data.get("priority") if data.get("priority") in ("高", "中", "低") else "中",
-        "source": "openai",
-    })
-    saving = data.get("saving_minutes_per_month")
-    task.ai_extra = json.dumps({
-        "tobe_steps": [str(x).strip()[:200] for x in (data.get("tobe_steps") or []) if str(x).strip()][:6],
-        "saving_minutes_per_month": int(saving) if isinstance(saving, (int, float)) and saving > 0 else None,
-        "first_impression": str(data.get("first_impression") or "").strip()[:120],
-        "hearing_questions": [str(q).strip()[:200] for q in (data.get("hearing_questions") or []) if str(q).strip()][:5],
-        "unknowns": state.get("unknowns") or [],
-    }, ensure_ascii=False)
+        extra.update(first_impression=extra.get("first_impression") or "受け付けました。改善チームが内容を確認して連絡します", unknowns=state.get("unknowns") or [])
+    else:
+        for key in ("purpose", "output", "output_users_note", "inputs_note", "info_from", "actors", "prev_task", "next_task", "pains_note"):
+            value = mask_person_names(str(data.get(key) or "").strip())[:500]
+            if value and may(key):
+                setattr(task, key, value)
+                mark(key, False)
+        for key, allowed in (("output_users", C.OUTPUT_USERS), ("inputs", C.INPUT_SOURCES), ("tools", C.TOOLS), ("nature", C.NATURES), ("pains", C.PAINS)):
+            values = [v for v in (data.get(key) or []) if isinstance(v, str) and v in allowed]
+            if values and may(key):
+                setattr(task, key, C.join_list(values))
+                mark(key, False)
+        if not (task.name or "").strip() and data.get("name"):
+            task.name = mask_person_names(str(data["name"]).strip())[:200]
+        _fill_from_state(task, state, only_missing=True)
+        for key in _fill_categories(task, state):
+            mark(key, True)
+        ai_domain = next((d for d in domains if d.name == data.get("domain")), None)
+        est = ai_domain or rule_domain(task, domains)
+        set_domain(est, ai_domain is None)
+        real = {n for (n,) in db.session.query(Task.name).filter(Task.id != task.id).all()}
+        ecrs = data.get("ecrs") if isinstance(data.get("ecrs"), dict) else {}
+        task.apply_ai_result({
+            "domain": est.name if est else None,
+            "related": list(dict.fromkeys(x for x in (data.get("related") or []) if isinstance(x, str) and x in real))[:5],
+            "summary": str(data.get("summary") or ""),
+            "ecrs": {
+                "eliminate": ecrs.get("eliminate"), "combine": ecrs.get("combine"), "rearrange": ecrs.get("rearrange"), "simplify": ecrs.get("simplify"),
+                "automation": data.get("automation"), "questions": [q for q in (data.get("questions") or []) if isinstance(q, str)][:3],
+            },
+            "flags": [f for f in (data.get("flags") or []) if f in C.AI_FLAGS],
+            "priority": data.get("priority") if data.get("priority") in ("高", "中", "低") else "中",
+            "source": "openai",
+        })
+        saving = data.get("saving_minutes_per_month")
+        clean = lambda v, n: mask_person_names(str(v).strip())[:n]
+        extra.update(
+            tobe_steps=[clean(x, 200) for x in (data.get("tobe_steps") or []) if str(x).strip()][:6],
+            saving_minutes_per_month=int(saving) if isinstance(saving, (int, float)) and saving > 0 else None,
+            first_impression=clean(data.get("first_impression") or "", 120) or extra.get("first_impression") or "",
+            hearing_questions=[clean(q, 200) for q in (data.get("hearing_questions") or []) if str(q).strip()][:5],
+            unknowns=state.get("unknowns") or [],
+        )
+        try:
+            guess = int(data.get("headcount") or 1)
+        except (TypeError, ValueError):
+            guess = 1
+        if guess > 1:
+            extra["headcount_guess"] = guess
+        else:
+            extra.pop("headcount_guess", None)
+    task.ai_fields = C.join_list(fields)
+    extra["rule_fields"] = [k for k in rules if k in fields]
+    task.ai_extra = json.dumps(extra, ensure_ascii=False)
 
 
 @bp_survey.post("/api/tasks")
@@ -5143,9 +5380,9 @@ def api_task_create():
     if err:
         return err
     state = _clean_state(data.get("state") or {})
-    messages = _clean_messages(data.get("messages"))
+    messages = [dict(m, text=mask_person_names(m["text"])) for m in _clean_messages(data.get("messages"))]
     errors = {}
-    name = (str(data.get("name") or "").strip() or state["title"])[:200]
+    name = mask_person_names(str(data.get("name") or "").strip() or state["title"])[:200]
     if not name:
         errors["name"] = "業務名を入力してください"
     if not state["steps"]:
@@ -5193,8 +5430,8 @@ def api_task_create():
         task.assignment = "自主改善"
     db.session.add(task)
     db.session.flush()
-    _finalize_task(task, state, messages)
     task.compute_minutes()
+    _finalize_task(task, state, messages)
     if find_employee(r.emp_id) is None:
         register_member(r.emp_id, r.name, r.workplace_id, r.work_pattern)
     db.session.commit()
@@ -5290,13 +5527,36 @@ def detail(task_id):
         task=task,
         related=related,
         related_by_ai=related_by_ai,
+        domains=_domains(),
         **dict(zip(("task_flow", "task_legend"), flow_view(build_task_flow(task)))),
     )
+
+def _update_task_info(task, f):
+    if "domain_id" in f:
+        d = db.session.get(Domain, f.get("domain_id", type=int) or 0)
+        if (d.id if d else None) != task.domain_id:
+            task.domain = d
+            unmark_estimate(task, "domain")
+    if "headcount" in f:
+        try:
+            head = max(1, int(f.get("headcount") or 1))
+        except ValueError:
+            head = task.headcount or 1
+        if head != (task.headcount or 1):
+            task.headcount = head
+            task.compute_minutes()
+    for key in ("prev_task", "next_task", "actors"):
+        if key in f:
+            value = mask_person_names((f.get(key) or "").strip())[:500]
+            if value != (getattr(task, key) or ""):
+                setattr(task, key, value)
+                unmark_estimate(task, key)
 
 @bp_cases.post("/<int:task_id>/update")
 def update(task_id):
     task = _get_or_404(Task, task_id)
     f = request.form
+    _update_task_info(task, f)
     task.progress_note = (f.get("progress_note") or "").strip()
     decision = f.get("decision")
     if decision in C.DECISIONS:
@@ -5364,7 +5624,7 @@ def verify(task_id):
     task = _get_or_404(Task, task_id)
     task.verified = not task.verified
     task.verified_by = (request.form.get("verified_by") or "推進メンバー").strip() if task.verified else ""
-    if task.verified and task.ai_domain and task.domain and task.ai_domain != task.domain.name and request.form.get("adopt_ai_domain"):
+    if task.verified and task.ai_domain and (not task.domain or task.ai_domain != task.domain.name) and request.form.get("adopt_ai_domain"):
         d = Domain.query.filter_by(name=task.ai_domain).first()
         if d:
             task.domain = d
@@ -5375,12 +5635,9 @@ def verify(task_id):
 @bp_cases.post("/<int:task_id>/reanalyze")
 def reanalyze(task_id):
     task = _get_or_404(Task, task_id)
-    domains = Domain.query.filter_by(parent_id=None).order_by(Domain.sort).all()
-    cands = related_tasks_for(task, limit=40)
-    result = analyze_task(task, domains, cands)
-    task.apply_ai_result(result)
+    _finalize_task(task, task_state(task), task.intake, refresh=True)
     db.session.commit()
-    flash("AI分析を更新しました（" + ("ChatGPT API" if result.get("source") == "openai" else "ルールベース") + "）。", "success")
+    flash("AI分析を更新しました（" + ("ChatGPT API" if task.ai_source == "openai" else "ルールベース") + "）。", "success")
     return redirect(url_for("cases.detail", task_id=task.id))
 
 def _csv_response(buf, filename):
@@ -5397,9 +5654,11 @@ def export_csv():
             "頻度", "1回あたり時間", "担当人数", "月間時間(分)", "使用ツール", "作業の性質", "困りごと", "困りごと補足",
             "改善の希望", "自分で改善", "補足", "ステータス", "進捗段階", "段階更新日", "活動状況のひとこと", "改善方針", "担当区分", "担当者", "手順完了", "改善後月間時間(分)", "削減(分/月)",
             "担当者確認", "AI領域", "AI優先度", "AIフラグ", "AI要約", "登録日", "勤務", "手順（聞き取り）", "AI推定の項目",
+            "分からなかったこと", "改善後の流れ（AI案）", *[f"ECRSメモ {label}" for _key, label, _q in C.ECRS], "改善内容・結果", "確認者",
         ]
     )
     for t in Task.query.order_by(Task.id).all():
+        extra = t.ai_extra_dict
         w.writerow(
             [
                 t.id, t.name, t.respondent.name if t.respondent else "", t.workplace.name if t.workplace else "",
@@ -5413,10 +5672,18 @@ def export_csv():
                 "" if t.after_minutes is None else t.after_minutes, t.saved_minutes, "済" if t.verified else "",
                 t.ai_domain or "", t.ai_priority or "", "・".join(t.ai_flags_list), t.ai_summary or "",
                 t.created_at.strftime("%Y-%m-%d %H:%M") if t.created_at else "",
-                t.shift or "", " → ".join(x.get("action", "") for x in t.steps), "・".join(t.ai_fields_list),
+                t.shift or "", "\n".join(_step_line(x) for x in t.steps), "・".join(t.ai_fields_list),
+                "・".join(extra.get("unknowns") or []), " → ".join(extra.get("tobe_steps") or []), *[getattr(t, "ecrs_" + key) or "" for key, _label, _q in C.ECRS],
+                t.result_note or "", t.verified_by or "",
             ]
         )
     return _csv_response(buf, "tasks_{}.csv".format(datetime.now().strftime("%Y%m%d")))
+
+def _step_line(x):
+    line = f"{x.get('no')}. {x.get('action') or ''}" + (f"［{x['system']}］" if x.get("system") else "") + (f" → {x['output']}" if x.get("output") else "")
+    if x.get("to"):
+        line += f"（{x['to']}へ" + (f"・{x['how']}" if x.get("how") else "") + "）"
+    return line
 
 # ===== 画面: 業務マップ =====
 bp_bizmap = Blueprint("bizmap", __name__, url_prefix="/bizmap")
@@ -5817,7 +6084,8 @@ def add_domain():
 def update_domain(domain_id):
     d = _get_or_404(Domain, domain_id)
     name = (request.form.get("name") or "").strip()
-    if name:
+    if name and name != d.name:
+        Task.query.filter_by(ai_domain=d.name).update({"ai_domain": name}, synchronize_session=False)
         d.name = name
     d.description = (request.form.get("description") or "").strip()
     d.sort = request.form.get("sort", type=int) or d.sort
@@ -6812,7 +7080,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
           <button class="btn btn-sm btn-outline-primary">デモデータを投入</button>
         </form>
         <form method="post" action="{{ url_for('admin.remove_demo') }}" data-confirm="デモデータを削除します。よろしいですか？">
-          <button class="btn btn-sm btn-outline-danger" {% if demo_count == 0 %}disabled{% endif %}>デモデータを削除</button>
+          <button class="btn btn-sm btn-outline-danger" {% if not demo_active %}disabled{% endif %}>デモデータを削除</button>
         </form>
         <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('cases.export_csv') }}">業務一覧CSV</a>
         <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('admin.export_respondents') }}">回答者CSV</a>
@@ -6942,6 +7210,9 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
 </header>
 
 <main class="container py-4">
+  {% if demo_active %}
+  <div class="alert alert-warning demo-banner py-2 small" role="status"><i class="bi bi-cone-striped"></i> <strong>デモデータを表示中</strong>：架空の人・業務・回答が入っています。数字や一覧は実際の活動ではありません。{% if current_user %}<a href="{{ url_for('admin.index') }}" class="alert-link">管理</a>の「デモデータを削除」で消せます。{% endif %}</div>
+  {% endif %}
   {% with messages = get_flashed_messages(with_categories=true) %}
     {% set toasts = [] %}
     {% for category, message in messages %}
@@ -7559,7 +7830,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
     <div class="text-muted">
       {{ task.workplace.name if task.workplace else '' }}／{{ task.respondent.name if task.respondent else '' }}
       ・ 登録 {{ task.created_at|jpdate }}
-      ・ 月間 <strong>{{ task.monthly_minutes|hours }} 時間</strong>（{{ task.frequency }}／{{ task.duration }}／{{ task.headcount }}人{% if task.shift %}／{{ task.shift }}{% endif %}）
+      ・ 月間 <strong>{{ task.monthly_minutes|hours }} 時間</strong>（{{ C.FREQUENCY_HINTS.get(task.frequency, task.frequency) if task.frequency == '不定期' else task.frequency }}／{{ task.duration }}／{{ task.headcount }}人{% if task.shift %}／{{ task.shift }}{% endif %}）
     </div>
   </div>
   <div>
@@ -7575,18 +7846,21 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
       <h5 class="card-title">検討内容（登録された業務情報）</h5>
       <table class="table table-sm mb-0">
         {% set aif = [] if task.verified else task.ai_fields_list %}
-        {% if task.steps %}<tr><th class="w-25">手順（聞き取り）</th><td><ol class="mb-0 ps-3 rq-steps-table">{% for x in task.steps %}<li>{{ x.action }}{% if x.system %} <span class="text-muted small">［{{ x.system }}］</span>{% endif %}{% if x.output %} <span class="small">→ {{ x.output }}</span>{% endif %}{% if x.to %} <span class="small text-muted">（{{ x.to }} へ）</span>{% endif %}</li>{% endfor %}</ol></td></tr>{% endif %}
-        <tr><th class="w-25">業務領域</th><td>{% if 'domain' in aif %}<span class="badge badge-flag me-1">AI推定</span>{% endif %}{{ task.domain.name if task.domain else '未選択' }}{% if task.ai_domain and (not task.domain or task.ai_domain != task.domain.name) %} <span class="badge badge-flag">AI推定: {{ task.ai_domain }}</span>{% endif %}</td></tr>
-        <tr><th>目的</th><td>{% if 'purpose' in aif %}<span class="badge badge-flag me-1">AI推定</span>{% endif %}{{ task.purpose }}{% if task.purpose_unknown %} <span class="badge text-bg-danger">目的不明</span>{% endif %}</td></tr>
-        <tr><th>アウトプット</th><td>{% if 'output' in aif %}<span class="badge badge-flag me-1">AI推定</span>{% endif %}{{ task.output }}</td></tr>
-        <tr><th>利用者</th><td>{% if 'output_users' in aif %}<span class="badge badge-flag me-1">AI推定</span>{% endif %}{{ task.output_users_list|join('・') }}{% if task.output_users_note %}<div class="small text-muted">{{ task.output_users_note }}</div>{% endif %}</td></tr>
-        <tr><th>入力情報</th><td>{% if 'inputs' in aif %}<span class="badge badge-flag me-1">AI推定</span>{% endif %}{{ task.inputs_list|join('・') }}{% if task.inputs_note %}<div class="small text-muted">{{ task.inputs_note }}</div>{% endif %}</td></tr>
-        <tr><th>前後の業務</th><td>{% if 'prev_task' in aif or 'next_task' in aif %}<span class="badge badge-flag me-1">AI推定</span>{% endif %}{{ task.prev_task or '－' }} → <strong>{{ task.name }}</strong> → {{ task.next_task or '－' }}</td></tr>
-        <tr><th>関わる人・部署</th><td>{% if 'actors' in aif %}<span class="badge badge-flag me-1">AI推定</span>{% endif %}{{ task.actors_list|join('・') or '－' }}</td></tr>
-        <tr><th>情報の受け取り元</th><td>{% if 'info_from' in aif %}<span class="badge badge-flag me-1">AI推定</span>{% endif %}{{ task.info_from or '－' }}</td></tr>
-        <tr><th>使用ツール</th><td>{% if 'tools' in aif %}<span class="badge badge-flag me-1">AI推定</span>{% endif %}{{ task.tools_list|join('・') }}</td></tr>
-        <tr><th>作業の性質</th><td>{% if 'nature' in aif %}<span class="badge badge-flag me-1">AI推定</span>{% endif %}{{ task.nature_list|join('・') }}</td></tr>
-        <tr><th>困りごと</th><td>{% if 'pains' in aif %}<span class="badge badge-flag me-1">AI推定</span>{% endif %}{{ task.pains_list|join('・') }}{% if task.pains_note %}<div class="small text-muted">{{ task.pains_note }}</div>{% endif %}</td></tr>
+        {% set rulef = task.ai_extra_dict.get('rule_fields') or [] %}
+        {% macro mark(key) %}{% if key in aif %}<span class="badge badge-flag me-1">{{ '推定' if key in rulef else 'AI推定' }}</span>{% endif %}{% endmacro %}
+        {% if task.steps %}<tr><th class="w-25">手順（聞き取り）</th><td><ol class="mb-0 ps-3 rq-steps-table">{% for x in task.steps %}<li>{{ x.action }}{% if x.system %} <span class="text-muted small">［{{ x.system }}］</span>{% endif %}{% if x.output %} <span class="small">→ {{ x.output }}</span>{% endif %}{% if x.to %} <span class="small text-muted">（{{ x.to }} へ{% if x.how %}・{{ x.how }}{% endif %}）</span>{% endif %}</li>{% endfor %}</ol></td></tr>{% endif %}
+        <tr><th class="w-25">業務領域</th><td>{{ mark('domain') }}{{ task.domain.name if task.domain else '未選択' }}{% if task.ai_domain and (not task.domain or task.ai_domain != task.domain.name) %} <span class="badge badge-flag">AI推定: {{ task.ai_domain }}</span>{% endif %}</td></tr>
+        <tr><th>目的</th><td>{{ mark('purpose') }}{{ task.purpose }}{% if task.purpose_unknown %} <span class="badge text-bg-danger">目的不明</span>{% endif %}</td></tr>
+        <tr><th>アウトプット</th><td>{{ mark('output') }}{{ task.output }}</td></tr>
+        <tr><th>利用者</th><td>{{ mark('output_users') }}{{ task.output_users_list|join('・') }}{% if task.output_users_note %}<div class="small text-muted">{{ task.output_users_note }}</div>{% endif %}</td></tr>
+        <tr><th>入力情報</th><td>{{ mark('inputs') }}{{ task.inputs_list|join('・') }}{% if task.inputs_note %}<div class="small text-muted">{{ task.inputs_note }}</div>{% endif %}</td></tr>
+        <tr><th>前後の業務</th><td>{{ mark('prev_task') or mark('next_task') }}{{ task.prev_task or '－' }} → <strong>{{ task.name }}</strong> → {{ task.next_task or '－' }}</td></tr>
+        <tr><th>関わる人・部署</th><td>{{ mark('actors') }}{{ task.actors_list|join('・') or '－' }}</td></tr>
+        <tr><th>情報の受け取り元</th><td>{{ mark('info_from') }}{{ task.info_from or '－' }}</td></tr>
+        <tr><th>担当人数</th><td>{{ task.headcount or 1 }}人{% if task.ai_extra_dict.get('headcount_guess') %} <span class="small text-muted">（参考: AI の推定では {{ task.ai_extra_dict.headcount_guess }}人。月間時間には入れていません）</span>{% endif %}</td></tr>
+        <tr><th>使用ツール</th><td>{{ mark('tools') }}{{ task.tools_list|join('・') }}</td></tr>
+        <tr><th>作業の性質</th><td>{{ mark('nature') }}{{ task.nature_list|join('・') }}</td></tr>
+        <tr><th>困りごと</th><td>{{ mark('pains') }}{{ task.pains_list|join('・') }}{% if task.pains_note %}<div class="small text-muted">{{ task.pains_note }}</div>{% endif %}</td></tr>
         <tr><th>改善の希望</th><td>{{ task.wish or '' }}</td></tr>
         <tr><th>自分で改善</th><td>{{ task.self_improve or '' }}</td></tr>
         {% if task.note %}<tr><th>補足</th><td>{{ task.note }}</td></tr>{% endif %}
@@ -7732,7 +8006,38 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
         </div>
       </div>
 
+      <label class="form-label small mb-1 mt-2"><strong>業務情報</strong>（直すと推定の印が外れます）</label>
+      <div class="row g-2 mb-2">
+        <div class="col-8">
+          <label class="form-label small mb-0">業務領域</label>
+          <select name="domain_id" class="form-select form-select-sm">
+            <option value="">未選択</option>
+            {% for d in domains %}<option value="{{ d.id }}" {% if task.domain_id == d.id %}selected{% endif %}>{{ d.name }}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="col-4">
+          <label class="form-label small mb-0">担当人数</label>
+          <input type="number" name="headcount" class="form-control form-control-sm" min="1" step="1" value="{{ task.headcount or 1 }}">
+        </div>
+        {% if task.ai_extra_dict.get('headcount_guess') %}<div class="col-12 small text-muted mt-0">AI の推定は {{ task.ai_extra_dict.headcount_guess }}人（参考）。同じ作業をしている人数が分かったら担当人数に入れてください（月間時間に掛けます）。</div>{% endif %}
+        <div class="col-6">
+          <label class="form-label small mb-0">前の業務</label>
+          <input type="text" name="prev_task" class="form-control form-control-sm" value="{{ task.prev_task or '' }}" maxlength="500">
+        </div>
+        <div class="col-6">
+          <label class="form-label small mb-0">後の業務</label>
+          <input type="text" name="next_task" class="form-control form-control-sm" value="{{ task.next_task or '' }}" maxlength="500">
+        </div>
+        <div class="col-12">
+          <label class="form-label small mb-0">関わる人・部署（「、」区切り。氏名は書かない）</label>
+          <input type="text" name="actors" class="form-control form-control-sm" value="{{ task.actors or '' }}" maxlength="500" placeholder="例：課長、生産管理課">
+        </div>
+      </div>
+
       <label class="form-label small mb-1 mt-2"><strong>標準手順</strong>（自動化は最後）</label>
+      {% if task.steps_lagging %}
+      <div class="alert alert-info py-1 small mb-2">段階は「{{ task.stage_name }}」まで進んでいます。標準手順の {% for no, name, desc in C.STEPS if no in task.steps_lagging %}{{ no }}. {{ name }}{% if not loop.last %}・{% endif %}{% endfor %} にまだチェックがありません。済んでいればチェックして保存してください。</div>
+      {% endif %}
       <div class="step-list mb-2">
         {% for no, name, desc in C.STEPS %}
         <div class="form-check">
@@ -7775,7 +8080,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
       <h5 class="card-title">担当者確認（推進メンバー）</h5>
       <p class="small text-muted">必須項目の内容とAIの推定を本人・推進メンバーが確認すると、業務情報の充足率に算入されます。</p>
       {% if not task.required_filled %}
-      <div class="alert alert-warning py-1 small">必須項目に未入力があります。ヒアリングで補完してください。</div>
+      <div class="alert alert-warning py-1 small">必須項目（{{ task.missing_required|join('・') }}）が未入力です。ヒアリングで補完してください。</div>
       {% endif %}
       {% if task.verified %}
         <div class="small mb-2">確認者: {{ task.verified_by or '－' }}</div>
@@ -7784,10 +8089,10 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
         <div class="mb-2">
           <input type="text" name="verified_by" class="form-control form-control-sm" placeholder="確認者名（推進メンバー）">
         </div>
-        {% if task.ai_domain and task.domain and task.ai_domain != task.domain.name %}
+        {% if task.ai_domain and (not task.domain or task.ai_domain != task.domain.name) %}
         <div class="form-check mb-2">
           <input class="form-check-input" type="checkbox" name="adopt_ai_domain" id="adopt" value="1">
-          <label class="form-check-label small" for="adopt">業務領域をAI推定（{{ task.ai_domain }}）に変更する</label>
+          <label class="form-check-label small" for="adopt">業務領域をAI推定（{{ task.ai_domain }}）に{{ '変更する' if task.domain else 'する' }}</label>
         </div>
         {% endif %}
         <button class="btn btn-success btn-sm w-100">内容を確認した</button>
@@ -7812,7 +8117,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
     <a class="btn btn-primary btn-sm" href="{{ url_for('survey.index') }}">自動化を検討する</a>
   </div>
 </div>
-<p class="text-muted small">登録された業務はすべて改善案件の候補です。</p>
+<p class="text-muted small">登録された業務はすべて改善案件です。希望が「なくしたい・減らしたい」か、困りごとのある業務を「案件候補」として数えます。</p>
 
 <form method="get" class="card mb-3"><div class="card-body py-2">
   <div class="row g-2 align-items-end">
@@ -7845,10 +8150,17 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
       </select>
     </div>
     <div class="col-6 col-md-4 col-xl">
+      <label class="form-label small mb-0">改善の希望</label>
+      <select name="wish" class="form-select form-select-sm">
+        <option value="">すべて</option>
+        {% for w in C.WISHES %}<option value="{{ w }}" {% if args.get('wish') == w %}selected{% endif %}>{{ w }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="col-6 col-md-4 col-xl">
       <label class="form-label small mb-0">絞り込み</label>
       <select name="filter" class="form-select form-select-sm">
         <option value="">すべて</option>
-        <option value="candidates" {% if args.get('filter') == 'candidates' %}selected{% endif %}>改善希望・困りごとあり</option>
+        <option value="candidates" {% if args.get('filter') == 'candidates' %}selected{% endif %}>案件候補（なくしたい・減らしたい・困りごとあり）</option>
         <option value="elimination" {% if args.get('filter') == 'elimination' %}selected{% endif %}>廃止・統合候補</option>
         <option value="self" {% if args.get('filter') == 'self' %}selected{% endif %}>自主改善希望</option>
         <option value="unverified" {% if args.get('filter') == 'unverified' %}selected{% endif %}>担当者未確認</option>
@@ -7878,7 +8190,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
   <tbody>
   {% for t in tasks %}
   <tr>
-    <td><a href="{{ url_for('cases.detail', task_id=t.id) }}">{{ t.name }}</a>{% if t.shift and t.shift != '普通勤務' %} <span class="badge text-bg-dark">{{ t.shift }}</span>{% endif %}<div class="small text-muted">{{ t.output }}</div></td>
+    <td><a href="{{ url_for('cases.detail', task_id=t.id) }}">{{ t.name }}</a>{% if t.shift and t.shift != '普通勤務' %} <span class="badge text-bg-dark">{{ t.shift }}</span>{% endif %}{% if t.is_demo %} <span class="badge bg-warning-subtle text-warning-emphasis">デモ</span>{% endif %}<div class="small text-muted">{{ t.output }}</div></td>
     <td class="small">{{ t.workplace.name if t.workplace else '' }}<br>{{ t.respondent.name if t.respondent else '' }}</td>
     <td class="small">{{ t.domain.name if t.domain else '' }}</td>
     <td class="text-end">{{ t.monthly_minutes|hours }} h</td>
@@ -7930,7 +8242,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
 {% block content %}
 {% if k.task_count == 0 %}
 <div class="alert alert-info">
-  まだ業務が登録されていません。<a href="{{ url_for('survey.index') }}">アンケート・業務登録</a>から登録するか、
+  まだ業務が登録されていません。<a href="{{ url_for('monthly.form') }}">月次アンケート</a>・<a href="{{ url_for('survey.index') }}">自動化を検討</a>から始めるか、
   <a href="{{ url_for('admin.index') }}">管理</a>画面からデモデータを投入すると画面の動きを確認できます。
 </div>
 {% endif %}
@@ -7973,7 +8285,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
     <div class="card stat h-100"><div class="card-body">
       <div class="stat-head"><span class="stat-tile tile-teal"><i class="bi bi-list-check"></i></span><span class="stat-label">PCの定型・定期業務の月間時間</span></div>
       <div class="stat-value">{{ '%.1f'|format(k.total_hours) }}<span class="stat-unit">時間/月</span></div>
-      <div class="stat-sub">年間換算 {{ '%.0f'|format(k.annual_hours) }} 時間 ・ 案件候補 {{ k.candidate_count }} 件</div>
+      <div class="stat-sub">年間換算 {{ '%.0f'|format(k.annual_hours) }} 時間 ・ <a href="{{ url_for('cases.index', filter='candidates') }}">案件候補 {{ k.candidate_count }} 件</a>（なくしたい・減らしたい・困りごとあり）</div>
     </div></div>
   </div>
   <div class="col-6 col-lg-3">
@@ -8028,7 +8340,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
       <h5 class="card-title">職場別の回答状況</h5>
       <div class="table-responsive">
       <table class="table table-sm mb-0">
-        <thead><tr><th>職場</th><th class="text-end">回答した人</th><th class="text-end">業務</th><th class="text-end">月間時間</th><th class="text-end">案件候補</th><th class="text-end">自主改善</th></tr></thead>
+        <thead><tr><th>職場</th><th class="text-end">回答した人</th><th class="text-end">業務</th><th class="text-end">月間時間</th><th class="text-end" title="希望が「なくしたい・減らしたい」か、困りごとのある業務">案件候補</th><th class="text-end">自主改善</th></tr></thead>
         <tbody>
         {% for w in workplaces %}
         <tr class="{% if w.respondents == 0 %}text-muted{% endif %}">
@@ -8116,7 +8428,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
         <tbody>
         {% for t in recent %}
         <tr>
-          <td><a href="{{ url_for('cases.detail', task_id=t.id) }}">{{ t.name }}</a></td>
+          <td><a href="{{ url_for('cases.detail', task_id=t.id) }}">{{ t.name }}</a>{% if t.is_demo %} <span class="badge bg-warning-subtle text-warning-emphasis">デモ</span>{% endif %}</td>
           <td>{{ t.workplace.name if t.workplace else '' }}</td>
           <td>{{ t.domain.name if t.domain else '' }}</td>
           <td class="text-end">{{ t.monthly_minutes|hours }} h</td>
@@ -12282,6 +12594,7 @@ def create_app(test_config=None):
             "kind_icon": kind_icon_html,
             "current_user": session.get("user"),
             "ai_enabled": ai_enabled(),
+            "demo_active": demo_loaded(),
         }
 
     @app.template_filter("jpdate")
