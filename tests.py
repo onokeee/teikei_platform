@@ -491,6 +491,74 @@ def smoke_bizmap_edit():
     check('"status_marks"' in html and "fe-state" in fe and "else if (it.who && it.who !== n.who)" in fe and 'if (n.actor_locked) renderAll();\n    classify([n]);' in fe,
           "編集: 保留・廃止済みの印を出し、だれの区分を手で選んでいても名前はサーバーで氏名を置き換える")
 
+    # ---- 案件の流れ図を業務マップにそろえる（ほかの業務が書いた前後の業務・同じファイル・完了の色・名前のない取り出し元） ----
+    with app.test_request_context():
+        by_name = {t.name: t for t in Task.query.all()}
+        t_day, t_week, t_cnt, t_month = by_name["日報の実績をExcelの集計表に転記する"], by_name["週報の作成"], by_name["出勤簿の集計"], by_name["生産実績の月報作成"]
+        full = app_module.build_info_flow(list(by_name.values()))
+        f_week = app_module.build_task_flow(t_week)
+        last = f"st{t_week.steps[-1]['no']}"
+        after = {f_week.nodes[b]["text"]: e["inferred"] for (a, b), e in f_week.edges.items() if a == last and e["type"] == "work"}
+        before = {f_week.nodes[a]["text"]: e["inferred"] for (a, b), e in f_week.edges.items() if b == "st1" and e["type"] == "work"}
+        in_full = {full.nodes[b]["text"] for (a, b), e in full.edges.items() if a == f"t{t_week.id}" and e["type"] == "work"}
+        check({t_month.name, "課内会議資料の作成"} <= in_full <= set(after) and after[t_month.name] is True and after["課内会議資料の作成"] is True
+              and before.get(t_day.name) is True and after.get("月報の作成") is False,
+              f"案件の流れ図: ほかの業務が前後の業務にこの業務を書いていれば、業務マップと同じくその業務の箱と点線でつなぐ（自分の前後の業務は実線のまま）: {after} / {before}")
+        f_day, f_mon = app_module.build_task_flow(t_day), app_module.build_task_flow(t_month)
+        day_files = [i for i, n in f_day.nodes.items() if n["type"] == "info" and "日次実績集計表" in n["text"]]
+        writers = sorted(a for (a, b) in f_day.edges if day_files and b == day_files[0])
+        mon_files = sorted(n["text"] for n in f_mon.nodes.values() if n["type"] == "info" and "月報" in n["text"])
+        bare = app_module.build_steps_flow([{"no": 1, "action": "受注一覧から数字を拾う", "system": "Excel（受注一覧）"}, {"no": 2, "action": "数字をExcelに入力する", "system": "Excel", "output": "集計表"}])
+        bare_writes = sorted(bare.nodes[b]["text"] for (a, b) in bare.edges if a == "st2" and bare.nodes[b]["type"] == "info")
+        check(len(day_files) == 1 and f_day.nodes[day_files[0]]["text"] == "Excel（日次実績集計表）" and f_day.nodes[day_files[0]]["cls"] == "output" and writers == ["st2", "st3"]
+              and mon_files == sorted(["Excel（月報）", "Excel（月報集計表）"]) and bare_writes == sorted(["Excel", "集計表"]),
+              f"案件の流れ図: 手順が書き込むファイルと同じできるもの（「Excel（日次実績集計表）」と「日次実績集計表」）は1つの箱、「Excel（月報）」と「Excel（月報集計表）」・媒体名だけの「Excel」は別: {[f_day.nodes[i]['text'] for i in day_files]} {writers} {mon_files} {bare_writes}")
+        f_cnt = app_module.build_task_flow(t_cnt)
+        check(t_cnt.status == "完了" and full.nodes[f"t{t_cnt.id}"]["cls"] == "done" and {n["cls"] for i, n in f_cnt.nodes.items() if i.startswith("st")} == {"done"}
+              and ":::done" in f_cnt.render() and "完了した業務" in app_module.map_legend_html(f_cnt),
+              "案件の流れ図: 完了した業務の手順は業務マップと同じ緑（完了した業務）で描く")
+        r_ = Respondent.query.filter_by(emp_id="DEMO-007").first()
+        mk = lambda name, *steps: Task(name=name, respondent_id=r_.id, workplace_id=r_.workplace_id, inputs="人から聞く", steps_json=json.dumps(list(steps), ensure_ascii=False))
+        ledger = {"no": 2, "action": "不具合台帳に入力する", "system": "Excel（不具合台帳）", "output": "不具合台帳"}
+        k_tie = mk("PHSの連絡を台帳に残す", {"no": 1, "action": "オペレーターから不具合の連絡を受ける", "how_from": "PHSで聞く"}, ledger)
+        k_none = mk("台帳に入力するだけの業務", dict(ledger, no=1))
+        k_has = mk("PHSで内容を聞いて台帳に残す", {"no": 1, "action": "オペレーターから不具合の内容を聞く", "input": "不具合の内容", "how_from": "PHSで聞く"}, ledger)
+        db.session.add_all([k_tie, k_none, k_has])
+        db.session.flush()
+
+        def unnamed(t):
+            f = app_module.build_task_flow(t)
+            return [(b, e["method"]) for (a, b), e in f.edges.items() if f.nodes[a]["text"].endswith("（名前未確認）")]
+        check(unnamed(k_tie) == [("st1", "phs")] and unnamed(k_none) == [] and unnamed(k_has) == [] and any(s_["name"] == "人から聞く内容（名前未確認）" for s_ in app_module.task_sources(k_none)),
+              f"案件の流れ図: 区分しか分からない取り出し元は、受け取り方が合う手順（PHSで聞く）につなぎ、合う手順がない・その手順に取り出し元があるときは描かない: {unnamed(k_tie)} {unnamed(k_none)} {unnamed(k_has)}")
+        db.session.rollback()
+
+    # ---- 職場名を変えても、前の名前で書いた相手・前後の業務はその職場の枠とだれになる ----
+    with app.app_context():
+        wp_pm = app_module.Workplace.query.filter_by(name="生産管理課").first().id
+    html_wp = client.post(f"/admin/workplace/{wp_pm}/update", data={"name": "生産計画課"}, follow_redirects=True).data.decode("utf-8")
+    with app.test_request_context():
+        t_asm = Task.query.filter_by(name="組立実績の日次入力（生産管理システム）").first()
+        old_who = app_module.who_of("生産管理課 課長", "製造1課")
+        rec = app_module.build_info_flow([t_asm]).nodes.get(app_module.nid("p", f"{t_asm.id}:生産管理課"), {})
+        case = app_module.build_task_flow(t_asm)
+        merged = [n["text"] for n in case.nodes.values() if n["cls"] == "work" and n["who"] == "生産計画課"]
+        rows = {(r_["src"], r_["dst"]) for r_ in app_module.handoff_rows([t_asm])}
+        check("前の名前で書かれた" in html_wp and (old_who["actor"], old_who["label"]) == ("dept", "生産計画課 課長") and rec.get("who") == "生産計画課" and rec.get("actor") == "dept"
+              and rec.get("group") == f"wp{wp_pm}" and merged == ["進捗確認"] and ("組立課", "生産計画課") in rows,
+              f"職場名の変更: 前の名前（生産管理課）で書いた相手はいまの職場の枠とだれ、後の業務「生産管理課の進捗確認」も相手の箱にまとまる: {old_who} / {rec.get('who')} {rec.get('group')} / {merged}")
+    client.post(f"/admin/workplace/{wp_pm}/update", data={"name": "生産管理課"})
+    client.post("/admin/workplace/add", data={"name": "生産計画課"})
+    with app.test_request_context():
+        new_wp = app_module.Workplace.query.filter_by(name="生産計画課").first().id
+        names_now = dict(app_module._workplace_names())
+        stored = app_module.workplace_aliases().get(str(wp_pm))
+    client.post(f"/admin/workplace/{new_wp}/delete")
+    with app.test_request_context():
+        names_after = dict(app_module._workplace_names())
+    check(stored == ["生産計画課"] and names_now.get("生産計画課") == "生産計画課" and names_now.get("生産管理課") == "生産管理課" and names_after.get("生産計画課") == "生産管理課",
+          f"職場名の変更: 名前を戻すと戻した名前は前の名前から外れ、前の名前と同じ職場がほかにあればいまの職場名を優先する: {stored} {names_now.get('生産計画課')} {names_after.get('生産計画課')}")
+
     return fails
 
 def smoke_board():
@@ -2015,6 +2083,8 @@ def smoke_writeback():
     check(any("アウトプットの利用者に「" in t for t in texts), "候補: 業務→他部署")
     check(any("後の業務に「翌日の計画確認」" in t for t in texts), "候補: 業務→メモ")
     check(any("後の業務から「週報の作成」" in t for t in texts), "候補: 消した前後の矢印")
+    fe = client.get("/static/flowedit.js").data.decode("utf-8")
+    check(all(c.get("checked") is True for c in cands) and "cb.checked = c.checked !== false" in fe, "候補はふつう初めから選ばれている（選ばない候補だけ checked: false）")
 
     ids = [c["id"] for c in cands]
     r = client.post("/bizmap/api/writeback", json={"kind": "info", "ids": ids})
@@ -2040,6 +2110,11 @@ def smoke_writeback():
     check(f"t{t1_id}->t{t3_id}" in eids, "反映後: 業務→業務が自動生成される")
     auto_seq = next(e for e in g2["edges"] if e["id"] == f"t{t1_id}->t{t3_id}")
     check(auto_seq["source"] == "auto", "反映後: 自動エッジとして扱われる")
+    with app.app_context():
+        t4_id = Task.query.filter_by(name="生産実績の月報作成").first().id
+    by_id2 = {e["id"]: e for e in g2["edges"]}
+    check(auto_seq["inferred"] is False and by_id2[f"t{t2_id}->t{t4_id}"]["inferred"] is True,
+          "反映後: 書き戻した業務どうしの線は実線（名前から推定した点線にしない）。書き戻していない名前の一致は点線のまま")
     check(f"t{t1_id}->t{t2_id}" not in eids, "反映後: 外した前後の矢印は再生成されない")
     r = client.get("/bizmap/api/writeback?kind=info")
     check(len(r.get_json()["candidates"]) <= 2, f"再反映の候補は残らない（{len(r.get_json()['candidates'])}件）")
@@ -2066,7 +2141,9 @@ def smoke_writeback():
     g3 = client.get("/bizmap/api/graph?kind=info").get_json()
     u_check = next(n["id"] for n in g3["nodes"] if n["cls"] == "pending" and n["text"].startswith("点検結果のまとめ"))
     eids3 = {e["id"] for e in g3["edges"]}
-    check(f"t{t2_id}->t{monthly_id}" in eids3 and f"t{t1_id}->{u_check}" in eids3, "点線: 「クレーム対応の進捗」（業務名の一部）と未登録の業務への前後の業務は名前からつながる")
+    inferred3 = {e["id"]: e["inferred"] for e in g3["edges"]}
+    check(f"t{t2_id}->t{monthly_id}" in eids3 and f"t{t1_id}->{u_check}" in eids3 and inferred3[f"t{t2_id}->t{monthly_id}"] is True and inferred3[f"t{t1_id}->{u_check}"] is True,
+          "点線: 「クレーム対応の進捗」（業務名の一部）と未登録の業務への前後の業務は名前からつながる")
     data = {"nodes": [], "edges": [dict(e) for e in g3["edges"]], "suppressed_nodes": [], "suppressed_edges": [f"t{t2_id}->t{monthly_id}", f"t{t1_id}->{u_check}"], "view": None}
     for n in g3["nodes"]:
         m = dict(n)
@@ -2115,6 +2192,53 @@ def smoke_writeback():
           f"再生成: 書き戻した「課長」と受け取り元は自動の箱になる: {boss.get('who')} / {src_box.get('id')}")
     left = client.get("/bizmap/api/writeback?kind=info").get_json()["candidates"]
     check(not any("山田製作所" in c["text"] or "検査チェックシート" in c["text"] or "残業連絡" in c["text"] for c in left), f"反映した内容は候補に残らない: {[c['text'] for c in left]}")
+    check(edges4[(f"t{t1_id}", f"t{t3_id}")]["inferred"] is False, "業務名を変えても、書き戻した業務どうしの線は実線のまま")
+
+    # ---- 書き戻した未登録の業務との線も実線。点線を消して外すと、書き戻した印も消える ----
+    data = {"nodes": [dict(n) for n in g4["nodes"]], "edges": [dict(e) for e in g4["edges"]] + [{"id": f"t{t1_id}->{u_check}", "from": f"t{t1_id}", "to": u_check, "type": "work", "source": "manual"}],
+            "suppressed_nodes": [], "suppressed_edges": [], "view": None}
+    client.post("/bizmap/api/graph", json={"kind": "info", "data": data})
+    cands = client.get("/bizmap/api/writeback?kind=info").get_json()["candidates"]
+    client.post("/bizmap/api/writeback", json={"kind": "info", "ids": [c["id"] for c in cands if c["id"] == f"next:{t1_id}:{u_check}"]})
+    g5 = client.get("/bizmap/api/graph?kind=info").get_json()
+    e5 = {e["id"]: e for e in g5["edges"]}
+    data = {"nodes": [dict(n) for n in g5["nodes"]], "edges": [dict(e) for e in g5["edges"] if e["id"] != f"t{t1_id}->{u_check}"], "suppressed_nodes": [], "suppressed_edges": [f"t{t1_id}->{u_check}"], "view": None}
+    client.post("/bizmap/api/graph", json={"kind": "info", "data": data})
+    cands = client.get("/bizmap/api/writeback?kind=info").get_json()["candidates"]
+    client.post("/bizmap/api/writeback", json={"kind": "info", "ids": [c["id"] for c in cands if c["id"] == f"unnext:{t1_id}:{u_check}"]})
+    with app.test_request_context():
+        links = app_module.written_links()
+        t1_next = db.session.get(Task, t1_id).next_task or ""
+    check(e5.get(f"t{t1_id}->{u_check}", {}).get("inferred") is False and e5.get(f"t{t1_id}->{u_check}", {}).get("source") == "auto"
+          and f"t{t1_id}->{u_check}" not in links and f"t{t1_id}->t{t3_id}" in links and "点検結果のまとめ" not in t1_next,
+          f"書き戻した未登録の業務との線も実線。点線を消して外すと書き戻した印も消える: {sorted(links)}")
+
+    # ---- 業務名の書き戻し: 同じ名前だけ自動で直し、名前の一部だけが同じものは別の候補（初めは選ばない） ----
+    with app.app_context():
+        r2 = Respondent.query.filter_by(emp_id="DEMO-002").first()
+        p_task = Task(name="部長会議資料の作成", respondent_id=r2.id, workplace_id=r2.workplace_id)
+        q_task = Task(name="部長会議の準備", respondent_id=r2.id, workplace_id=r2.workplace_id, next_task="部長会議資料の作成", prev_task="部長会議資料の作成の下書き")
+        db.session.add_all([p_task, q_task])
+        db.session.commit()
+        p_id, q_id = p_task.id, q_task.id
+    data = {"nodes": [{"id": f"t{p_id}", "text": "部長会議資料の作成（月次）", "text_edited": True, "type": "work", "cls": "task", "source": "auto"}], "edges": [], "suppressed_nodes": [], "suppressed_edges": [], "view": None}
+    client.post("/bizmap/api/graph", json={"kind": "info", "data": data})
+    cands = client.get("/bizmap/api/writeback?kind=info").get_json()["candidates"]
+    main = next((c for c in cands if c["id"] == f"rename:{p_id}"), {})
+    partial = [c for c in cands if c["checked"] is False]
+    with app.app_context():
+        q_next0 = db.session.get(Task, q_id).next_task
+    check(main.get("checked") is True and "「部長会議の準備」の前後の業務に書いた「部長会議資料の作成」も直す" in main.get("text", "") and "生産実績の月報作成" not in main.get("text", "")
+          and any("「生産実績の月報作成」の後の業務に書いた「部長会議」を「部長会議資料の作成（月次）」に直す" in c["text"] for c in partial)
+          and any("「部長会議の準備」の前の業務に書いた「部長会議資料の作成の下書き」を「部長会議資料の作成（月次）の下書き」に直す" in c["text"] for c in partial)
+          and len(partial) == 2 and q_next0 == "部長会議資料の作成",
+          f"業務名の書き戻し: 前後の業務は同じ名前だけ一緒に直し、名前の一部だけが同じもの（「部長会議」など）は直し方を書いた別の候補（初めは選ばない）: {[c['text'] for c in partial]}")
+    pick = [c["id"] for c in cands if c["checked"]] + [c["id"] for c in partial if "の下書き" in c["text"]]
+    client.post("/bizmap/api/writeback", json={"kind": "info", "ids": pick})
+    with app.app_context():
+        p_name, t4_next, q_next, q_prev = db.session.get(Task, p_id).name, db.session.get(Task, t4_id).next_task, db.session.get(Task, q_id).next_task, db.session.get(Task, q_id).prev_task
+    check(p_name == "部長会議資料の作成（月次）" and t4_next == "部長会議" and q_next == "部長会議資料の作成（月次）" and q_prev == "部長会議資料の作成（月次）の下書き",
+          f"反映後: 同じ名前は新しい業務名に、選んだ名前の一部の候補は書いたとおりに直り、選ばなかった「部長会議」はそのまま: {p_name} / {t4_next} / {q_next} / {q_prev}")
 
     with app.test_request_context():
         tasks_by_id = {t.id: t for t in Task.query.all()}
