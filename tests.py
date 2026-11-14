@@ -673,10 +673,10 @@ def smoke_board():
     code, html = page("/board/")
     check(code == 200 and "進行中の案件はありません" in html, "空の掲示板")
     code, html = page("/")
-    check("アンケート・業務登録" not in html and 'href="/monthly/">月次アンケート</a>・<a href="/survey/">自動化を検討</a>から始める' in html and "デモデータを表示中" not in html,
-          "ダッシュボードの空の案内は「月次アンケート・自動化を検討」。デモがなければ表示中の帯は出ない")
+    check("アンケート・業務登録" not in html and 'href="/monthly/">月次アンケート</a>・<a href="/survey/">自動化アイテム登録</a>から始める' in html and "デモデータを表示中" not in html,
+          "ダッシュボードの空の案内は「月次アンケート・自動化アイテム登録」。デモがなければ表示中の帯は出ない")
     code, html = page("/monthly/admin")
-    check("自動化を検討へ誘導" in html or json.dumps("自動化を検討へ誘導")[1:-1] in html, "設問エディタの誘導の名前は「自動化を検討へ誘導」")
+    check("自動化アイテム登録へ誘導" in html or json.dumps("自動化アイテム登録へ誘導")[1:-1] in html, "設問エディタの誘導の名前は「自動化アイテム登録へ誘導」")
 
     import app as app_module
     with app.app_context():
@@ -742,7 +742,7 @@ def smoke_board():
         wp_done = len([t for t in wp_tasks if t.status == "完了"])
     code, html = page("/board/?workplace_id=2")
     check(code == 200 and f'<div class="stat-value">{wp_total}<span class="stat-unit">件</span></div>' in html and f"完了 {wp_done} " in html, f"職場を選ぶとカードの数字もその職場の値（{wp_total} 件）")
-    check("自動化を検討してみませんか" in html and "自動化を検討する</a>" in html and 'href="/survey/"' in html and 'href="/monthly/"' in html, "掲示板: 自動化依頼と月次アンケートへの導線")
+    check("自動化アイテムとして登録してみませんか" in html and "自動化アイテムを登録する</a>" in html and "自動化を検討" not in html and 'href="/survey/"' in html and 'href="/monthly/"' in html, "掲示板: 自動化依頼と月次アンケートへの導線")
 
     with app.app_context():
         t_test = Task.query.filter_by(name="検査成績書の作成").first()
@@ -767,7 +767,9 @@ def smoke_board():
     check(code == 200 and "活動状況で案件の進み具合を見る" in html and "pb-funnel" not in html and "Gr・役割別の登録件数と月間時間" not in html and "業務領域別の把握状況" not in html, "ダッシュボード: 重複を外してリンクに")
     check("Gr・役割別の回答状況" in html and "最近登録された業務" in html and "次のアクション提案" in html, "ダッシュボード: 残した区画")
     code, html = page("/survey/")
-    check(code == 200 and "自動化を検討" in html and "自動化依頼" not in html and 'id="rq"' in html, "自動化を検討は1画面（名称は「自動化を検討」）")
+    check(code == 200 and "<title>自動化アイテム登録" in html and '<h1 class="rq-title">自動化アイテム登録</h1>' in html and "自動化を検討" not in html and "自動化依頼" not in html and 'id="rq"' in html
+          and "チャットボットとの対話を通じて業務内容・業務フローを整理します。整理された内容は自動化アイテムとして登録され、今後の自動化・業務改善の検討対象となります。" in html,
+          "自動化アイテム登録は1画面（名称は「自動化アイテム登録」、説明はチャットボットとの対話で整理して登録すること）")
     code, html = page("/cases/")
     check("標準手順で検討" not in html, "案件一覧: 標準手順の説明文を削除")
     code, html = page("/cases/")
@@ -1170,7 +1172,7 @@ def smoke_login_monthly():
     r = client.post("/monthly/submit", data=form)
     check(r.status_code == 302 and "/monthly/done" in r.headers["Location"], "通常のフォーム送信でも受付")
     code, html, r = get(f"/monthly/done?period={period}")
-    check(code == 200 and "回答を受け付けました" in html and "自動化を検討する" in html and "src=monthly" in html and "日報の転記" in html, "完了ページ（なくしたい業務があれば「自動化を検討する」へ）")
+    check(code == 200 and "回答を受け付けました" in html and "自動化アイテムを登録する" in html and "自動化を検討" not in html and "src=monthly" in html and "日報の転記" in html, "完了ページ（なくしたい業務があれば「自動化アイテムを登録する」へ）")
     with app.app_context():
         MonthlyResponse.query.filter_by(period=period, emp_id="DEMO-001").delete()
         r001 = Respondent.query.filter_by(emp_id="DEMO-001").first()
@@ -1607,8 +1609,8 @@ def smoke_login_monthly():
         e009 = Employee.query.filter_by(emp_id="DEMO-009").first().id
     client.post("/login", data={"emp_id": "admin", "password": "adminpass"})
     code, html, r = get("/admin/employees")
-    check(code == 200 and "対象者一覧" in html and "対象外" in html and "自動化を検討" in html and "member-yes" in html and "回答 ／ 対象（回答率）" in html and "E996" in html and "NOPE01" not in html,
-          "対象者一覧: 社員ID・氏名・自動化を検討の回数 × 月ごとの回答チェック")
+    check(code == 200 and "対象者一覧" in html and "対象外" in html and ">自動化アイテム</button>" in html and "自動化を検討" not in html and "member-yes" in html and "回答 ／ 対象（回答率）" in html and "E996" in html and "NOPE01" not in html,
+          "対象者一覧: ユーザーID・氏名・自動化アイテムの件数 × 月ごとの回答チェック")
     import app as app_module
     with app.app_context():
         wp3 = db.session.get(app_module.Workplace, 3).name
@@ -1684,7 +1686,7 @@ def smoke_login_monthly():
     client.post("/login", data={"emp_id": "admin", "password": "adminpass"})
     code, html, r = get("/admin/employees")
     check(code == 200 and "DX人財情報" not in html and "人材育成" not in html and "田中 一郎" in html and "E777" in html, "対象者一覧（DX人財情報をまとめた）: 自動化を検討の回答者と、月次だけ答えた人が並ぶ")
-    check("自分で改善したい" in html and "直近の月次で「自分で・一緒に取り組みたい」" in html and all(f">{h}</button>" in html for h in ("Gr・役割", "勤務形態", "意欲（自動化を検討）", "月次：改善の進め方", "使える技術", "学びたい技術")),
+    check("自分で改善したい" in html and "直近の月次で「自分で・一緒に取り組みたい」" in html and all(f">{h}</button>" in html for h in ("Gr・役割", "勤務形態", "意欲（自動化アイテム登録）", "月次：改善の進め方", "使える技術", "学びたい技術")),
           "対象者一覧: DX人財情報の集計カードと、Gr・役割・勤務形態・意欲・進め方・技術の列")
     check('id="member-table"' in html and 'data-filter="wp"' in html and 'data-filter="m0"' in html and "function applySort()" in html and "function applyFilter()" in html and 'aria-sort="none"' in html,
           "対象者一覧: 列名を押して並べ替え、見出しの下の欄で列ごとに絞り込める")
@@ -2235,7 +2237,7 @@ def smoke_request():
         return text in html or json.dumps(text)[1:-1] in html
 
     check(code == 200 and "聞き取りを始める" in html and "一気に書く" in html and "写真を貼る" in html and "最初から見る" in html and 'id="rq-dup-note"' in html and 'id="rq-dup"' in html and in_html("まずは相談したい") and in_html("スキルを身につけながら、一緒にやってみたい") and "mermaid" in html and in_html("日報の集計"), "依頼ページ: 聞き取り・一気に書く・写真・再生・3つの希望・一緒にやってみたい・業務名の引き継ぎ")
-    check("検討する業務" in html and "改善への関わり方" not in html and "部全体について" not in html, "第3節・第4節は無くなっている")
+    check("登録する業務" in html and "どの業務を登録しますか" in html and "改善への関わり方" not in html and "部全体について" not in html, "第3節・第4節は無くなっている（第2節は「登録する業務」）")
     js = client.get("/static/survey.js").data.decode("utf-8")
     check(not in_html("氏名") and "rq-fallback" not in js and "fillFallback" not in js and "ユーザーIDを確認しました" in js, "基本情報: ユーザーIDは確認だけで、氏名の欄はない")
     check('<span class="rq-sec-title">基本情報</span>' in html and "あなたのこと" not in html and "あなたのこと" not in js and "社員ID" not in html and "社員ID" not in js
@@ -2527,7 +2529,7 @@ def smoke_request():
         check(code == 200 and '<span class="badge text-bg-dark">夜勤</span>' in html and '<span class="badge text-bg-dark">昼勤・夜勤の両方</span>' in html, "改善案件の一覧に夜勤・両方のバッジが出る")
         code, html, r = get("/admin/employees")
         check(code == 200 and ">勤務形態</button>" in html and "交代勤務" in html, "対象者一覧に勤務形態の列が出る")
-        check("検討: スキルを身につけながら、一緒にやってみたい" in html and "割ける時間" not in html and "発表・共有" not in html and "学びたい技術を挙げた人" in html, "対象者一覧の意欲は依頼の「一緒にやってみたい」から出し、集めなくなった列は出さない")
+        check("登録: スキルを身につけながら、一緒にやってみたい" in html and "割ける時間" not in html and "発表・共有" not in html and "学びたい技術を挙げた人" in html, "対象者一覧の意欲は依頼の「一緒にやってみたい」から出し、集めなくなった列は出さない")
         code, html, r = get("/bizmap/")
         check(code == 200 and "日報の集計" in html, "業務マップに新しい案件が載る")
         code, html, r = get("/cases/?wish=まずは相談したい")
@@ -2679,7 +2681,7 @@ def _survey_round2_checks(check):
     with client.session_transaction() as sess:
         left = "monthly_last" in sess
     html2 = client.get(f"/monthly/done?period={cur}").data.decode("utf-8")
-    check(r.status_code == 302 and "週報・月報の作成" in html1 and "担当者への連絡" in html1 and "鈴木さん" not in html1 and "自動化を検討する" in html1,
+    check(r.status_code == 302 and "週報・月報の作成" in html1 and "担当者への連絡" in html1 and "鈴木さん" not in html1 and "自動化アイテムを登録する" in html1,
           "R2-14: 完了ページの業務名も「・」で分けず、氏名を置き換える")
     check(not left and "自動化を検討する" not in html2, "R2-12: 完了ページは控え（monthly_last）を一度見せたら消す")
 

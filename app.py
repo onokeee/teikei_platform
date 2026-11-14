@@ -118,7 +118,7 @@ ECRS = [
 
 # ---- 活動状況（製造部全体に公開する、案件の進み具合）----
 STAGES = [
-    ("start", "開始", "検討の登録を受け付け、活動状況に載せる", ""),
+    ("start", "開始", "自動化アイテムの登録を受け付け、活動状況に載せる", ""),
     ("request", "要求定義", "何に困っていて、何を実現したいかを本人と整理する", "手順1・2（アウトプットの確認・目的の明確化）"),
     ("spec", "要件定義", "ECRSで業務を最適化し、残る作業の仕様を決める", "手順3（ECRSによる最適化）"),
     ("build", "作成", "ツール・仕組みを作る。自主改善の案件は改善チームが伴走する", "手順4・5（自動化・高度化）"),
@@ -199,7 +199,7 @@ MONTHLY_KPI_LABELS = {
     "hours": "推計 月間時間",
     "trend": "減った率・増えた率",
     "wants": "自動化したい率",
-    "wants_tasks": "挙げられた業務（自動化を検討へ誘導）",
+    "wants_tasks": "挙げられた業務（自動化アイテム登録へ誘導）",
     "stance": "依頼したい率・一緒に取り組みたい率・自分で取り組みたい率",
     "new_tasks": "新規業務の件数",
     "task_names": "挙げられた定型・定期業務",
@@ -217,7 +217,7 @@ MONTHLY_KPI = {
 }
 
 
-# ===== 自動化を検討（1画面）のフォーム定義 =====
+# ===== 自動化アイテム登録（1画面）のフォーム定義 =====
 PERSON_FIELDS = [
     {"key": "emp_id", "type": "text", "label": "ユーザーID", "required": True, "lookup": True, "placeholder": "例：E001"},
     {"key": "workplace_id", "type": "select", "label": "Gr・役割", "required": True, "options": "workplaces"},
@@ -1374,7 +1374,7 @@ def suggest_actions(limit=10):
             {
                 "kind": "回答促進",
                 "title": f"まだ回答のないGr・役割: {'、'.join(quiet)}",
-                "detail": "月次アンケートの回答も「自動化を検討」の登録もまだありません。推進メンバーからそのGr・役割の人に声をかけ、回答をお願いしてください。",
+                "detail": "月次アンケートの回答も自動化アイテムの登録もまだありません。推進メンバーからそのGr・役割の人に声をかけ、回答をお願いしてください。",
                 "url": ("admin.index", {}),
             }
         )
@@ -3914,7 +3914,7 @@ def _call_ai(system, user_input, max_tokens=None, tools=None, handlers=None, too
     return text
 
 
-# ----- 自動化を検討: 聞き取りの会話と、その結果からの登録内容・ECRS の案 -----
+# ----- 自動化アイテム登録: 聞き取りの会話と、その結果からの登録内容・ECRS の案 -----
 INTAKE_PROMPT = """あなたは製造部「PC定型業務ゼロ化プロジェクト」の聞き取り担当です。本人と短い会話をしながら、その人が行っているPCの定型・定期業務の「現状の流れ（手順）」を組み立てます。
 
 進め方:
@@ -5486,7 +5486,7 @@ def ai_suggest():
         flash(f"AIが {len(result)} 件の提案を生成しました。", "success")
     return redirect(url_for("main.index"))
 
-# ===== 画面: 自動化を検討（1画面・JSON API） =====
+# ===== 画面: 自動化アイテム登録（1画面・JSON API） =====
 bp_survey = Blueprint("survey", __name__, url_prefix="/survey")
 
 
@@ -5739,7 +5739,7 @@ def api_reset():
     session.pop("respondent_id", None)
     return jsonify({"success": True})
 
-# ----- API: 検討する業務（AI の聞き取り → 登録） -----
+# ----- API: 登録する業務（AI の聞き取り → 登録） -----
 _IMAGE_PREFIX = re.compile(r"^data:image/(png|jpe?g|webp|gif);base64,")
 _SOURCE_WORDS = [("紙", "紙の帳票"), ("帳票", "紙の帳票"), ("手書き", "紙の帳票"), ("メール", "メール"), ("Excel", "他のExcel"), ("エクセル", "他のExcel"), ("聞", "人から聞く"), ("口頭", "人から聞く")]
 _SYSTEM_WORDS = [("生産管理", "生産管理システム"), ("品質", "品質システム"), ("設備", "設備データ"), ("モニタ", "設備データ")]
@@ -6620,7 +6620,7 @@ def people_summary(everyone):
     summary["positive_by_pattern"] = {k: positive_counts[k] for k in list(C.WORK_PATTERNS) + ["未設定"] if positive_counts.get(k)}
     latest_stances = Counter(m.answer("stance") for m in in_latest if m.answer("stance"))
     stance_options = next((q["options"] for q in C.MONTHLY_CORE_QUESTIONS if q["key"] == "stance"), [])
-    wish_counts = [("検討: " + opt, len([p for p in everyone if p["wish"] == opt])) for opt in C.DX_WISH_OPTIONS]
+    wish_counts = [("登録: " + opt, len([p for p in everyone if p["wish"] == opt])) for opt in C.DX_WISH_OPTIONS]
     wish_counts += [("月次: " + opt, latest_stances.get(opt, 0)) for opt in stance_options]
     return summary, wish_counts, have, learn, stance_options
 
@@ -6708,7 +6708,7 @@ def add_workplace():
         flash("Gr・役割を追加しました。", "success")
     return redirect(url_for("admin.index"))
 
-_WORKPLACE_USERS = (("業務", "件", Task), ("月次の回答", "件", MonthlyResponse), ("対象者", "人", Employee), ("「自動化を検討」の回答者", "人", Respondent))
+_WORKPLACE_USERS = (("業務", "件", Task), ("月次の回答", "件", MonthlyResponse), ("対象者", "人", Employee), ("「自動化アイテム登録」の回答者", "人", Respondent))
 
 
 def _workplace_usage():
@@ -6877,7 +6877,7 @@ def delete_employee(employee_id):
     e = _get_or_404(Employee, employee_id)
     key = emp_key(e.emp_id)
     if any(emp_key(x) == key for model in (MonthlyResponse, Respondent) for (x,) in db.session.query(model.emp_id).distinct().all()):
-        flash(f"{e.emp_id} は月次アンケートの回答か「自動化を検討」の登録があるため削除できません（削除しても次の起動で一覧に戻ります）。回答率の分母から外すときは「対象外」にチェックしてください。", "warning")
+        flash(f"{e.emp_id} は月次アンケートの回答か自動化アイテムの登録があるため削除できません（削除しても次の起動で一覧に戻ります）。回答率の分母から外すときは「対象外」にチェックしてください。", "warning")
         return redirect(url_for("admin.employees"))
     db.session.delete(e)
     db.session.commit()
@@ -7009,7 +7009,7 @@ def remove_demo():
 def export_respondents():
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["ユーザーID", "氏名", "Gr・役割", "勤務形態", "自分で改善したい", "意欲（自動化を検討）", "月次の進め方（空でない直近の答え）", "その月度", "月次で自分で・一緒にと答えた回数",
+    w.writerow(["ユーザーID", "氏名", "Gr・役割", "勤務形態", "自分で改善したい", "意欲（自動化アイテム登録）", "月次の進め方（空でない直近の答え）", "その月度", "月次で自分で・一緒にと答えた回数",
                 "使える技術", "学びたい技術", "登録業務数", "月間時間(分)", "一緒にやってみたい業務数", "伴走・希望の業務"])
     for p in dx_people():
         w.writerow(
@@ -7419,7 +7419,7 @@ TEMPLATES = {
 <div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">
   <div>
     <h2 class="mb-1">対象者一覧</h2>
-    <p class="text-muted mb-0">月次アンケートか「自動化を検討」に一度でも回答した人が、ユーザーIDごとに1行で自動で載ります。月ごとの回答と、一人ひとりの意欲（「自動化を検討」の「スキルを身につけながら、一緒にやってみたい」・使える技術・学びたい技術、月次アンケートの改善の進め方）をまとめて見られます。退職や他部門への異動で回答率の分母から外す人は「対象外」にチェックします。</p>
+    <p class="text-muted mb-0">月次アンケートか「自動化アイテム登録」に一度でも回答した人が、ユーザーIDごとに1行で自動で載ります。月ごとの回答と、一人ひとりの意欲（「自動化アイテム登録」の「スキルを身につけながら、一緒にやってみたい」・使える技術・学びたい技術、月次アンケートの改善の進め方）をまとめて見られます。退職や他部門への異動で回答率の分母から外す人は「対象外」にチェックします。</p>
   </div>
   <div class="d-flex gap-2">
     <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('monthly.results') }}">月次集計</a>
@@ -7437,7 +7437,7 @@ TEMPLATES = {
   <div class="col-6 col-lg-3"><div class="card kpi-card h-100"><div class="card-body py-2">
     <div class="kpi-label">自分で改善したい</div>
     <div class="kpi-value fs-3">{{ summary.positive }}<span class="fs-6 text-muted"> 人</span></div>
-    <div class="kpi-sub">検討での「一緒にやってみたい」のチェックと、直近6か月の月次の進め方（「自分で取り組みたい」「学びながら改善チームと一緒に取り組みたい」）のうち、新しいほうで判断（チェックなしは意思表示なしとして扱う）。伴走している「自主改善」の案件がある人も含む</div>
+    <div class="kpi-sub">自動化アイテム登録での「一緒にやってみたい」のチェックと、直近6か月の月次の進め方（「自分で取り組みたい」「学びながら改善チームと一緒に取り組みたい」）のうち、新しいほうで判断（チェックなしは意思表示なしとして扱う）。伴走している「自主改善」の案件がある人も含む</div>
     {% if summary.positive_by_pattern %}<div class="kpi-sub">{% for k, v in summary.positive_by_pattern.items() %}{{ k }} {{ v }}人{% if not loop.last %}／{% endif %}{% endfor %}</div>{% endif %}
   </div></div></div>
   <div class="col-6 col-lg-3"><div class="card kpi-card h-100"><div class="card-body py-2">
@@ -7472,11 +7472,11 @@ TEMPLATES = {
       <th data-col="name" aria-sort="none"><button type="button" class="member-sort">氏名</button></th>
       <th data-col="wp" aria-sort="none"><button type="button" class="member-sort">Gr・役割</button></th>
       <th data-col="pat" aria-sort="none"><button type="button" class="member-sort">勤務形態</button></th>
-      <th data-col="wish" aria-sort="none"><button type="button" class="member-sort">意欲（自動化を検討）</button></th>
+      <th data-col="wish" aria-sort="none"><button type="button" class="member-sort">意欲（自動化アイテム登録）</button></th>
       <th data-col="stance" aria-sort="none"><button type="button" class="member-sort">月次：改善の進め方</button></th>
       <th data-col="skills" aria-sort="none"><button type="button" class="member-sort">使える技術</button></th>
       <th data-col="learn" aria-sort="none"><button type="button" class="member-sort">学びたい技術</button></th>
-      <th data-col="tasks" aria-sort="none"><button type="button" class="member-sort">自動化を検討</button></th>
+      <th data-col="tasks" aria-sort="none"><button type="button" class="member-sort">自動化アイテム</button></th>
       {% for p in periods %}<th class="text-center member-month" data-col="m{{ loop.index0 }}" aria-sort="none"><button type="button" class="member-sort">{{ p[:4] }}<br>{{ p[5:]|int }}月</button></th>{% endfor %}
     </tr>
     <tr class="member-filters">
@@ -7489,7 +7489,7 @@ TEMPLATES = {
       <th><select class="form-select form-select-sm" data-filter="stance" aria-label="改善の進め方で絞り込む"><option value="">すべて</option>{% for opt in stance_options %}<option value="{{ opt }}">{{ opt }}</option>{% endfor %}<option value="old">{{ C.STANCE_MONTHS }}か月より前</option><option value="-">（回答なし）</option></select></th>
       <th><select class="form-select form-select-sm" data-filter="skills" aria-label="使える技術で絞り込む"><option value="">すべて</option>{% for s in skill_options %}<option value="{{ s }}">{{ s }}</option>{% endfor %}<option value="-">（なし）</option></select></th>
       <th><select class="form-select form-select-sm" data-filter="learn" aria-label="学びたい技術で絞り込む"><option value="">すべて</option>{% for s in learn_options %}<option value="{{ s }}" {% if initial.learn == s %}selected{% endif %}>{{ s }}</option>{% endfor %}<option value="-">（なし）</option></select></th>
-      <th><select class="form-select form-select-sm" data-filter="tasks" aria-label="自動化を検討で絞り込む"><option value="">すべて</option><option value="0">0 回</option><option value="1">1 回以上</option><option value="{{ C.BUILD_STAGE_SELF }}">{{ C.BUILD_STAGE_SELF }}あり</option><option value="希望">希望あり</option></select></th>
+      <th><select class="form-select form-select-sm" data-filter="tasks" aria-label="自動化アイテムで絞り込む"><option value="">すべて</option><option value="0">0 件</option><option value="1">1 件以上</option><option value="{{ C.BUILD_STAGE_SELF }}">{{ C.BUILD_STAGE_SELF }}あり</option><option value="希望">希望あり</option></select></th>
       {% for p in periods %}<th><select class="form-select form-select-sm" data-filter="m{{ loop.index0 }}" aria-label="{{ p[:4] }}年{{ p[5:]|int }}月で絞り込む"><option value="">すべて</option><option value="yes">回答</option><option value="no">未回答</option><option value="out">対象外</option><option value="before">対象前</option></select></th>{% endfor %}
     </tr>
     </thead>
@@ -7518,12 +7518,12 @@ TEMPLATES = {
       <td class="small member-wide" data-sort="{{ d.skills|join('・') if d else '' }}" data-list="{{ d.skills|join('|') if d else '' }}">{{ (d.skills|join('・') or (C.SKILL_NONE if d.skills_none else '－')) if d else '－' }}</td>
       <td class="small member-wide" data-sort="{{ d.learn|join('・') if d else '' }}" data-list="{{ d.learn|join('|') if d else '' }}">{{ (d.learn|join('・') or (C.SKILL_NONE if d.learn_none else '－')) if d else '－' }}</td>
       <td class="small member-tasks" data-sort="{{ r.considered }}" data-targets="{{ d.target_tasks|map(attribute='label')|join('|') if d else '' }}">
-        <div>{{ r.considered }} 回</div>
+        <div>{{ r.considered }} 件</div>
         {% if d %}{% for x in d.target_tasks %}<div><a href="{{ url_for('cases.detail', task_id=x.task.id) }}">{{ x.task.name }}</a> <span class="badge {{ 'text-bg-primary' if x.label == C.BUILD_STAGE_SELF else 'text-bg-light border' }}">{{ x.label }}</span></div>{% endfor %}
         {% if not d.task_count and d.monthly_wants %}
         <div class="text-muted">業務の登録なし。{{ d.monthly_wants_label }}の月次で挙げたなくしたい業務:</div>
         <div>{{ d.monthly_wants|join('・') }}</div>
-        <a href="{{ url_for('survey.start', emp=d.emp_id, src='monthly', m=d.monthly_wants_id) }}">「自動化を検討」で流れを整理する</a>
+        <a href="{{ url_for('survey.start', emp=d.emp_id, src='monthly', m=d.monthly_wants_id) }}">自動化アイテム登録で流れを整理する</a>
         {% endif %}{% endif %}
       </td>
       {% for p, st in r.cells %}<td class="text-center member-cell" data-st="{{ st }}"{% if p in r.answered %} data-ans="1"{% endif %}>{{ member_mark(st, p in r.answered) }}</td>{% endfor %}
@@ -7536,16 +7536,16 @@ TEMPLATES = {
     </tr></tfoot>
   </table>
   </div>
-  <p class="small text-muted mt-2 mb-0">下の行の「回答 ／ 対象」は、その月に回答した対象者の数と対象者の数で、月次集計・ダッシュボードの回答率と同じ数え方です（絞り込んだときは、表示している人だけで数えます）。月末時点で「対象外」にチェックしている人は、その月の分母にも分子にも入りません（今月は今のチェックで数えます）。チェックを外すと外した月から分母に戻り、それより前の月は月末時点の状態のまま残ります。対象外の人は回答できません。削除できるのは、まだ回答も「自動化を検討」の登録もない人だけです。</p>
+  <p class="small text-muted mt-2 mb-0">下の行の「回答 ／ 対象」は、その月に回答した対象者の数と対象者の数で、月次集計・ダッシュボードの回答率と同じ数え方です（絞り込んだときは、表示している人だけで数えます）。月末時点で「対象外」にチェックしている人は、その月の分母にも分子にも入りません（今月は今のチェックで数えます）。チェックを外すと外した月から分母に戻り、それより前の月は月末時点の状態のまま残ります。対象外の人は回答できません。削除できるのは、まだ回答も自動化アイテムの登録もない人だけです。</p>
   {% else %}
-  <p class="text-muted mb-0">まだ回答した人がいません。月次アンケートか「自動化を検討」に回答すると、ここに載ります。</p>
+  <p class="text-muted mb-0">まだ回答した人がいません。月次アンケートか「自動化アイテム登録」に回答すると、ここに載ります。</p>
   {% endif %}
 </div></div>
 
 <div class="row g-3 mb-3">
   <div class="col-lg-4">
     <div class="card h-100"><div class="card-body">
-      <h5 class="card-title">意欲（検討と直近の月次）</h5>
+      <h5 class="card-title">意欲（自動化アイテム登録と直近の月次）</h5>
       {% set maxc = (wish_counts|map(attribute=1)|max) if wish_counts else 1 %}
       {% for opt, n in wish_counts %}
       <div class="d-flex align-items-center small mb-1">
@@ -8020,7 +8020,7 @@ document.getElementById("test-btn").addEventListener("click", async function () 
   <div class="col-lg-6">
     <div class="card mb-3"><div class="card-body">
       <h5 class="card-title">Gr・役割マスタ</h5>
-      <p class="small text-muted">Gr・役割名は直して保存できます（業務・回答の紐づきはそのまま）。業務・月次の回答・対象者・「自動化を検討」の回答者が使っているGr・役割は削除できません。</p>
+      <p class="small text-muted">Gr・役割名は直して保存できます（業務・回答の紐づきはそのまま）。業務・月次の回答・対象者・「自動化アイテム登録」の回答者が使っているGr・役割は削除できません。</p>
       {% for w in workplaces %}
       {% set used = workplace_usage.get(w.id) %}
       <form method="post" action="{{ url_for('admin.update_workplace', workplace_id=w.id) }}" class="row g-1 align-items-center mb-2">
@@ -8114,7 +8114,7 @@ document.getElementById("test-btn").addEventListener("click", async function () 
       {% set bp = request.blueprint %}
       <ul class="navbar-nav me-auto">
         <li class="nav-item"><a class="nav-link {% if bp == 'board' %}active{% endif %}" href="{{ url_for('board.index') }}">活動状況</a></li>
-        <li class="nav-item"><a class="nav-link {% if bp == 'survey' %}active{% endif %}" href="{{ url_for('survey.index') }}">自動化を検討</a></li>
+        <li class="nav-item"><a class="nav-link {% if bp == 'survey' %}active{% endif %}" href="{{ url_for('survey.index') }}">自動化アイテム登録</a></li>
         <li class="nav-item"><a class="nav-link {% if request.endpoint in ('monthly.form', 'monthly.done') %}active{% endif %}" href="{{ url_for('monthly.form') }}">月次アンケート</a></li>
         {% if current_user %}
         <li class="nav-sep" aria-hidden="true"></li>
@@ -8635,16 +8635,16 @@ document.getElementById("test-btn").addEventListener("click", async function () 
   </div>
   </div>
   <div class="pb-cta">
-    <div class="pb-cta-text">あなたのPCの定型・定期業務も、自動化を検討してみませんか</div>
+    <div class="pb-cta-text">あなたのPCの定型・定期業務も、自動化アイテムとして登録してみませんか</div>
     <div class="pb-cta-actions">
-      <a class="pb-cta-btn" href="{{ url_for('survey.index') }}">自動化を検討する</a>
+      <a class="pb-cta-btn" href="{{ url_for('survey.index') }}">自動化アイテムを登録する</a>
       <a class="pb-cta-link" href="{{ url_for('monthly.form') }}">月次アンケートに答える</a>
     </div>
   </div>
 </header>
 
 {% if hl %}
-<section class="pb-wins" aria-label="これまでの成果と検討への入口">
+<section class="pb-wins" aria-label="これまでの成果と自動化アイテム登録への入口">
   <div class="pb-strip">
     {% if hl.tasks %}
     <div class="card pb-stat"><div class="card-body">
@@ -9087,7 +9087,7 @@ document.getElementById("test-btn").addEventListener("click", async function () 
   <h2 class="mb-0">改善案件一覧</h2>
   <div class="d-flex gap-2">
     <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('cases.export_csv') }}">CSVエクスポート</a>
-    <a class="btn btn-primary btn-sm" href="{{ url_for('survey.index') }}">自動化を検討する</a>
+    <a class="btn btn-primary btn-sm" href="{{ url_for('survey.index') }}">自動化アイテムを登録する</a>
   </div>
 </div>
 <p class="text-muted small">登録された業務はすべて改善案件です。希望が「なくしたい・減らしたい」か、困りごとのある業務を「案件候補」として数えます。</p>
@@ -9215,7 +9215,7 @@ document.getElementById("test-btn").addEventListener("click", async function () 
 {% block content %}
 {% if k.task_count == 0 %}
 <div class="alert alert-info">
-  まだ業務が登録されていません。<a href="{{ url_for('monthly.form') }}">月次アンケート</a>・<a href="{{ url_for('survey.index') }}">自動化を検討</a>から始めるか、
+  まだ業務が登録されていません。<a href="{{ url_for('monthly.form') }}">月次アンケート</a>・<a href="{{ url_for('survey.index') }}">自動化アイテム登録</a>から始めるか、
   <a href="{{ url_for('admin.index') }}">管理</a>画面からデモデータを投入すると画面の動きを確認できます。
 </div>
 {% endif %}
@@ -9252,7 +9252,7 @@ document.getElementById("test-btn").addEventListener("click", async function () 
   </div>
 </div>
 
-<h2 class="section-title">現状の把握 <span class="section-sub">自動化を検討（棚卸し）から</span></h2>
+<h2 class="section-title">現状の把握 <span class="section-sub">自動化アイテム登録（棚卸し）から</span></h2>
 <div class="row g-3 mb-4">
   <div class="col-6 col-lg-3">
     <div class="card stat h-100"><div class="card-body">
@@ -9328,7 +9328,7 @@ document.getElementById("test-btn").addEventListener("click", async function () 
         </tbody>
       </table>
       </div>
-      <p class="small text-muted mt-2 mb-0">回答した人は、業務を1件以上登録したか、月次アンケートに回答した人（対象外は除く）を、いまのGr・役割（月次アンケートか「自動化を検討」のいちばん新しい回答で選んだGr・役割）で1人1回数えます。自主改善はそのうち自ら改善に取り組みたい人です。業務・月間時間・案件候補は、業務を登録したときのGr・役割で数えます。</p>
+      <p class="small text-muted mt-2 mb-0">回答した人は、業務を1件以上登録したか、月次アンケートに回答した人（対象外は除く）を、いまのGr・役割（月次アンケートか「自動化アイテム登録」のいちばん新しい回答で選んだGr・役割）で1人1回数えます。自主改善はそのうち自ら改善に取り組みたい人です。業務・月間時間・案件候補は、業務を登録したときのGr・役割で数えます。</p>
     </div></div>
   </div>
 </div>
@@ -9677,8 +9677,8 @@ document.getElementById("test-btn").addEventListener("click", async function () 
     <div class="mq-next">
       <div class="mq-next-title">次は、なくしたい業務の「流れ」を AI と整理してみませんか</div>
       <div class="mq-next-tasks">{% for n in wants_tasks %}<span>{{ n }}</span>{% endfor %}</div>
-      <p class="small text-muted mb-3">基本情報と業務名はアンケートの答えから入力済みです。AI の短い質問に答えると流れ図ができ、改善チームと自動化を検討できます（1件 2〜3分）。</p>
-      <a class="btn btn-primary btn-lg" href="{{ url_for('survey.start', emp=row.emp_id, src='monthly', m=row.id) }}"><i class="bi bi-diagram-3"></i> 自動化を検討する</a>
+      <p class="small text-muted mb-3">基本情報と業務名はアンケートの答えから入力済みです。AI の短い質問に答えると流れ図ができ、自動化アイテムとして登録できます（1件 2〜3分）。</p>
+      <a class="btn btn-primary btn-lg" href="{{ url_for('survey.start', emp=row.emp_id, src='monthly', m=row.id) }}"><i class="bi bi-diagram-3"></i> 自動化アイテムを登録する</a>
     </div>
     {% endif %}
   </div></div>
@@ -9792,8 +9792,8 @@ document.getElementById("test-btn").addEventListener("click", async function () 
     <div class="mq-next d-none" id="mq-next">
       <div class="mq-next-title">次は、なくしたい業務の「流れ」を AI と整理してみませんか</div>
       <div class="mq-next-tasks" id="mq-next-tasks"></div>
-      <p class="small text-muted mb-3">基本情報と業務名はアンケートの答えから入力済みです。AI の短い質問に答えると流れ図ができ、改善チームと自動化を検討できます（1件 2〜3分）。</p>
-      <a class="btn btn-primary btn-lg" id="mq-register"><i class="bi bi-diagram-3"></i> 自動化を検討する</a>
+      <p class="small text-muted mb-3">基本情報と業務名はアンケートの答えから入力済みです。AI の短い質問に答えると流れ図ができ、自動化アイテムとして登録できます（1件 2〜3分）。</p>
+      <a class="btn btn-primary btn-lg" id="mq-register"><i class="bi bi-diagram-3"></i> 自動化アイテムを登録する</a>
     </div>
   </div></div>
   {% endif %}
@@ -10261,12 +10261,12 @@ document.getElementById("test-btn").addEventListener("click", async function () 
 {% endblock %}
 ''',
     'survey/index.html': r'''{% extends "base.html" %}
-{% block title %}自動化を検討{% endblock %}
+{% block title %}自動化アイテム登録{% endblock %}
 {% block content %}
 <div class="rq" id="rq">
   <div class="rq-top">
-    <h1 class="rq-title">自動化を検討</h1>
-    <p class="rq-lead">AI が短い質問をしながら、あなたの業務の流れを図にしていきます。所要時間は2〜3分。正確でなくて大丈夫、あとで改善チームが確認します。</p>
+    <h1 class="rq-title">自動化アイテム登録</h1>
+    <p class="rq-lead">チャットボットとの対話を通じて業務内容・業務フローを整理します。整理された内容は自動化アイテムとして登録され、今後の自動化・業務改善の検討対象となります。所要時間は1件2〜3分。正確でなくて大丈夫、あとで改善チームが確認します。</p>
   </div>
 
   <section class="card rq-card rq-sec" id="sec-person">
@@ -10278,12 +10278,12 @@ document.getElementById("test-btn").addEventListener("click", async function () 
 
   <section class="card rq-card rq-sec" id="sec-task">
     <div class="card-body">
-      <div class="rq-sec-head"><span class="rq-no">2</span><span class="rq-sec-title">検討する業務</span><span class="rq-sec-sub" id="rq-registered-count"></span></div>
+      <div class="rq-sec-head"><span class="rq-no">2</span><span class="rq-sec-title">登録する業務</span><span class="rq-sec-sub" id="rq-registered-count"></span></div>
       <div id="rq-registered" class="rq-registered"></div>
 
       <div id="rq-from-monthly" class="rq-from d-none"></div>
       <div id="rq-pick">
-        <div class="rq-label"><span>どの業務を検討しますか</span></div>
+        <div class="rq-label"><span>どの業務を登録しますか</span></div>
         <div class="rq-suggest d-none" id="rq-suggest"></div>
         <div class="rq-pick-row">
           <input type="text" class="form-control" id="rq-title" placeholder="業務名（分かる範囲で。例：日報の実績を集計表に転記する）" maxlength="200">
@@ -10356,7 +10356,7 @@ document.getElementById("test-btn").addEventListener("click", async function () 
         <div class="small text-muted mt-1">改善チームが内容を確認して連絡します。活動状況にも載ります。</div>
         <div class="d-flex flex-wrap justify-content-center gap-2 mt-3">
           <button type="button" class="btn btn-primary d-none" id="rq-next-monthly"></button>
-          <button type="button" class="btn btn-outline-primary" id="rq-another"><i class="bi bi-plus-lg"></i> 続けて別の業務を検討する</button>
+          <button type="button" class="btn btn-outline-primary" id="rq-another"><i class="bi bi-plus-lg"></i> 続けて別の業務を登録する</button>
         </div>
       </div>
     </div>
@@ -12466,7 +12466,7 @@ summary { transition: color 0.15s ease; }
 /* ---- 設問エディタ ---- */
 .qe-q { border: 1px solid var(--ui-line); box-shadow: none; }
 .qe-handle { min-width: 1.6rem; font-weight: 700; }
-/* ---- 自動化を検討（1画面） ---- */
+/* ---- 自動化アイテム登録（1画面） ---- */
 .rq { margin: 0 auto; }
 .rq-top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.75rem 1.5rem; margin-bottom: 1rem; }
 .rq-title { font-size: 1.6rem; margin: 0; }
@@ -12532,7 +12532,7 @@ summary { transition: color 0.15s ease; }
 .trend-table .cell-sub { font-size: 0.72rem; color: var(--ui-text-3); }
 .section-title form .form-select { font-weight: 500; }
 
-/* ---- 進捗掲示板: 成果と検討への導線 ---- */
+/* ---- 進捗掲示板: 成果と自動化アイテム登録への導線 ---- */
 .pb-wins { margin: 0.25rem 0 1rem; display: grid; gap: 0.75rem; animation: ui-fade-up 0.55s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
 .pb-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 0.75rem; align-items: stretch; }
 .pb-stat { min-width: 0; }
@@ -12564,7 +12564,7 @@ summary { transition: color 0.15s ease; }
 .fe-cls-dupout { --fe-fill: #ffe5d0; --fe-stroke: #fd7e14; background: #fff3cd; border-color: #fd7e14; border-style: dashed; color: #664d03; transform: skewX(-6deg); }
 .fe-cls-dupout .fe-text { transform: skewX(6deg); }
 
-/* ---- 自動化を検討: 業務の選択・月次アンケートからの続き・AI との聞き取り ---- */
+/* ---- 自動化アイテム登録: 業務の選択・月次アンケートからの続き・AI との聞き取り ---- */
 .rq-lead { color: var(--ui-text-2); margin: 0.25rem 0 0; max-width: 46rem; }
 .rq-sec-sub { margin-left: auto; font-size: 0.85rem; color: var(--ui-text-2); }
 .rq-registered { display: flex; flex-direction: column; gap: 0.25rem; margin-bottom: 0.75rem; }
@@ -12648,7 +12648,7 @@ summary { transition: color 0.15s ease; }
 }
 
 ''',
-    'survey.js': r'''// 自動化を検討: AI と会話しながら手順を聞き取り、流れ図がその場でできていく
+    'survey.js': r'''// 自動化アイテム登録: AI と会話しながら手順を聞き取り、流れ図がその場でできていく
 (function () {
   var O = JSON.parse(document.getElementById("rq-options").textContent);
   var S = JSON.parse(document.getElementById("rq-state").textContent);
@@ -12869,7 +12869,7 @@ summary { transition: color 0.15s ease; }
   }
   function empNow() { return empInput.value.trim(); }
 
-  // ---------- 2. 検討する業務（AI の聞き取り） ----------
+  // ---------- 2. 登録する業務（AI の聞き取り） ----------
   var pickBox = $("rq-pick"), intakeBox = $("rq-intake"), finalBox = $("rq-final"), resultBox = $("rq-result");
   var msgBox = $("rq-messages"), chipBox = $("rq-chips"), input = $("rq-input"), flowBox = $("rq-flow"), stepsBox = $("rq-steps");
   var titleInput = $("rq-title"), bulkBox = $("rq-bulk"), bulkText = $("rq-bulk-text");
@@ -13302,7 +13302,7 @@ summary { transition: color 0.15s ease; }
     nb.innerHTML = "";
     if (nextTask) {
       nb.appendChild(el("i", "bi bi-arrow-right-circle"));
-      nb.appendChild(document.createTextNode(" 次の業務「" + nextTask + "」を検討する"));
+      nb.appendChild(document.createTextNode(" 次の業務「" + nextTask + "」を登録する"));
       nb.dataset.task = nextTask;
     }
   }
