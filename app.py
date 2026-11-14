@@ -613,6 +613,7 @@ class Employee(db.Model):
     email = db.Column(db.String(200), default="")
     active = db.Column(db.Boolean, default=True)
     excluded_at = db.Column(db.DateTime, nullable=True)
+    excluded_spans = db.Column(db.Text, default="")
     source = db.Column(db.String(20), default="csv")
     is_demo = db.Column(db.Boolean, default=False)
     updated_at = db.Column(db.DateTime, default=datetime.now, onupdate=datetime.now)
@@ -699,6 +700,7 @@ _ADDED_COLUMNS = {
         "work_pattern": "VARCHAR(20) DEFAULT ''",
         "created_at": "DATETIME",
         "excluded_at": "DATETIME",
+        "excluded_spans": "TEXT DEFAULT ''",
     },
     "monthly_responses": {
         "survey_id": "INTEGER",
@@ -1140,8 +1142,8 @@ def person_key(emp_id, name=""):
     key = emp_key(emp_id)
     return ("id", key) if key else ("name", (name or "").strip())
 
-def answered_people():
-    excluded = {emp_key(e) for (e,) in db.session.query(Employee.emp_id).filter_by(active=False).all()}
+def answered_people(include_excluded=False):
+    excluded = set() if include_excluded else {emp_key(e) for (e,) in db.session.query(Employee.emp_id).filter_by(active=False).all()}
     people = OrderedDict()
 
     def person(emp_id, name):
@@ -1222,14 +1224,14 @@ def _team_touched(t):
 def _accompanied(t):
     return t.assignment == "自主改善" and (t.stage_index > 0 or _team_touched(t))
 
-def dx_people(workplace_id=None, wish=None):
+def dx_people(workplace_id=None, wish=None, include_excluded=False):
     names = {emp_key(e.emp_id): e.name for e in Employee.query.all() if e.name}
     places = {w.id: w for w in Workplace.query.all()}
     wish_rank = {opt: i for i, opt in enumerate(C.DX_WISH_OPTIONS)}
     stance_rank = {opt: i for i, opt in enumerate(C.STANCE_OPTIONS)}
     since = stance_since()
     rows = []
-    for p in answered_people().values():
+    for p in answered_people(include_excluded).values():
         r, tasks, monthly = p["respondent"], p["tasks"], p["monthly"]
         latest = monthly[0] if monthly else None
         checked = [t for t in tasks if t.self_improve in C.SELF_IMPROVE_POSITIVE]
@@ -1362,7 +1364,7 @@ def suggest_actions(limit=10):
                 "kind": "人材育成",
                 "title": f"教育テーマ候補: {skill}（学びたい人 {n} 人）",
                 "detail": "自主改善希望者の業務を題材にした実践型の勉強会を計画してください。",
-                "url": ("people.index", {}),
+                "url": ("admin.employees", {"learn": skill}),
             }
         )
 
@@ -1394,31 +1396,70 @@ def member_rows():
         p = _period_of(created)
         if p and (key not in first_task or p < first_task[key]):
             first_task[key] = p
-    saved = {emp_key(x) for (x,) in db.session.query(Respondent.emp_id).all()}
+    first_resp = {}
+    for r in Respondent.query.order_by(Respondent.id).all():
+        first_resp.setdefault(emp_key(r.emp_id), r)
     rows = []
     for e in Employee.query.order_by(Employee.emp_id).all():
         key = emp_key(e.emp_id)
         periods = answered.get(key, set())
         starts = [p for p in (_period_of(e.created_at), min(periods) if periods else None, first_task.get(key)) if p]
+        resp = first_resp.get(key)
+        place = resp if resp is not None and resp.workplace_id else e
         rows.append({"emp": e, "answered": periods, "since": min(starts) if starts else None, "considered": considered.get(key, 0),
-                     "deletable": not periods and key not in saved})
+                     "deletable": not periods and key not in first_resp,
+                     "workplace": place.workplace.name if place.workplace is not None else "", "work_pattern": place.work_pattern or ""})
     return rows
 
 def member_periods():
     periods = {x.period for x in MonthlySurvey.query.all()} | {p for (p,) in db.session.query(MonthlyResponse.period).distinct().all()}
     return sorted(p for p in periods if p and p <= current_period())
 
+def exclusion_spans(emp):
+    try:
+        raw = json.loads(emp.excluded_spans or "[]")
+    except (TypeError, ValueError):
+        raw = []
+    spans = [(x[0], x[1]) for x in raw if isinstance(x, list) and len(x) == 2 and all(isinstance(v, str) for v in x) and x[0] < x[1]] if isinstance(raw, list) else []
+    if emp.active is False:
+        spans.append((_period_of(emp.excluded_at) or "", None))
+    return spans
+
+def _merge_spans(spans):
+    out = []
+    for start, end in sorted((a, b) for a, b in spans if b is not None and a < b):
+        if out and start <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], end)
+        else:
+            out.append([start, end])
+    return out
+
+def set_member_excluded(emp, excluded, now=None):
+    now = now or datetime.now()
+    if excluded and emp.active is not False:
+        emp.active, emp.excluded_at = False, now
+    elif not excluded and emp.active is False:
+        start, end = _period_of(emp.excluded_at) or "", _period_of(now)
+        if start < end:
+            emp.excluded_spans = json.dumps(_merge_spans(exclusion_spans(emp)[:-1] + [(start, end)]))
+        emp.active, emp.excluded_at = True, None
+
 def member_in(emp, period):
-    if emp.active:
-        return True
-    return emp.excluded_at is not None and period < _period_of(emp.excluded_at)
+    return not any(start <= period and (end is None or period < end) for start, end in exclusion_spans(emp))
+
+def member_status(row, period):
+    if row["since"] is not None and period < row["since"]:
+        return "before"
+    if not member_in(row["emp"], period):
+        return "out"
+    return "yes" if period in row["answered"] else "no"
 
 def member_stats(rows, periods):
     stats = {}
     for p in periods:
-        members = [r for r in rows if member_in(r["emp"], p) and (r["since"] is None or r["since"] <= p)]
-        answered = len([r for r in members if p in r["answered"]])
-        stats[p] = {"members": len(members), "answered": answered, "rate": (answered / len(members) * 100.0) if members else None}
+        marks = [member_status(r, p) for r in rows]
+        members, answered = marks.count("yes") + marks.count("no"), marks.count("yes")
+        stats[p] = {"members": members, "answered": answered, "rate": (answered / members * 100.0) if members else None}
     return stats
 
 def monthly_summary():
@@ -4554,6 +4595,8 @@ def _merge_employee_rows(rows, spelling):
         excluded = [e.excluded_at for e in rows if e.active is False]
         keep.active = not excluded
         keep.excluded_at = None if keep.active or None in excluded else min(excluded)
+        closed = [x for e in rows for x in exclusion_spans(e) if x[1] is not None]
+        keep.excluded_spans = json.dumps(_merge_spans(closed)) if closed else ""
         keep.is_demo = all(e.is_demo for e in rows)
         for field in ("department", "email", "work_pattern", "workplace_id"):
             if not getattr(keep, field):
@@ -6559,10 +6602,10 @@ bp_people = Blueprint("people", __name__, url_prefix="/people")
 
 @bp_people.route("/")
 def index():
-    workplace_id = request.args.get("workplace_id", type=int)
-    wish = (request.args.get("wish") or "").strip()
-    everyone = dx_people()
-    people = dx_people(workplace_id=workplace_id, wish=wish or None) if (workplace_id or wish) else everyone
+    args = {k: v for k, v in (("wish", (request.args.get("wish") or "").strip()), ("workplace_id", request.args.get("workplace_id", type=int))) if v}
+    return redirect(url_for("admin.employees", **args))
+
+def people_summary(everyone):
     have, learn = skills_summary(everyone)
     latest_period = max((p["latest_period"] for p in everyone if p["latest_period"]), default="")
     in_latest = [p["monthly"][0] for p in everyone if latest_period and p["latest_period"] == latest_period]
@@ -6579,16 +6622,7 @@ def index():
     stance_options = next((q["options"] for q in C.MONTHLY_CORE_QUESTIONS if q["key"] == "stance"), [])
     wish_counts = [("検討: " + opt, len([p for p in everyone if p["wish"] == opt])) for opt in C.DX_WISH_OPTIONS]
     wish_counts += [("月次: " + opt, latest_stances.get(opt, 0)) for opt in stance_options]
-    return render_template(
-        "people/index.html",
-        people=people,
-        summary=summary,
-        wish_counts=wish_counts,
-        have=have.most_common(),
-        learn=learn.most_common(),
-        workplaces=_workplaces(),
-        args={"workplace_id": workplace_id, "wish": wish},
-    )
+    return summary, wish_counts, have, learn, stance_options
 
 # ===== 画面: 管理 =====
 bp_admin = Blueprint("admin", __name__, url_prefix="/admin")
@@ -6752,18 +6786,39 @@ def delete_domain(domain_id):
 def _member_payload():
     rows = member_rows()
     periods = member_periods()
+    for r in rows:
+        r["cells"] = [(p, member_status(r, p)) for p in periods]
     return rows, periods, member_stats(rows, periods), len([r for r in rows if r["emp"].active])
 
 @bp_admin.route("/employees")
 def employees():
     rows, periods, stats, active = _member_payload()
+    dx_all = dx_people(include_excluded=True)
+    by_key = {p["key"][1]: p for p in dx_all if p["key"][0] == "id"}
+    excluded = {emp_key(r["emp"].emp_id) for r in rows if not r["emp"].active}
+    everyone = [p for p in dx_all if not (p["key"][0] == "id" and p["key"][1] in excluded)]
+    for r in rows:
+        r["dx"] = by_key.get(emp_key(r["emp"].emp_id))
+    summary, wish_counts, have, learn, stance_options = people_summary(everyone)
+    names = [w.name for w in _workplaces()]
+    used = {r["workplace"] for r in rows if r["workplace"]}
+    wp = db.session.get(Workplace, request.args.get("workplace_id", type=int) or 0)
     return render_template(
         "admin/employees.html",
         rows=rows,
         periods=periods,
         stats=stats,
         active_count=active,
-        answered_count=len(answered_people()),
+        summary=summary,
+        wish_counts=wish_counts,
+        have=have.most_common(),
+        learn=learn.most_common(),
+        stance_options=stance_options,
+        stance_rank={opt: i for i, opt in enumerate(stance_options)},
+        member_workplaces=[n for n in names if n in used] + sorted(used - set(names)),
+        skill_options=sorted({x for p in dx_all for x in p["skills"]}),
+        learn_options=sorted({x for p in dx_all for x in p["learn"]}),
+        initial={"wish": (request.args.get("wish") or "").strip(), "wp": wp.name if wp is not None else "", "learn": (request.args.get("learn") or "").strip()},
         ldap_status=ldap_status_text(),
         workplaces=_workplaces(),
         demo_real=demo_ids_with_real_data(),
@@ -6808,17 +6863,13 @@ def add_employee():
 def toggle_employee(employee_id):
     e = _get_or_404(Employee, employee_id)
     data = request.get_json(silent=True) if request.is_json else None
-    was_active = bool(e.active)
-    e.active = (not data["excluded"]) if isinstance(data, dict) and "excluded" in data else not e.active
-    if e.active:
-        e.excluded_at = None
-    elif was_active:
-        e.excluded_at = datetime.now()
+    set_member_excluded(e, bool(data["excluded"]) if isinstance(data, dict) and "excluded" in data else e.active is not False)
     db.session.commit()
     if _wants_json():
         rows, periods, stats, active = _member_payload()
+        row = next((r for r in rows if r["emp"].id == e.id), None)
         return jsonify({"success": True, "active": e.active, "active_count": active, "excluded_count": len(rows) - active,
-                        "stats": [dict(period=p, **stats[p]) for p in periods]})
+                        "stats": [dict(period=p, **stats[p]) for p in periods], "cells": [st for _p, st in row["cells"]] if row else []})
     return redirect(url_for("admin.employees"))
 
 @bp_admin.post("/employees/<int:employee_id>/delete")
@@ -7364,53 +7415,178 @@ TEMPLATES = {
     'admin/employees.html': r'''{% extends "base.html" %}
 {% block title %}対象者一覧{% endblock %}
 {% block content %}
-<div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-2">
+{% macro member_mark(st, ans) %}{% if st == 'yes' %}<i class="bi bi-check-lg member-yes" title="回答あり"></i>{% elif st == 'out' %}<span class="member-out" title="月末時点で対象外{{ '（回答はありますが数えません）' if ans else '' }}">対象外</span>{% elif st == 'before' %}<span class="member-before" title="対象者になる前の月">－</span>{% endif %}{% endmacro %}
+<div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">
   <div>
     <h2 class="mb-1">対象者一覧</h2>
-    <p class="text-muted mb-0">月次アンケートか「自動化を検討」に一度でも回答した人が、ユーザーIDごとに1行で自動で載ります。退職や他部門への異動で回答率の分母から外す人は「対象外」にチェックします。</p>
-    <p class="small text-muted mb-0">回答した人 {{ answered_count }} 人（業務を1件以上登録したか、月次アンケートに回答した人。対象外は除く）。</p>
+    <p class="text-muted mb-0">月次アンケートか「自動化を検討」に一度でも回答した人が、ユーザーIDごとに1行で自動で載ります。月ごとの回答と、一人ひとりの意欲（「自動化を検討」の「スキルを身につけながら、一緒にやってみたい」・使える技術・学びたい技術、月次アンケートの改善の進め方）をまとめて見られます。退職や他部門への異動で回答率の分母から外す人は「対象外」にチェックします。</p>
   </div>
   <div class="d-flex gap-2">
     <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('monthly.results') }}">月次集計</a>
-    <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('admin.export_employees') }}">CSV</a>
+    <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('admin.export_employees') }}">CSV（対象者）</a>
+    <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('admin.export_respondents') }}">CSV（意欲・技術）</a>
   </div>
+</div>
+
+<div class="row g-3 mb-3">
+  <div class="col-6 col-lg-3"><div class="card kpi-card h-100"><div class="card-body py-2">
+    <div class="kpi-label">回答した人</div>
+    <div class="kpi-value fs-3">{{ summary.total }}<span class="fs-6 text-muted"> 人</span></div>
+    <div class="kpi-sub">業務を1件以上登録したか、月次アンケートに回答した人（対象外は除く）</div>
+  </div></div></div>
+  <div class="col-6 col-lg-3"><div class="card kpi-card h-100"><div class="card-body py-2">
+    <div class="kpi-label">自分で改善したい</div>
+    <div class="kpi-value fs-3">{{ summary.positive }}<span class="fs-6 text-muted"> 人</span></div>
+    <div class="kpi-sub">検討での「一緒にやってみたい」のチェックと、直近6か月の月次の進め方（「自分で取り組みたい」「学びながら改善チームと一緒に取り組みたい」）のうち、新しいほうで判断（チェックなしは意思表示なしとして扱う）。伴走している「自主改善」の案件がある人も含む</div>
+    {% if summary.positive_by_pattern %}<div class="kpi-sub">{% for k, v in summary.positive_by_pattern.items() %}{{ k }} {{ v }}人{% if not loop.last %}／{% endif %}{% endfor %}</div>{% endif %}
+  </div></div></div>
+  <div class="col-6 col-lg-3"><div class="card kpi-card h-100"><div class="card-body py-2">
+    <div class="kpi-label">直近の月次で「自分で・一緒に取り組みたい」</div>
+    <div class="kpi-value fs-3">{{ summary.self_now }}<span class="fs-6 text-muted"> 人</span></div>
+    <div class="kpi-sub">{{ summary.period_label }}</div>
+  </div></div></div>
+  <div class="col-6 col-lg-3"><div class="card kpi-card h-100"><div class="card-body py-2">
+    <div class="kpi-label">学びたい技術を挙げた人</div>
+    <div class="kpi-value fs-3">{{ summary.learners }}<span class="fs-6 text-muted"> 人</span></div>
+    <div class="kpi-sub">勉強会・伴走の対象（下の「学びたい技術」）</div>
+  </div></div></div>
 </div>
 
 <div class="card mb-3"><div class="card-body">
   <div class="d-flex flex-wrap justify-content-between align-items-baseline gap-2 mb-2">
     <h5 class="card-title mb-0">対象者 <span id="member-active">{{ active_count }}</span> 人 <span class="small text-muted fw-normal">（対象外 <span id="member-excluded">{{ rows|length - active_count }}</span> 人）</span></h5>
-    <span class="small text-muted"><i class="bi bi-check-lg member-yes"></i> その月に回答　<span class="member-before">－</span> 対象者になる前の月（初めて回答した月か、ここで追加した月より前。その月の分母に入りません）</span>
+    <span class="small text-muted"><i class="bi bi-check-lg member-yes"></i> その月に回答　<span class="member-out">対象外</span> 月末時点で対象外　<span class="member-before">－</span> 対象者になる前の月（初めて回答した月か、ここで追加した月より前）。「対象外」と「－」の月は分母に入りません</span>
   </div>
   {% if rows %}
+  <div class="d-flex flex-wrap align-items-center gap-3 mb-2 small">
+    <span class="text-muted">列名を押すと並べ替え（もう一度押すと逆順）、見出しの下の欄で列ごとに絞り込めます。</span>
+    <span id="member-shown" class="fw-semibold"></span>
+    <button type="button" class="btn btn-link btn-sm p-0 d-none" id="member-clear">絞り込みを解除</button>
+  </div>
   <div class="member-wrap">
-  <table class="table table-sm align-middle mb-0 member-table">
-    <thead><tr>
-      <th class="text-center">対象外</th><th>ユーザーID</th><th>氏名</th><th class="text-end">自動化を検討</th>
-      {% for p in periods %}<th class="text-center member-month">{{ p[:4] }}<br>{{ p[5:]|int }}月</th>{% endfor %}
-    </tr></thead>
+  <table class="table table-sm align-middle mb-0 member-table" id="member-table">
+    <thead>
+    <tr>
+      <th class="text-center" data-col="excluded" aria-sort="none"><button type="button" class="member-sort">対象外</button></th>
+      <th data-col="id" aria-sort="none"><button type="button" class="member-sort">ユーザーID</button></th>
+      <th data-col="name" aria-sort="none"><button type="button" class="member-sort">氏名</button></th>
+      <th data-col="wp" aria-sort="none"><button type="button" class="member-sort">Gr・役割</button></th>
+      <th data-col="pat" aria-sort="none"><button type="button" class="member-sort">勤務形態</button></th>
+      <th data-col="wish" aria-sort="none"><button type="button" class="member-sort">意欲（自動化を検討）</button></th>
+      <th data-col="stance" aria-sort="none"><button type="button" class="member-sort">月次：改善の進め方</button></th>
+      <th data-col="skills" aria-sort="none"><button type="button" class="member-sort">使える技術</button></th>
+      <th data-col="learn" aria-sort="none"><button type="button" class="member-sort">学びたい技術</button></th>
+      <th data-col="tasks" aria-sort="none"><button type="button" class="member-sort">自動化を検討</button></th>
+      {% for p in periods %}<th class="text-center member-month" data-col="m{{ loop.index0 }}" aria-sort="none"><button type="button" class="member-sort">{{ p[:4] }}<br>{{ p[5:]|int }}月</button></th>{% endfor %}
+    </tr>
+    <tr class="member-filters">
+      <th><select class="form-select form-select-sm" data-filter="excluded" aria-label="対象外で絞り込む"><option value="">すべて</option><option value="1">対象外</option><option value="0">対象</option></select></th>
+      <th><input type="search" class="form-control form-control-sm" data-filter="id" placeholder="含む" aria-label="ユーザーIDで絞り込む"></th>
+      <th><input type="search" class="form-control form-control-sm" data-filter="name" placeholder="含む" aria-label="氏名で絞り込む"></th>
+      <th><select class="form-select form-select-sm" data-filter="wp" aria-label="Gr・役割で絞り込む"><option value="">すべて</option>{% for w in member_workplaces %}<option value="{{ w }}" {% if initial.wp == w %}selected{% endif %}>{{ w }}</option>{% endfor %}<option value="-">（未設定）</option></select></th>
+      <th><select class="form-select form-select-sm" data-filter="pat" aria-label="勤務形態で絞り込む"><option value="">すべて</option>{% for w in C.WORK_PATTERNS %}<option value="{{ w }}">{{ w }}</option>{% endfor %}<option value="-">（未設定）</option></select></th>
+      <th><select class="form-select form-select-sm" data-filter="wish" aria-label="意欲で絞り込む"><option value="">すべて</option><option value="positive" {% if initial.wish == 'positive' %}selected{% endif %}>自分で改善したい人</option>{% for opt in C.DX_WISH_OPTIONS %}<option value="{{ opt }}" {% if initial.wish == opt %}selected{% endif %}>{{ opt }}</option>{% endfor %}<option value="-">（なし）</option></select></th>
+      <th><select class="form-select form-select-sm" data-filter="stance" aria-label="改善の進め方で絞り込む"><option value="">すべて</option>{% for opt in stance_options %}<option value="{{ opt }}">{{ opt }}</option>{% endfor %}<option value="old">{{ C.STANCE_MONTHS }}か月より前</option><option value="-">（回答なし）</option></select></th>
+      <th><select class="form-select form-select-sm" data-filter="skills" aria-label="使える技術で絞り込む"><option value="">すべて</option>{% for s in skill_options %}<option value="{{ s }}">{{ s }}</option>{% endfor %}<option value="-">（なし）</option></select></th>
+      <th><select class="form-select form-select-sm" data-filter="learn" aria-label="学びたい技術で絞り込む"><option value="">すべて</option>{% for s in learn_options %}<option value="{{ s }}" {% if initial.learn == s %}selected{% endif %}>{{ s }}</option>{% endfor %}<option value="-">（なし）</option></select></th>
+      <th><select class="form-select form-select-sm" data-filter="tasks" aria-label="自動化を検討で絞り込む"><option value="">すべて</option><option value="0">0 回</option><option value="1">1 回以上</option><option value="{{ C.BUILD_STAGE_SELF }}">{{ C.BUILD_STAGE_SELF }}あり</option><option value="希望">希望あり</option></select></th>
+      {% for p in periods %}<th><select class="form-select form-select-sm" data-filter="m{{ loop.index0 }}" aria-label="{{ p[:4] }}年{{ p[5:]|int }}月で絞り込む"><option value="">すべて</option><option value="yes">回答</option><option value="no">未回答</option><option value="out">対象外</option><option value="before">対象前</option></select></th>{% endfor %}
+    </tr>
+    </thead>
     <tbody>
-    {% for r in rows %}
-    <tr class="{% if not r.emp.active %}is-excluded{% endif %}">
-      <td class="text-center"><input class="form-check-input member-exclude" type="checkbox" data-url="{{ url_for('admin.toggle_employee', employee_id=r.emp.id) }}" {% if not r.emp.active %}checked{% endif %} aria-label="{{ r.emp.emp_id }} を対象外にする"></td>
-      <td>{{ r.emp.emp_id }}{% set dr = demo_real.get(C.emp_key(r.emp.emp_id)) %}{% if dr %} <span class="badge bg-warning-subtle text-warning-emphasis" title="{{ dr.detail }}。デモデータを消してもこの人は残ります。回答率に入れないときは対象外にしてください">{{ dr.label }}</span>{% endif %}</td>
-      <td>{{ r.emp.name or '' }}{% if r.deletable %}
+    {% for r in rows %}{% set d = r.dx %}
+    <tr class="{% if not r.emp.active %}is-excluded{% endif %}" data-i="{{ loop.index0 }}" data-excluded="{{ '0' if r.emp.active else '1' }}">
+      <td class="text-center" data-sort="{{ '0' if r.emp.active else '1' }}"><input class="form-check-input member-exclude" type="checkbox" data-url="{{ url_for('admin.toggle_employee', employee_id=r.emp.id) }}" {% if not r.emp.active %}checked{% endif %} aria-label="{{ r.emp.emp_id }} を対象外にする"></td>
+      <td data-sort="{{ r.emp.emp_id }}">{{ r.emp.emp_id }}{% set dr = demo_real.get(C.emp_key(r.emp.emp_id)) %}{% if dr %} <span class="badge bg-warning-subtle text-warning-emphasis" title="{{ dr.detail }}。デモデータを消してもこの人は残ります。回答率に入れないときは対象外にしてください">{{ dr.label }}</span>{% endif %}</td>
+      <td data-sort="{{ r.emp.name or '' }}">{{ r.emp.name or '' }}{% if r.deletable %}
         <form method="post" action="{{ url_for('admin.delete_employee', employee_id=r.emp.id) }}" class="d-inline" data-confirm="{{ r.emp.emp_id }} を対象者一覧から削除しますか？（まだ回答のない人だけ削除できます）"><button class="btn btn-link btn-sm text-danger p-0 ms-1">削除</button></form>{% endif %}</td>
-      <td class="text-end">{{ r.considered }} 回</td>
-      {% for p in periods %}<td class="text-center member-cell">{% if p in r.answered %}<i class="bi bi-check-lg member-yes" title="回答あり"></i>{% elif r.since and p < r.since %}<span class="member-before">－</span>{% endif %}</td>{% endfor %}
+      <td class="small" data-sort="{{ r.workplace }}">{{ r.workplace or '－' }}</td>
+      <td class="small" data-sort="{{ r.work_pattern }}">{{ r.work_pattern or '－' }}</td>
+      {% set wr = (0 if d.wish_positive else (1 if d.wish == C.SELF_IMPROVE_YES else (2 if d.wish else 9))) if d else 9 %}
+      <td class="small" data-sort="{{ wr }}" data-wish="{{ d.wish if d else '' }}" data-positive="{{ '1' if d and d.positive else '0' }}">
+        {% if d and d.wish %}<span class="badge {{ 'text-bg-success' if d.wish_positive else ('text-bg-secondary' if d.wish_note else 'text-bg-light border') }}">{{ d.wish }}</span>{% if d.wish_note %}<div class="text-muted">{{ d.wish_note }}{% if d.wish_hint %} <span class="badge bg-warning-subtle text-warning-emphasis">{{ d.wish_hint }}</span>{% endif %}</div>{% endif %}{% else %}<span class="text-muted">－</span>{% endif %}
+      </td>
+      {% set sr = (stance_rank.get(d.stance_latest, 3) + (5 if d.stance_old else 0)) if d and d.stance_latest else 9 %}
+      <td class="small" data-sort="{{ sr }}" data-stance="{{ d.stance_latest if d else '' }}" data-old="{{ '1' if d and d.stance_old else '0' }}">
+        {% if d and d.stance_latest %}
+        <span class="badge {{ 'text-bg-secondary' if d.stance_old else ('text-bg-success' if d.stance_latest in C.MONTHLY_KPI['self_positive'] else ('text-bg-primary' if d.stance_latest in C.MONTHLY_KPI['ask_positive'] else 'text-bg-light border')) }}">{{ d.stance_latest }}</span>
+        <div class="text-muted">{{ d.stance_label }}{% if d.stance_old %}（{{ C.STANCE_MONTHS }}か月より前）{% endif %}</div>
+        {% elif d and d.monthly %}<span class="text-muted">進め方の回答なし</span>
+        {% else %}<span class="text-muted">－</span>{% endif %}
+        {% if d and d.monthly %}<div class="text-muted">自分で／一緒に {{ d.self_positive_count }}回（回答 {{ d.monthly|length }} 回中）</div>{% endif %}
+      </td>
+      <td class="small member-wide" data-sort="{{ d.skills|join('・') if d else '' }}" data-list="{{ d.skills|join('|') if d else '' }}">{{ (d.skills|join('・') or (C.SKILL_NONE if d.skills_none else '－')) if d else '－' }}</td>
+      <td class="small member-wide" data-sort="{{ d.learn|join('・') if d else '' }}" data-list="{{ d.learn|join('|') if d else '' }}">{{ (d.learn|join('・') or (C.SKILL_NONE if d.learn_none else '－')) if d else '－' }}</td>
+      <td class="small member-tasks" data-sort="{{ r.considered }}" data-targets="{{ d.target_tasks|map(attribute='label')|join('|') if d else '' }}">
+        <div>{{ r.considered }} 回</div>
+        {% if d %}{% for x in d.target_tasks %}<div><a href="{{ url_for('cases.detail', task_id=x.task.id) }}">{{ x.task.name }}</a> <span class="badge {{ 'text-bg-primary' if x.label == C.BUILD_STAGE_SELF else 'text-bg-light border' }}">{{ x.label }}</span></div>{% endfor %}
+        {% if not d.task_count and d.monthly_wants %}
+        <div class="text-muted">業務の登録なし。{{ d.monthly_wants_label }}の月次で挙げたなくしたい業務:</div>
+        <div>{{ d.monthly_wants|join('・') }}</div>
+        <a href="{{ url_for('survey.start', emp=d.emp_id, src='monthly', m=d.monthly_wants_id) }}">「自動化を検討」で流れを整理する</a>
+        {% endif %}{% endif %}
+      </td>
+      {% for p, st in r.cells %}<td class="text-center member-cell" data-st="{{ st }}"{% if p in r.answered %} data-ans="1"{% endif %}>{{ member_mark(st, p in r.answered) }}</td>{% endfor %}
     </tr>
     {% endfor %}
     </tbody>
     <tfoot><tr>
-      <th colspan="4" class="text-end">回答 ／ 対象（回答率）</th>
-      {% for p in periods %}{% set st = stats[p] %}<td class="text-center member-stat" data-period="{{ p }}">{{ st.answered }}／{{ st.members }}{% if st.rate is not none %}<br>{{ '%.0f'|format(st.rate) }}%{% endif %}</td>{% endfor %}
+      <th colspan="10" class="text-end">回答 ／ 対象（回答率）<span class="d-block fw-normal text-muted" id="member-stat-note"></span></th>
+      {% for p in periods %}{% set st = stats[p] %}<td class="text-center member-stat" data-period="{{ p }}" data-m="{{ loop.index0 }}">{{ st.answered }}／{{ st.members }}{% if st.rate is not none %}<br>{{ '%.0f'|format(st.rate) }}%{% endif %}</td>{% endfor %}
     </tr></tfoot>
   </table>
   </div>
-  <p class="small text-muted mt-2 mb-0">下の行の「回答」は対象者（対象外を除く）のうちその月に回答した人の数で、月次集計・ダッシュボードの回答率と同じ数え方です。対象外の人は回答できず、対象外にした月からは回答率に入りません（それより前の月はそのまま数えます）。削除できるのは、まだ回答も「自動化を検討」の登録もない人だけです。</p>
+  <p class="small text-muted mt-2 mb-0">下の行の「回答 ／ 対象」は、その月に回答した対象者の数と対象者の数で、月次集計・ダッシュボードの回答率と同じ数え方です（絞り込んだときは、表示している人だけで数えます）。月末時点で「対象外」にチェックしている人は、その月の分母にも分子にも入りません（今月は今のチェックで数えます）。チェックを外すと外した月から分母に戻り、それより前の月は月末時点の状態のまま残ります。対象外の人は回答できません。削除できるのは、まだ回答も「自動化を検討」の登録もない人だけです。</p>
   {% else %}
   <p class="text-muted mb-0">まだ回答した人がいません。月次アンケートか「自動化を検討」に回答すると、ここに載ります。</p>
   {% endif %}
 </div></div>
+
+<div class="row g-3 mb-3">
+  <div class="col-lg-4">
+    <div class="card h-100"><div class="card-body">
+      <h5 class="card-title">意欲（検討と直近の月次）</h5>
+      {% set maxc = (wish_counts|map(attribute=1)|max) if wish_counts else 1 %}
+      {% for opt, n in wish_counts %}
+      <div class="d-flex align-items-center small mb-1">
+        <div style="width: 15rem">{{ opt }}</div>
+        <div class="progress flex-grow-1" style="height: 14px"><div class="progress-bar" style="width: {{ (n / (maxc or 1) * 100)|round }}%"></div></div>
+        <div style="width: 3rem" class="text-end">{{ n }} 人</div>
+      </div>
+      {% endfor %}
+    </div></div>
+  </div>
+  <div class="col-lg-4">
+    <div class="card h-100"><div class="card-body">
+      <h5 class="card-title">現在使える技術</h5>
+      {% set maxh = (have[0][1] if have else 1) %}
+      {% for skill, n in have %}
+      <div class="d-flex align-items-center small mb-1">
+        <div style="width: 9rem">{{ skill }}</div>
+        <div class="progress flex-grow-1" style="height: 14px"><div class="progress-bar" style="width: {{ (n / maxh * 100)|round }}%"></div></div>
+        <div style="width: 3rem" class="text-end">{{ n }} 人</div>
+      </div>
+      {% else %}
+      <p class="text-muted small mb-0">データなし</p>
+      {% endfor %}
+    </div></div>
+  </div>
+  <div class="col-lg-4">
+    <div class="card h-100"><div class="card-body">
+      <h5 class="card-title">学びたい技術</h5>
+      {% set maxl = (learn[0][1] if learn else 1) %}
+      {% for skill, n in learn %}
+      <div class="d-flex align-items-center small mb-1">
+        <div style="width: 9rem">{{ skill }}</div>
+        <div class="progress flex-grow-1" style="height: 14px"><div class="progress-bar bg-success" style="width: {{ (n / maxl * 100)|round }}%"></div></div>
+        <div style="width: 3rem" class="text-end">{{ n }} 人</div>
+      </div>
+      {% else %}
+      <p class="text-muted small mb-0">データなし</p>
+      {% endfor %}
+    </div></div>
+  </div>
+</div>
 
 <div class="row g-3 mb-3">
   <div class="col-lg-6">
@@ -7460,28 +7636,135 @@ document.getElementById("test-btn").addEventListener("click", async function () 
     msg.textContent = j.found ? ("見つかりました: " + j.emp_id + (j.excluded ? "（対象外。回答できません）" : "")) : "見つかりませんでした";
   } catch (e) { msg.textContent = "照会に失敗しました"; }
 });
-document.querySelectorAll(".member-exclude").forEach(function (box) {
-  box.addEventListener("change", async function () {
-    var row = box.closest("tr");
-    box.disabled = true;
-    try {
-      var r = await fetch(box.dataset.url, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify({ excluded: box.checked }) });
-      var j = await r.json();
-      if (!j.success) throw new Error("failed");
-      row.classList.toggle("is-excluded", box.checked);
-      document.getElementById("member-active").textContent = j.active_count;
-      document.getElementById("member-excluded").textContent = j.excluded_count;
-      j.stats.forEach(function (st) {
-        var cell = document.querySelector('.member-stat[data-period="' + st.period + '"]');
-        if (cell) cell.innerHTML = st.answered + "／" + st.members + (st.rate === null ? "" : "<br>" + Math.round(st.rate) + "%");
-      });
-    } catch (e) {
-      box.checked = !box.checked;
-      alert("保存できませんでした。通信状態を確認してください。");
+(function () {
+  var table = document.getElementById("member-table");
+  if (!table) return;
+  var tbody = table.tBodies[0];
+  var rows = Array.prototype.slice.call(tbody.rows);
+  var FIXED = 10;
+  var COL = { excluded: 0, id: 1, name: 2, wp: 3, pat: 4, wish: 5, stance: 6, skills: 7, learn: 8, tasks: 9 };
+  var NUM = { excluded: true, wish: true, stance: true, tasks: true };
+  var ORDER = { yes: 0, no: 1, out: 2, before: 3 };
+  var sortCol = "", sortDir = 1;
+  var shown = document.getElementById("member-shown"), clearBtn = document.getElementById("member-clear"), statNote = document.getElementById("member-stat-note");
+  var filters = Array.prototype.slice.call(table.querySelectorAll("[data-filter]"));
+  var statCells = Array.prototype.slice.call(table.querySelectorAll(".member-stat"));
+  statCells.forEach(function (c) { c.dataset.orig = c.innerHTML; });
+
+  function cellOf(tr, col) { return col.charAt(0) === "m" ? tr.cells[FIXED + Number(col.slice(1))] : tr.cells[COL[col]]; }
+  function sortValue(tr, col) {
+    var td = cellOf(tr, col);
+    if (!td) return 9;
+    if (col.charAt(0) === "m") return td.dataset.st in ORDER ? ORDER[td.dataset.st] : 9;
+    var v = td.dataset.sort || "";
+    return NUM[col] ? Number(v) || 0 : v;
+  }
+  function compare(a, b) {
+    var x = sortValue(a, sortCol), y = sortValue(b, sortCol), r;
+    if (typeof x === "string") {
+      if (!x !== !y) return x ? -1 : 1;
+      r = x.localeCompare(y, "ja", { numeric: true });
+    } else {
+      r = x - y;
     }
-    box.disabled = false;
+    return r * sortDir || Number(a.dataset.i) - Number(b.dataset.i);
+  }
+  function applySort() {
+    var list = rows.slice();
+    if (sortCol) list.sort(compare);
+    list.forEach(function (tr) { tbody.appendChild(tr); });
+    table.querySelectorAll("thead th[data-col]").forEach(function (th) {
+      th.setAttribute("aria-sort", th.dataset.col === sortCol ? (sortDir > 0 ? "ascending" : "descending") : "none");
+    });
+  }
+  table.querySelectorAll(".member-sort").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var col = btn.closest("th").dataset.col;
+      if (sortCol === col) { sortDir = -sortDir; } else { sortCol = col; sortDir = 1; }
+      applySort();
+    });
   });
-});
+  function hasToken(list, v) { return ("|" + (list || "") + "|").indexOf("|" + v + "|") >= 0; }
+  function matches(tr, f) {
+    var v = f.value.trim(), col = f.dataset.filter, td = cellOf(tr, col);
+    if (!v || !td) return true;
+    if (col.charAt(0) === "m") return td.dataset.st === v;
+    if (col === "excluded") return tr.dataset.excluded === v;
+    if (col === "id" || col === "name") return (td.dataset.sort || "").toLowerCase().indexOf(v.toLowerCase()) >= 0;
+    if (col === "wp" || col === "pat") return v === "-" ? !td.dataset.sort : td.dataset.sort === v;
+    if (col === "wish") return v === "positive" ? td.dataset.positive === "1" : (v === "-" ? !td.dataset.wish : td.dataset.wish === v);
+    if (col === "stance") return v === "old" ? td.dataset.old === "1" : (v === "-" ? !td.dataset.stance : td.dataset.stance === v);
+    if (col === "skills" || col === "learn") return v === "-" ? !td.dataset.list : hasToken(td.dataset.list, v);
+    if (col === "tasks") return v === "0" ? Number(td.dataset.sort) === 0 : (v === "1" ? Number(td.dataset.sort) > 0 : hasToken(td.dataset.targets, v));
+    return true;
+  }
+  function filtering() { return filters.some(function (f) { return f.value.trim() !== ""; }); }
+  function updateStats() {
+    var on = filtering();
+    statCells.forEach(function (c) {
+      if (!on) { c.innerHTML = c.dataset.orig; return; }
+      var i = Number(c.dataset.m), members = 0, answered = 0;
+      rows.forEach(function (tr) {
+        var td = tr.cells[FIXED + i];
+        if (tr.hidden || !td) return;
+        if (td.dataset.st === "yes") { members++; answered++; } else if (td.dataset.st === "no") { members++; }
+      });
+      c.innerHTML = answered + "／" + members + (members ? "<br>" + Math.round(answered / members * 100) + "%" : "");
+    });
+    statNote.textContent = on ? "表示している人だけで数えています" : "";
+  }
+  function applyFilter() {
+    var n = 0, on = filtering();
+    rows.forEach(function (tr) {
+      var ok = filters.every(function (f) { return matches(tr, f); });
+      tr.hidden = !ok;
+      if (ok) n++;
+    });
+    shown.textContent = on ? "表示 " + n + " 人 ／ " + rows.length + " 人" : "";
+    clearBtn.classList.toggle("d-none", !on);
+    updateStats();
+  }
+  filters.forEach(function (f) { f.addEventListener(f.tagName === "SELECT" ? "change" : "input", applyFilter); });
+  clearBtn.addEventListener("click", function () { filters.forEach(function (f) { f.value = ""; }); applyFilter(); });
+  function markHtml(st, ans) {
+    if (st === "yes") return '<i class="bi bi-check-lg member-yes" title="回答あり"></i>';
+    if (st === "out") return '<span class="member-out" title="月末時点で対象外' + (ans ? "（回答はありますが数えません）" : "") + '">対象外</span>';
+    if (st === "before") return '<span class="member-before" title="対象者になる前の月">－</span>';
+    return "";
+  }
+  table.querySelectorAll(".member-exclude").forEach(function (box) {
+    box.addEventListener("change", async function () {
+      var tr = box.closest("tr");
+      box.disabled = true;
+      try {
+        var r = await fetch(box.dataset.url, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify({ excluded: box.checked }) });
+        var j = await r.json();
+        if (!j.success) throw new Error("failed");
+        tr.classList.toggle("is-excluded", box.checked);
+        tr.dataset.excluded = box.checked ? "1" : "0";
+        tr.cells[COL.excluded].dataset.sort = tr.dataset.excluded;
+        (j.cells || []).forEach(function (st, i) {
+          var td = tr.cells[FIXED + i];
+          if (!td) return;
+          td.dataset.st = st;
+          td.innerHTML = markHtml(st, td.dataset.ans === "1");
+        });
+        document.getElementById("member-active").textContent = j.active_count;
+        document.getElementById("member-excluded").textContent = j.excluded_count;
+        (j.stats || []).forEach(function (st) {
+          var c = table.querySelector('.member-stat[data-period="' + st.period + '"]');
+          if (c) c.dataset.orig = st.answered + "／" + st.members + (st.rate === null ? "" : "<br>" + Math.round(st.rate) + "%");
+        });
+        applyFilter();
+      } catch (e) {
+        box.checked = !box.checked;
+        alert("保存できませんでした。通信状態を確認してください。");
+      }
+      box.disabled = false;
+    });
+  });
+  applyFilter();
+})();
 </script>
 {% endblock %}
 ''',
@@ -7839,7 +8122,6 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
         <li class="nav-item"><a class="nav-link nav-link-admin {% if request.endpoint == 'main.index' %}active{% endif %}" href="{{ url_for('main.index') }}">ダッシュボード</a></li>
         <li class="nav-item"><a class="nav-link nav-link-admin {% if bp == 'cases' %}active{% endif %}" href="{{ url_for('cases.index') }}">改善案件</a></li>
         <li class="nav-item"><a class="nav-link nav-link-admin {% if bp == 'bizmap' %}active{% endif %}" href="{{ url_for('bizmap.index') }}">業務マップ</a></li>
-        <li class="nav-item"><a class="nav-link nav-link-admin {% if bp == 'people' %}active{% endif %}" href="{{ url_for('people.index') }}">DX人財情報</a></li>
         <li class="nav-item"><a class="nav-link nav-link-admin {% if request.endpoint in ('monthly.results', 'monthly.survey_admin') %}active{% endif %}" href="{{ url_for('monthly.results') }}">月次集計</a></li>
         <li class="nav-item"><a class="nav-link nav-link-admin {% if request.endpoint == 'admin.employees' %}active{% endif %}" href="{{ url_for('admin.employees') }}">対象者一覧</a></li>
         <li class="nav-item"><a class="nav-link nav-link-admin {% if bp == 'admin' and request.endpoint != 'admin.employees' %}active{% endif %}" href="{{ url_for('admin.index') }}">管理</a></li>
@@ -9978,150 +10260,6 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
 {% endif %}
 {% endblock %}
 ''',
-    'people/index.html': r'''{% extends "base.html" %}
-{% block title %}DX人財情報{% endblock %}
-{% block content %}
-<h2 class="mb-1">DX人財情報</h2>
-<p class="text-muted">「自動化を検討」で選んだ「スキルを身につけながら、一緒にやってみたい」と使える技術・学びたい技術、月次アンケートの改善の進め方から、一人ひとりの意欲をまとめます。</p>
-
-<div class="row g-3 mb-3">
-  <div class="col-6 col-lg-3"><div class="card kpi-card h-100"><div class="card-body py-2">
-    <div class="kpi-label">回答した人</div>
-    <div class="kpi-value fs-3">{{ summary.total }}<span class="fs-6 text-muted"> 人</span></div>
-    <div class="kpi-sub">業務を1件以上登録したか、月次アンケートに回答した人（対象外は除く）</div>
-  </div></div></div>
-  <div class="col-6 col-lg-3"><div class="card kpi-card h-100"><div class="card-body py-2">
-    <div class="kpi-label">自分で改善したい</div>
-    <div class="kpi-value fs-3">{{ summary.positive }}<span class="fs-6 text-muted"> 人</span></div>
-    <div class="kpi-sub">検討での「一緒にやってみたい」のチェックと、直近6か月の月次の進め方（「自分で取り組みたい」「学びながら改善チームと一緒に取り組みたい」）のうち、新しいほうで判断（チェックなしは意思表示なしとして扱う）。伴走している「自主改善」の案件がある人も含む</div>
-    {% if summary.positive_by_pattern %}<div class="kpi-sub">{% for k, v in summary.positive_by_pattern.items() %}{{ k }} {{ v }}人{% if not loop.last %}／{% endif %}{% endfor %}</div>{% endif %}
-  </div></div></div>
-  <div class="col-6 col-lg-3"><div class="card kpi-card h-100"><div class="card-body py-2">
-    <div class="kpi-label">直近の月次で「自分で・一緒に取り組みたい」</div>
-    <div class="kpi-value fs-3">{{ summary.self_now }}<span class="fs-6 text-muted"> 人</span></div>
-    <div class="kpi-sub">{{ summary.period_label }}</div>
-  </div></div></div>
-  <div class="col-6 col-lg-3"><div class="card kpi-card h-100"><div class="card-body py-2">
-    <div class="kpi-label">学びたい技術を挙げた人</div>
-    <div class="kpi-value fs-3">{{ summary.learners }}<span class="fs-6 text-muted"> 人</span></div>
-    <div class="kpi-sub">勉強会・伴走の対象（下の「学びたい技術」）</div>
-  </div></div></div>
-</div>
-
-<form class="card mb-3" method="get"><div class="card-body d-flex flex-wrap align-items-end gap-3 py-3">
-  <div>
-    <label class="form-label small mb-1" for="dx-wp">Gr・役割</label>
-    <select name="workplace_id" id="dx-wp" class="form-select form-select-sm">
-      <option value="">すべて</option>
-      {% for w in workplaces %}<option value="{{ w.id }}" {% if args.workplace_id == w.id %}selected{% endif %}>{{ w.name }}</option>{% endfor %}
-    </select>
-  </div>
-  <div>
-    <label class="form-label small mb-1" for="dx-wish">意欲</label>
-    <select name="wish" id="dx-wish" class="form-select form-select-sm">
-      <option value="">すべて</option>
-      <option value="positive" {% if args.wish == 'positive' %}selected{% endif %}>自分で改善したい人</option>
-      {% for opt in C.DX_WISH_OPTIONS %}<option value="{{ opt }}" {% if args.wish == opt %}selected{% endif %}>{{ opt }}</option>{% endfor %}
-    </select>
-  </div>
-  <button class="btn btn-sm btn-primary">表示</button>
-  <span class="small text-muted ms-auto">{{ people|length }} 人</span>
-</div></form>
-
-<div class="card mb-3"><div class="card-body">
-  <h5 class="card-title">人財一覧</h5>
-  <div class="table-responsive">
-  <table class="table table-sm align-middle mb-0 dx-table">
-    <thead><tr>
-      <th>氏名</th><th>Gr・役割</th><th>勤務形態</th><th>意欲（自動化を検討）</th><th>月次：改善の進め方</th>
-      <th>使える技術</th><th>学びたい技術</th><th>業務</th>
-    </tr></thead>
-    <tbody>
-    {% for p in people %}
-    <tr>
-      <td class="text-nowrap">{{ p.name }}{% if p.emp_id %}<div class="small text-muted">{{ p.emp_id }}</div>{% endif %}</td>
-      <td class="small text-nowrap">{{ p.workplace.name if p.workplace else '' }}</td>
-      <td class="small text-nowrap">{{ p.work_pattern or '－' }}</td>
-      <td class="small text-nowrap">
-        {% if p.wish %}<span class="badge {{ 'text-bg-success' if p.wish_positive else ('text-bg-secondary' if p.wish_note else 'text-bg-light border') }}">{{ p.wish }}</span>{% if p.wish_note %}<div class="text-muted">{{ p.wish_note }}{% if p.wish_hint %} <span class="badge bg-warning-subtle text-warning-emphasis">{{ p.wish_hint }}</span>{% endif %}</div>{% endif %}{% else %}<span class="text-muted">－</span>{% endif %}
-      </td>
-      <td class="small text-nowrap">
-        {% if p.stance_latest %}
-        <span class="badge {{ 'text-bg-secondary' if p.stance_old else ('text-bg-success' if p.stance_latest in C.MONTHLY_KPI['self_positive'] else ('text-bg-primary' if p.stance_latest in C.MONTHLY_KPI['ask_positive'] else 'text-bg-light border')) }}">{{ p.stance_latest }}</span>
-        <div class="text-muted">{{ p.stance_label }}{% if p.stance_old %}（{{ C.STANCE_MONTHS }}か月より前）{% endif %}</div>
-        {% elif p.monthly %}<span class="text-muted">進め方の回答なし</span>
-        {% else %}<span class="text-muted">－</span>{% endif %}
-        {% if p.monthly %}<div class="text-muted">自分で／一緒に {{ p.self_positive_count }}回（回答 {{ p.monthly|length }} 回中）</div>{% endif %}
-      </td>
-      <td class="small dx-wide">{{ p.skills|join('・') or (C.SKILL_NONE if p.skills_none else '－') }}</td>
-      <td class="small dx-wide">{{ p.learn|join('・') or (C.SKILL_NONE if p.learn_none else '－') }}</td>
-      <td class="small dx-tasks">
-        {% if p.task_count %}<div>{{ p.task_count }} 件</div>{% endif %}
-        {% for x in p.target_tasks %}<div><a href="{{ url_for('cases.detail', task_id=x.task.id) }}">{{ x.task.name }}</a> <span class="badge {{ 'text-bg-primary' if x.label == C.BUILD_STAGE_SELF else 'text-bg-light border' }}">{{ x.label }}</span></div>{% endfor %}
-        {% if not p.task_count %}
-          {% if p.monthly_wants %}
-          <div class="text-muted">業務の登録なし。{{ p.monthly_wants_label }}の月次で挙げたなくしたい業務:</div>
-          <div>{{ p.monthly_wants|join('・') }}</div>
-          <a href="{{ url_for('survey.start', emp=p.emp_id, src='monthly', m=p.monthly_wants_id) }}">「自動化を検討」で流れを整理する</a>
-          {% else %}<span class="text-muted">－</span>{% endif %}
-        {% endif %}
-      </td>
-    </tr>
-    {% else %}
-    <tr><td colspan="8" class="text-muted">該当する人はいません</td></tr>
-    {% endfor %}
-    </tbody>
-  </table>
-  </div>
-</div></div>
-
-<div class="row g-3">
-  <div class="col-lg-4">
-    <div class="card h-100"><div class="card-body">
-      <h5 class="card-title">意欲（検討と直近の月次）</h5>
-      {% set maxc = (wish_counts|map(attribute=1)|max) if wish_counts else 1 %}
-      {% for opt, n in wish_counts %}
-      <div class="d-flex align-items-center small mb-1">
-        <div style="width: 15rem">{{ opt }}</div>
-        <div class="progress flex-grow-1" style="height: 14px"><div class="progress-bar" style="width: {{ (n / (maxc or 1) * 100)|round }}%"></div></div>
-        <div style="width: 3rem" class="text-end">{{ n }} 人</div>
-      </div>
-      {% endfor %}
-    </div></div>
-  </div>
-  <div class="col-lg-4">
-    <div class="card h-100"><div class="card-body">
-      <h5 class="card-title">現在使える技術</h5>
-      {% set maxh = (have[0][1] if have else 1) %}
-      {% for skill, n in have %}
-      <div class="d-flex align-items-center small mb-1">
-        <div style="width: 9rem">{{ skill }}</div>
-        <div class="progress flex-grow-1" style="height: 14px"><div class="progress-bar" style="width: {{ (n / maxh * 100)|round }}%"></div></div>
-        <div style="width: 3rem" class="text-end">{{ n }} 人</div>
-      </div>
-      {% else %}
-      <p class="text-muted small mb-0">データなし</p>
-      {% endfor %}
-    </div></div>
-  </div>
-  <div class="col-lg-4">
-    <div class="card h-100"><div class="card-body">
-      <h5 class="card-title">学びたい技術</h5>
-      {% set maxl = (learn[0][1] if learn else 1) %}
-      {% for skill, n in learn %}
-      <div class="d-flex align-items-center small mb-1">
-        <div style="width: 9rem">{{ skill }}</div>
-        <div class="progress flex-grow-1" style="height: 14px"><div class="progress-bar bg-success" style="width: {{ (n / maxl * 100)|round }}%"></div></div>
-        <div style="width: 3rem" class="text-end">{{ n }} 人</div>
-      </div>
-      {% else %}
-      <p class="text-muted small mb-0">データなし</p>
-      {% endfor %}
-    </div></div>
-  </div>
-</div>
-{% endblock %}
-''',
     'survey/index.html': r'''{% extends "base.html" %}
 {% block title %}自動化を検討{% endblock %}
 {% block content %}
@@ -11815,13 +11953,23 @@ body.flow-max-open { overflow: hidden; }
 .mv-savebar { position: sticky; bottom: 0; z-index: 5; display: flex; gap: 0.5rem; align-items: center; padding: 0.75rem 0; background: linear-gradient(to top, #f5f6f8 70%, rgba(245, 246, 248, 0)); }
 .member-wrap { overflow: auto; max-height: 72vh; }
 .member-table th, .member-table td { white-space: nowrap; }
-.member-table thead th { position: sticky; top: 0; z-index: 1; background: #fff; }
+.member-table thead { position: sticky; top: 0; z-index: 2; }
+.member-table thead th { background: #fff; vertical-align: bottom; }
 .member-month { font-size: 0.78rem; line-height: 1.15; }
 .member-cell { min-width: 2.6rem; }
 .member-yes { color: var(--ui-green-text); font-size: 1.05rem; }
 .member-before { color: #ced4da; }
 .member-table tr.is-excluded td { color: #adb5bd; background: #f8f9fa; }
 .member-table tr.is-excluded .member-yes { color: #adb5bd; }
+.member-table td.member-wide { white-space: normal; min-width: 9rem; max-width: 15rem; }
+.member-table td.member-tasks { white-space: normal; min-width: 12rem; max-width: 20rem; }
+.member-out { display: inline-block; padding: 0 0.3rem; border-radius: 4px; background: #eef0f3; color: #6c757d; font-size: 0.72rem; line-height: 1.5; }
+.member-sort { border: 0; background: none; padding: 0; font: inherit; font-weight: 600; color: inherit; text-align: inherit; cursor: pointer; white-space: nowrap; }
+.member-sort::after { content: "↕"; margin-left: 0.2rem; opacity: 0.3; font-size: 0.85em; }
+.member-table th[aria-sort="ascending"] .member-sort::after { content: "▲"; opacity: 0.85; }
+.member-table th[aria-sort="descending"] .member-sort::after { content: "▼"; opacity: 0.85; }
+.member-filters th { padding-top: 0.1rem; padding-bottom: 0.4rem; font-weight: 400; }
+.member-filters .form-select, .member-filters .form-control { min-width: 5.5rem; font-size: 0.76rem; padding-top: 0.12rem; padding-bottom: 0.12rem; }
 .member-table tfoot th, .member-table tfoot td { background: #f8f9fa; font-size: 0.8rem; line-height: 1.2; }
 /* ---- 進捗掲示板 ---- */
 .pb-head { margin: 0.25rem 0 0.75rem; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 0.75rem 1.5rem; }
@@ -12378,11 +12526,6 @@ summary { transition: color 0.15s ease; }
   .nav-lock::after { content: "管理者"; }
 }
 
-/* ---- DX人財情報 ---- */
-.dx-table { min-width: 1120px; }
-.dx-table th { white-space: nowrap; }
-.dx-table .dx-wide { min-width: 11rem; }
-.dx-table .dx-tasks { min-width: 16rem; }
 
 /* ---- 月次集計（推移の表） ---- */
 .trend-table th, .trend-table td { white-space: nowrap; font-variant-numeric: tabular-nums; font-size: 0.85rem; }
