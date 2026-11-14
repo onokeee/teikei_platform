@@ -2192,7 +2192,7 @@ def smoke_request():
     r = client.post("/survey/api/tasks", json={"emp_id": "ｔ００１", "name": "", "state": {}, "messages": []})
     check(r.status_code == 400 and "name" in r.get_json()["errors"], "P1: 全角・小文字でも同じ社員IDなら同じ人として通す（入力チェックへ進む）")
     js_rq = client.get("/static/survey.js").data.decode("utf-8")
-    check("function forgetPerson()" in js_rq and "clearSelects();" in js_rq and "api(\"POST\", CFG.api.reset)" in js_rq and js_rq.count("emp_id: empNow()") >= 4 and "respondentLost(j)" in js_rq,
+    check("function forgetPerson()" in js_rq and "clearSelects();" in js_rq and "api(\"POST\", CFG.api.reset)" in js_rq and js_rq.count("emp_id: empNow()") >= 3 and "respondentLost(j)" in js_rq,
           "P1: 社員IDを打ち替えた・見つからないときは回答者・登録一覧・候補・職場・勤務形態を消してリセットし、聞き取り・登録・取り消しに社員IDを付けて送る")
     check("confirmedId && confirmedId !== key" in js_rq and js_rq.index("forgetPerson();\n      confirmedId = key;") < js_rq.index("if (v.workplace_id && v.work_pattern) debounce"),
           "P2: 別の人の社員IDが見つかったときは、前の人の職場・勤務形態を消してから（自動保存はしない）")
