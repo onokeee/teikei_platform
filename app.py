@@ -1868,21 +1868,17 @@ def _workplace_names():
         g.wp_names = pairs
     return pairs
 
-_NAME_CHAR_RX = re.compile(r"[一-龥々〆ヵヶァ-ヴーA-Za-z0-9]")
+_WP_OTHER_BEFORE_RX = re.compile(r"(?:第?[一二三四五六七八九十]+|[A-Za-z0-9])$")
+_WP_OTHER_WORDS = frozenset(("課題", "課程", "課金", "課税", "部品", "部分", "部位", "部材", "室温"))
+_ASCII_PAIR_RX = re.compile(r"[A-Za-z0-9]{2}")
 
-
-def _wp_followers():
-    return [w for key in ("boss", "team") for w in _split_words((vocab_row("actors", key) or {}).get("words")) if not w.startswith("~") and len(w) >= 2]
 
 def _name_spans(text, name):
-    spans, followers, i = [], None, text.find(name) if name else -1
+    spans, i = [], text.find(name) if name else -1
     while i >= 0:
         j = i + len(name)
-        rest, ok = text[j:], not (i and _NAME_CHAR_RX.match(text[i - 1]))
-        if ok and rest and _NAME_CHAR_RX.match(rest[0]):
-            followers = _wp_followers() if followers is None else followers
-            ok = any(rest.startswith(w) or (name[-1] + rest).startswith(w) for w in followers)
-        if ok:
+        pair = name[-1] + text[j:j + 1]
+        if not _WP_OTHER_BEFORE_RX.search(text[:i]) and pair not in _WP_OTHER_WORDS and not _ASCII_PAIR_RX.fullmatch(pair):
             spans.append((i, j))
         i = text.find(name, i + 1)
     return spans
@@ -3170,7 +3166,7 @@ def dept_in_text(text, own_wp="", actor="dept"):
         return ""
     word = m.group(0)
     if word in {w[1:] for w in _split_words(row.get("words")) if w.startswith("~")}:
-        word = re.search(r"[一-龥々ァ-ヶーA-Za-z0-9]*$", text[:m.start()]).group(0) + word
+        word = re.search(r"[一-龥々ァ-ヶーA-Za-z0-9]*$", vnorm(text)[:m.start()]).group(0) + word
     return word[:20] if len(word) >= 2 else ""
 
 def category_recipient(u, t):

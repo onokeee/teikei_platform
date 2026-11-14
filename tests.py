@@ -576,40 +576,51 @@ def smoke_bizmap_edit():
     check(stored == ["生産計画課"] and names_now.get("生産計画課") == "生産計画課" and names_now.get("生産管理課") == "生産管理課" and names_after.get("生産計画課") == "生産管理課",
           f"職場名の変更: 名前を戻すと戻した名前は前の名前から外れ、前の名前と同じ職場がほかにあればいまの職場名を優先する: {stored} {names_now.get('生産計画課')} {names_after.get('生産計画課')}")
 
-    # ---- 職場名の変更: 前の名前は、名前として独立して出てくるときだけいまの名前に直す（「第二組立課」は直さない） ----
+    # ---- 職場名の変更: 前の名前も、前に番号が付いて別の職場になるときと、後ろの字と別の言葉になるときを除いていまの名前に直す（「第二組立課」は直さない） ----
     with app.app_context():
         wp_asm = app_module.Workplace.query.filter_by(name="組立課").first().id
     client.post(f"/admin/workplace/{wp_asm}/update", data={"name": "組立1課"})
     with app.test_request_context():
-        texts = ("第二組立課", "組立課 課長", "組立課長", "組立課の進捗確認", "製造1課から組立課へ", "組立課題の整理", "組立課二係")
+        texts = ("第二組立課", "組立課 課長", "組立課長", "組立課の進捗確認", "製造1課から組立課へ", "組立課題の整理", "組立課二係", "製造部組立課", "組立課向けの資料", "第2組立課", "第１組立課")
         swapped = {s: app_module.current_wp_text(s) for s in texts}
         other = app_module.who_of("第二組立課", "製造1課")
         mine = app_module.who_of("組立課 課長", "製造1課")
         d_ = app_module.Diagram()
         frame_other = d_.nodes[app_module.recipient_node(d_, "第二組立課", "製造1課", frame=("wp1", "製造1課"))[0]]["group"]
         frame_mine = d_.nodes[app_module.recipient_node(d_, "組立課の班長", "製造1課", frame=("wp1", "製造1課"))[0]]["group"]
+        frame_prefixed = d_.nodes[app_module.recipient_node(d_, "製造部組立課", "製造1課", frame=("wp1", "製造1課"))[0]]["group"]
         dept_other, dept_mine = app_module.dept_in_text("第二組立課に伝えるため", "製造1課"), app_module.dept_in_text("組立課に伝えるため", "製造1課")
     client.post(f"/admin/workplace/{wp_asm}/update", data={"name": "組立課"})
     check(swapped == {"第二組立課": "第二組立課", "組立課 課長": "組立1課 課長", "組立課長": "組立1課長", "組立課の進捗確認": "組立1課の進捗確認", "製造1課から組立課へ": "製造1課から組立1課へ",
-                      "組立課題の整理": "組立課題の整理", "組立課二係": "組立課二係"}
-          and other["label"] == "第二組立課" and frame_other != f"wp{wp_asm}" and (mine["actor"], mine["label"]) == ("dept", "組立1課 課長") and frame_mine == f"wp{wp_asm}"
+                      "組立課題の整理": "組立課題の整理", "組立課二係": "組立1課二係", "製造部組立課": "製造部組立1課", "組立課向けの資料": "組立1課向けの資料", "第2組立課": "第2組立課", "第１組立課": "第１組立課"}
+          and other["label"] == "第二組立課" and frame_other != f"wp{wp_asm}" and (mine["actor"], mine["label"]) == ("dept", "組立1課 課長") and frame_mine == f"wp{wp_asm}" and frame_prefixed == f"wp{wp_asm}"
           and dept_other == "第二組立課" and dept_mine == "組立1課",
-          f"R3-4: 職場名の変更（組立課 → 組立1課）: 前の名前は名前として独立して出てくるときだけ（後ろの役職はよい）いまの名前に直し、「第二組立課」のような長い名前の一部は直さず、その職場の枠にも入れない: {swapped} / {other} {frame_other}")
+          f"R3-4・R4-2: 職場名の変更（組立課 → 組立1課）: 前の名前は、前に番号（第二・第2）が付くときと後ろの字と別の言葉（課題など）になるときを除いていまの名前に直し（「組立課二係」「製造部組立課」「組立課向け」も直す）、"
+          f"「第二組立課」は直さず、その職場の枠にも入れない: {swapped} / {other} {frame_other} {frame_prefixed}")
 
-    # ---- いまの職場名も、名前として独立して出てくるときだけその職場とみなす ----
+    # ---- いまの職場名も同じ決まり: 前に番号が付いて別の職場になるときと、後ろの字と別の言葉になるときだけ、その職場とみなさない ----
     with app.test_request_context():
         wp_asm = app_module.Workplace.query.filter_by(name="組立課").first().id
         wp_qa = app_module.Workplace.query.filter_by(name="検査・品質保証課").first().id
-        who4 = {s: (lambda w: (w["actor"], w["label"]))(app_module.who_of(s, "製造1課")) for s in ("第二組立課", "組立課題の整理", "組立課長", "組立課 課長", "品質保証課 課長")}
+        who4 = {s: (lambda w: (w["actor"], w["label"]))(app_module.who_of(s, "製造1課")) for s in ("第二組立課", "組立課題の整理", "組立課長", "組立課 課長", "品質保証課 課長", "組立課様", "製造部組立課")}
         d_ = app_module.Diagram()
+        inside = ("組立課長", "組立課 課長", "組立課向け", "組立課様", "組立課宛", "組立課用", "組立課内", "組立課全体", "製造部組立課", "生産本部組立課", "千葉工場組立課", "東事業所組立課", "物流センター組立課")
+        outside = ("第二組立課", "第2組立課", "第１組立課", "第一組立課", "組立課題の整理", "第二品質保証課")
         frames = {s: d_.nodes[app_module.recipient_node(d_, s, "製造1課", frame=("wp1", "製造1課"), task_id=1)[0]]["group"]
-                  for s in ("第二組立課", "組立課長", "組立課 課長", "品質保証課の担当", "第二品質保証課")}
-        depts = {s: app_module.dept_in_text(s, "製造1課") for s in ("第二組立課に伝えるため", "組立課題を共有するため", "組立課に伝えるため", "品質保証課に報告するため")}
+                  for s in inside + outside + ("品質保証課の担当", "検査品質保証課")}
+        depts = {s: app_module.dept_in_text(s, "製造1課") for s in ("第二組立課に伝えるため", "組立課題を共有するため", "組立課に伝えるため", "品質保証課に報告するため", "組立課向けの資料を作るため",
+                                                                 "製造部組立課に伝えるため", "第１組立課に伝えるため")}
+        words = [app_module._name_spans(s, n) for s, n in (("組立課程", "組立課"), ("組立課金", "組立課"), ("組立課税", "組立課"), ("組立部品の検査", "組立部"), ("組立部分", "組立部"),
+                                                           ("組立部位", "組立部"), ("組立部材", "組立部"), ("検査室温度", "検査室"), ("ライン10の日報", "ライン1"))]
+        kept = [app_module._name_spans(s, n) for s, n in (("組立部長", "組立部"), ("検査室の温度", "検査室"), ("ライン1の日報", "ライン1"))]
     check(who4 == {"第二組立課": ("dept", "第二組立課"), "組立課題の整理": ("", "組立課題の整理"), "組立課長": ("dept", "組立課長"), "組立課 課長": ("dept", "組立課 課長"),
-                   "品質保証課 課長": ("dept", "検査・品質保証課 課長")}
-          and frames == {"第二組立課": None, "組立課長": f"wp{wp_asm}", "組立課 課長": f"wp{wp_asm}", "品質保証課の担当": f"wp{wp_qa}", "第二品質保証課": None}
-          and depts == {"第二組立課に伝えるため": "第二組立課", "組立課題を共有するため": "", "組立課に伝えるため": "組立課", "品質保証課に報告するため": "検査・品質保証課"},
-          f"R4-2: いまの職場名も名前として独立して出てくるときだけ（後ろの役職はよい）その職場とみなす。「第二組立課」は組立課の枠に入れず、「組立課題」は組立課と読まない。「・」の後ろ（品質保証課）でも見つける: {who4} / {frames} / {depts}")
+                   "品質保証課 課長": ("dept", "検査・品質保証課 課長"), "組立課様": ("dept", "組立課様"), "製造部組立課": ("dept", "製造部組立課")}
+          and all(frames[s] == f"wp{wp_asm}" for s in inside) and all(frames[s] is None for s in outside) and frames["品質保証課の担当"] == frames["検査品質保証課"] == f"wp{wp_qa}"
+          and depts == {"第二組立課に伝えるため": "第二組立課", "組立課題を共有するため": "", "組立課に伝えるため": "組立課", "品質保証課に報告するため": "検査・品質保証課", "組立課向けの資料を作るため": "組立課",
+                        "製造部組立課に伝えるため": "組立課", "第１組立課に伝えるため": "第1組立課"}
+          and words == [[]] * 9 and kept == [[(0, 3)], [(0, 3)], [(0, 4)]],
+          f"R4-2: いまの職場名も、前に番号（第二・第2・第一）が付いて別の職場になるときと、後ろの字と合わせて別の言葉（課題・課程・課金・課税・部品・部分・部位・部材・室温、英数字の続き）になるときだけ"
+          f"その職場とみなさない（「組立課向け」「組立課様」「組立課内」「製造部組立課」などは組立課。「・」の後ろ（品質保証課）でも見つける）: {who4} / {frames} / {depts} / {words} / {kept}")
 
     # ---- 設備モニタ・画面・端末はシステムのデータ（既定の区分の語。保存した区分は変えない） ----
     with app.test_request_context():
