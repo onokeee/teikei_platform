@@ -10380,6 +10380,7 @@ document.addEventListener("DOMContentLoaded", function () {
     if (reduce) setTimeout(close, 6000);
   });
 
+  function unbusy(b) { b.classList.remove("is-busy"); b.removeAttribute("aria-busy"); }
   document.addEventListener("submit", function (e) {
     if (e.defaultPrevented) return;
     var f = e.target;
@@ -10388,10 +10389,10 @@ document.addEventListener("DOMContentLoaded", function () {
     if (!b || !b.classList.contains("btn")) return;
     b.classList.add("is-busy");
     b.setAttribute("aria-busy", "true");
-    setTimeout(function () { b.classList.remove("is-busy"); b.removeAttribute("aria-busy"); }, 10000);
+    setTimeout(function () { unbusy(b); }, 10000);
   });
   window.addEventListener("pageshow", function () {
-    document.querySelectorAll(".btn.is-busy").forEach(function (b) { b.classList.remove("is-busy"); b.removeAttribute("aria-busy"); });
+    document.querySelectorAll(".btn.is-busy").forEach(unbusy);
   });
 
   // 紙吹雪。window.uiCelebrate() で呼ぶ。data-celebrate のある画面は開いたときに1回
@@ -10942,19 +10943,20 @@ document.addEventListener("DOMContentLoaded", function () {
     setMode("");
   }
 
+  // 引いている途中の仮の線（p がなければ消すだけ）
+  function drawTemp(p) {
+    els.temp.innerHTML = "";
+    if (p) els.temp.appendChild(svgEl("path", { d: curve(p).d, "class": "fe-temp-line" }));
+  }
+
   function drawTempLine(targetId) {
     if (!linkSource) return;
-    var p = targetId ? endpoints(linkSource, targetId) : null;
-    els.temp.innerHTML = "";
-    if (!p) return;
-    els.temp.appendChild(svgEl("path", { d: curve(p).d, "class": "fe-temp-line" }));
+    drawTemp(targetId ? endpoints(linkSource, targetId) : null);
   }
 
   function drawTempLineTo(canvasPt) {
     var A = bounds(linkSource);
-    if (!A) return;
-    els.temp.innerHTML = "";
-    els.temp.appendChild(svgEl("path", { d: curve({ x1: A.cx, y1: A.cy, x2: canvasPt.x, y2: canvasPt.y }).d, "class": "fe-temp-line" }));
+    if (A) drawTemp({ x1: A.cx, y1: A.cy, x2: canvasPt.x, y2: canvasPt.y });
   }
 
   function createLink(from, to) {
@@ -11055,16 +11057,18 @@ document.addEventListener("DOMContentLoaded", function () {
       n.medium = t === "info" ? "unknown" : "";
       n.medium_edited = false;
       n.actor = ""; n.who = ""; n.who_state = t === "work" ? "unconfirmed" : ""; n.who_edited = false; n.actor_locked = false;
-      // 線を直すのは、この箱につながる線だけ
-      var mine = function (e) { return e.from === n.id || e.to === n.id; };
+      // 線を直すのは、この箱につながる線だけ（情報どうしになった線は外し、残りは種類を付け直す）
       G.edges = G.edges.filter(function (e) {
-        if (!mine(e)) return true;
+        if (e.from !== n.id && e.to !== n.id) return true;
         var x = nodeById(e.from), y = nodeById(e.to);
-        var bad = x && y && typeOf(x) === "info" && typeOf(y) === "info";
-        if (bad && e.source !== "manual" && G.suppressed_edges.indexOf(e.id) < 0) G.suppressed_edges.push(e.id);
-        return !bad;
+        if (!x || !y) return true;
+        if (typeOf(x) === "info" && typeOf(y) === "info") {
+          if (e.source !== "manual" && G.suppressed_edges.indexOf(e.id) < 0) G.suppressed_edges.push(e.id);
+          return false;
+        }
+        e.type = typeOf(x) === "work" && typeOf(y) === "work" ? "work" : "info";
+        return true;
       });
-      G.edges.forEach(function (e) { if (!mine(e)) return; var x = nodeById(e.from), y = nodeById(e.to); if (x && y) e.type = typeOf(x) === "work" && typeOf(y) === "work" ? "work" : "info"; });
       renderAll();
       refreshNodePopover();
       pushHistory();
@@ -11262,10 +11266,11 @@ document.addEventListener("DOMContentLoaded", function () {
 
   document.addEventListener("keydown", function (e) {
     var typing = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) || e.target.isContentEditable || !!(e.target.closest && e.target.closest(".fe-popover"));
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") { e.preventDefault(); save(); return; }
+    var ctrl = e.ctrlKey || e.metaKey ? e.key.toLowerCase() : "";
+    if (ctrl === "s") { e.preventDefault(); save(); return; }
     if (typing) return;
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z" && !e.shiftKey) { e.preventDefault(); undo(); }
-    else if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === "y" || (e.key.toLowerCase() === "z" && e.shiftKey))) { e.preventDefault(); redo(); }
+    if (ctrl === "z" && !e.shiftKey) { e.preventDefault(); undo(); }
+    else if (ctrl === "y" || (ctrl === "z" && e.shiftKey)) { e.preventDefault(); redo(); }
     else if (e.key === "Delete" || e.key === "Backspace") { if (selected.length) { e.preventDefault(); deleteSelected(); } }
     else if (e.key === "Escape") {
       if (!linkSource && !app.querySelector(".fe-popover.fe-show") && app.classList.contains("is-max") && !document.fullscreenElement) setMax(false);
@@ -11304,12 +11309,22 @@ document.addEventListener("DOMContentLoaded", function () {
     if (cfg.domain) q.set("domain_id", cfg.domain);
     return cfg.api + "?" + q.toString();
   }
+  async function getJson(url) {
+    var res = await fetch(url, { headers: { Accept: "application/json" } });
+    return res.json();
+  }
+  // 保存・反映の POST。サーバーが ok を返さなければ error の文で例外にする
+  async function postJson(url, body) {
+    var res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    var data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.error || res.statusText);
+    return data;
+  }
 
   async function load(opts) {
     opts = opts || {};
     setStatus("読み込み中…");
-    var res = await fetch(apiUrl(), { headers: { Accept: "application/json" } });
-    var data = await res.json();
+    var data = await getJson(apiUrl());
     G = { nodes: data.nodes || [], edges: data.edges || [], suppressed_nodes: data.suppressed_nodes || [], suppressed_edges: data.suppressed_edges || [] };
     meta = data.meta || {};
     selected = [];
@@ -11342,9 +11357,7 @@ document.addEventListener("DOMContentLoaded", function () {
       data: { nodes: G.nodes, edges: G.edges, suppressed_nodes: G.suppressed_nodes, suppressed_edges: G.suppressed_edges, view: view }
     };
     try {
-      var res = await fetch(cfg.api, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-      var data = await res.json();
-      if (!res.ok || !data.ok) throw new Error(data.error || res.statusText);
+      var data = await postJson(cfg.api, payload);
       meta.saved_at = data.saved_at;
       savedSnapshot = snapshot();
       updateDirty();
@@ -11374,6 +11387,7 @@ document.addEventListener("DOMContentLoaded", function () {
 
   var wbPop = document.getElementById("fe-wb-popover");
   var wbList = document.getElementById("fe-wb-list");
+  var wbApply = document.getElementById("fe-wb-apply");
   var wbApi = cfg.api.replace(/\/graph$/, "/writeback");
   function writebackUrl() { return wbApi + apiUrl().slice(cfg.api.length); }
 
@@ -11387,15 +11401,14 @@ document.addEventListener("DOMContentLoaded", function () {
     wbPop.classList.add("fe-show");
     wbPop.style.left = "16px"; wbPop.style.top = "16px";
     try {
-      var res = await fetch(writebackUrl(), { headers: { Accept: "application/json" } });
-      var data = await res.json();
+      var data = await getJson(writebackUrl());
       var items = data.candidates || [];
       if (!items.length) {
         wbList.innerHTML = '<div class="text-muted small">反映できる変更はありません。業務同士の矢印、情報源や部署から業務への矢印、業務名の修正、消した前後の矢印が対象です。</div>';
-        document.getElementById("fe-wb-apply").disabled = true;
+        wbApply.disabled = true;
         return;
       }
-      document.getElementById("fe-wb-apply").disabled = false;
+      wbApply.disabled = false;
       wbList.innerHTML = "";
       items.forEach(function (c) {
         var row = document.createElement("label");
@@ -11415,12 +11428,7 @@ document.addEventListener("DOMContentLoaded", function () {
     var ids = Array.prototype.map.call(wbList.querySelectorAll("input:checked"), function (cb) { return cb.value; });
     if (!ids.length) { setMode("反映する変更を選んでください"); return; }
     try {
-      var res = await fetch(wbApi, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ kind: cfg.kind, workplace_id: cfg.workplace || null, domain_id: cfg.domain || null, ids: ids })
-      });
-      var data = await res.json();
-      if (!res.ok || !data.ok) throw new Error(data.error || res.statusText);
+      var data = await postJson(wbApi, { kind: cfg.kind, workplace_id: cfg.workplace || null, domain_id: cfg.domain || null, ids: ids });
       wbPop.classList.remove("fe-show");
       var done = "✅ 業務データに " + data.applied + " 件反映しました";
       if (data.ai_stale) done += "（AI 分析の案件 " + data.ai_stale + " 件は、案件詳細の「再分析」で新しくなります）";
@@ -11432,7 +11440,7 @@ document.addEventListener("DOMContentLoaded", function () {
     }
   }
   document.getElementById("fe-writeback").addEventListener("click", openWriteback);
-  document.getElementById("fe-wb-apply").addEventListener("click", applyWriteback);
+  wbApply.addEventListener("click", applyWriteback);
   document.getElementById("fe-wb-close").addEventListener("click", function () { wbPop.classList.remove("fe-show"); });
   wbPop.addEventListener("mousedown", function (e) { e.stopPropagation(); });
 
@@ -11476,17 +11484,21 @@ document.addEventListener("DOMContentLoaded", function () {
   function keyOf(el) {
     return el.id.replace(/^flow-/, "");
   }
+  function flowEl(key) {
+    return document.getElementById("flow-" + key);
+  }
 
   function applyScale(el) {
     var svg = el.querySelector("svg");
     if (!svg) return;
     var vb = svg.viewBox && svg.viewBox.baseVal;
     if (!vb || !vb.width) return;
-    var s = scales[keyOf(el)] || 1;
+    var key = keyOf(el);
+    var s = scales[key] || 1;
     svg.style.maxWidth = "none";
     svg.style.width = Math.round(vb.width * s) + "px";
     svg.style.height = Math.round(vb.height * s) + "px";
-    var tb = document.querySelector('.flow-toolbar[data-target="' + keyOf(el) + '"]');
+    var tb = document.querySelector('.flow-toolbar[data-target="' + key + '"]');
     var pct = tb && tb.querySelector("[data-zoom='reset']");
     if (pct) pct.textContent = Math.round(s * 100) + "%";
   }
@@ -11533,7 +11545,7 @@ document.addEventListener("DOMContentLoaded", function () {
   }
 
   function refit(key) {
-    var el = document.getElementById("flow-" + key);
+    var el = flowEl(key);
     var s = fitScale(el);
     if (s) { scales[key] = s; applyScale(el); }
   }
@@ -11557,7 +11569,7 @@ document.addEventListener("DOMContentLoaded", function () {
       if (document.fullscreenElement === card && document.exitFullscreen) document.exitFullscreen().catch(function () {});
       card.dataset.fs = "";
       scales[key] = before[key] || scales[key] || 1;
-      applyScale(document.getElementById("flow-" + key));
+      applyScale(flowEl(key));
     }
   }
 
@@ -11589,7 +11601,7 @@ document.addEventListener("DOMContentLoaded", function () {
     tb.addEventListener("click", function (e) {
       var b = e.target.closest("button");
       if (!b) return;
-      var el = document.getElementById("flow-" + key);
+      var el = flowEl(key);
       if (b.dataset.max) { setMax(tb, !tb.closest(".card").classList.contains("flow-max")); return; }
       if (b.dataset.zoom && el) {
         var s = scales[key] || 1;
@@ -12504,6 +12516,13 @@ summary { transition: color 0.15s ease; }
     if (text !== undefined && text !== null) e.textContent = text;
     return e;
   }
+  function button(cls, text, onClick) {
+    var b = el("button", cls, text);
+    b.type = "button";
+    b.addEventListener("click", onClick);
+    return b;
+  }
+  function optionLabel(v) { return (O.frequency_hints && O.frequency_hints[v]) || v; }
   async function api(method, url, body) {
     var r = await fetch(url, { method: method, headers: { "Content-Type": "application/json", Accept: "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
     var j = {};
@@ -12519,19 +12538,16 @@ summary { transition: color 0.15s ease; }
     toastTimer = setTimeout(function () { t.classList.remove("is-show"); }, 2600);
   }
   function debounce(key, fn, ms) { clearTimeout(timers[key]); timers[key] = setTimeout(fn, ms || 700); }
-  function pills(container, options, single, onChange) {
+  function pills(container, options, single) {
     container.innerHTML = "";
     options.forEach(function (o) {
-      var b = el("button", "rq-pill", (O.frequency_hints && O.frequency_hints[o]) || o);
-      b.type = "button";
-      b.dataset.value = o;
-      b.addEventListener("click", function () {
+      var b = button("rq-pill", optionLabel(o), function () {
         if (single) container.querySelectorAll(".rq-pill").forEach(function (p) { if (p !== b) p.classList.remove("is-on"); });
         b.classList.toggle("is-on");
         var f = container.closest(".rq-field");
         if (f) clearError(f);
-        if (onChange) onChange();
       });
+      b.dataset.value = o;
       container.appendChild(b);
     });
   }
@@ -12540,9 +12556,7 @@ summary { transition: color 0.15s ease; }
   function setPill(c, v) { c.querySelectorAll(".rq-pill").forEach(function (p) { p.classList.toggle("is-on", !!v && p.dataset.value === v); }); }
   function fieldError(key, msg) {
     var f = document.querySelector('#rq-final .rq-field[data-key="' + key + '"]');
-    if (!f) return;
-    f.classList.add("is-invalid");
-    f.querySelector(".rq-err").textContent = msg;
+    if (f) markError(f, msg);
   }
 
   // ---------- 入力欄（あなたのこと） ----------
@@ -12575,6 +12589,7 @@ summary { transition: color 0.15s ease; }
     wrap.addEventListener("change", function () { if (onChange) onChange(); });
     return wrap;
   }
+  function markError(wrap, msg) { wrap.classList.add("is-invalid"); wrap.querySelector(".rq-err").textContent = msg; }
   function clearError(wrap) { wrap.classList.remove("is-invalid"); var e = wrap.querySelector(".rq-err"); if (e) e.textContent = ""; }
   function getValues(container) {
     var v = {};
@@ -12589,8 +12604,7 @@ summary { transition: color 0.15s ease; }
     Object.keys(errors || {}).forEach(function (k) {
       var w = container.querySelector('.rq-field[data-key="' + k + '"]');
       if (!w) return;
-      w.classList.add("is-invalid");
-      w.querySelector(".rq-err").textContent = errors[k];
+      markError(w, errors[k]);
       if (!first) first = w;
     });
     if (first) first.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -12611,6 +12625,7 @@ summary { transition: color 0.15s ease; }
   personBox.appendChild(idRow);
   var empInput = idWrap.querySelector("input");
   var found = null, idProblem = "", confirmedId = "";
+  var ID_OK = "社員IDを確認しました";
   var NOT_FOUND = "この社員IDは見つかりません。IDを確かめてください";
   function normId(v) { return (v || "").normalize("NFKC").trim().toLowerCase(); }
   function setIdentity(text, ng) { identity.textContent = text || ""; identity.classList.toggle("is-ng", !!ng); }
@@ -12649,7 +12664,7 @@ summary { transition: color 0.15s ease; }
       if ((S.respondent && normId(S.respondent.emp_id) !== key) || (confirmedId && confirmedId !== key)) forgetPerson();
       confirmedId = key;
       found = j;
-      setIdentity("社員IDを確認しました");
+      setIdentity(ID_OK);
       var v = getValues(personBox);
       if (v.workplace_id && v.work_pattern) debounce("person", function () { savePerson(false); }, 200);
     } else {
@@ -12691,7 +12706,7 @@ summary { transition: color 0.15s ease; }
         takeTasks(j);
         if (j.resumed && S.tasks.length) toast("前回の続きから登録できます");
       }
-      setIdentity("社員IDを確認しました");
+      setIdentity(ID_OK);
       return true;
     });
     return personSaving;
@@ -12701,8 +12716,12 @@ summary { transition: color 0.15s ease; }
   // ---------- 2. 検討する業務（AI の聞き取り） ----------
   var pickBox = $("rq-pick"), intakeBox = $("rq-intake"), finalBox = $("rq-final"), resultBox = $("rq-result");
   var msgBox = $("rq-messages"), chipBox = $("rq-chips"), input = $("rq-input"), flowBox = $("rq-flow"), stepsBox = $("rq-steps");
+  var titleInput = $("rq-title"), bulkBox = $("rq-bulk"), bulkText = $("rq-bulk-text");
   var conv = null, busy = false;
 
+  function showOnly(box) {
+    [pickBox, intakeBox, finalBox, resultBox].forEach(function (b) { b.classList.toggle("d-none", b !== box); });
+  }
   function takeTasks(j) {
     S.tasks = j.tasks || [];
     S.suggested = j.suggested || []; S.suggested_wants = j.suggested_wants || [];
@@ -12719,18 +12738,20 @@ summary { transition: color 0.15s ease; }
       row.appendChild(el("span", "rq-reg-name", t.name));
       row.appendChild(el("span", "rq-reg-meta", "月 " + t.hours + " h・" + (t.wish || "") + (t.stage ? "・" + t.stage : "")));
       if (t.can_delete) {
-        var del = el("button", "btn btn-link btn-sm text-danger", "取り消す");
-        del.type = "button";
-        del.addEventListener("click", async function () {
+        row.appendChild(button("btn btn-link btn-sm text-danger", "取り消す", async function () {
           if (!confirm("「" + t.name + "」の登録を取り消しますか？")) return;
-          var j = await api("DELETE", CFG.api.tasks + "/" + t.id, { emp_id: empNow() });
+          var j = await withdrawTask(t.id);
           if (j._ok) takeTasks(j);
-          else if (!respondentLost(j)) toast(j.message || "取り消せませんでした");
-        });
-        row.appendChild(del);
+        }));
       }
       box.appendChild(row);
     });
+  }
+  // 登録の取り消し。取り消せなかったときの知らせもここで出す
+  async function withdrawTask(id) {
+    var j = await api("DELETE", CFG.api.tasks + "/" + id, { emp_id: empNow() });
+    if (!j._ok && !respondentLost(j)) toast(j.message || "取り消せませんでした");
+    return j;
   }
   function renderSuggest() {
     renderMonthlyBanner();
@@ -12745,10 +12766,7 @@ summary { transition: color 0.15s ease; }
       var row = el("div", "rq-suggest-row");
       row.appendChild(el("span", "rq-suggest-label", g[1]));
       g[0].forEach(function (n) {
-        var b = el("button", "rq-pill", n);
-        b.type = "button";
-        b.addEventListener("click", function () { $("rq-title").value = n; startIntake(false, wants.indexOf(n) >= 0 ? "monthly" : "", n); });
-        row.appendChild(b);
+        row.appendChild(button("rq-pill", n, function () { titleInput.value = n; startIntake(false, wants.indexOf(n) >= 0 ? "monthly" : "", n); }));
       });
       box.appendChild(row);
     });
@@ -12783,7 +12801,7 @@ summary { transition: color 0.15s ease; }
     renderMonthlyBanner();
     var next = nextMonthlyTask();
     if (!next) return;
-    $("rq-title").value = next;
+    titleInput.value = next;
     if (!S.respondent) {
       fillSelects(CFG.monthly.workplace_id, CFG.monthly.work_pattern);
       await lookupEmp();
@@ -12792,19 +12810,21 @@ summary { transition: color 0.15s ease; }
     }
     startIntake(false, "monthly", next);
   }
-  function addMsg(role, text, animate) {
-    var m = el("div", "rq-msg " + (role === "ai" ? "is-ai" : "is-user") + (animate ? " is-new" : ""), text);
-    msgBox.appendChild(m);
+  // 会話の欄に足して、いちばん下まで送る
+  function appendMsg(node) {
+    msgBox.appendChild(node);
     msgBox.scrollTop = msgBox.scrollHeight;
-    return m;
+    return node;
+  }
+  function addMsg(role, text, animate) {
+    return appendMsg(el("div", "rq-msg " + (role === "ai" ? "is-ai" : "is-user") + (animate ? " is-new" : ""), text));
   }
   function typing(on) {
     var t = msgBox.querySelector(".rq-typing");
     if (on && !t) {
       t = el("div", "rq-msg is-ai rq-typing");
       t.innerHTML = "<span></span><span></span><span></span>";
-      msgBox.appendChild(t);
-      msgBox.scrollTop = msgBox.scrollHeight;
+      appendMsg(t);
     }
     if (!on && t) t.remove();
   }
@@ -12813,11 +12833,9 @@ summary { transition: color 0.15s ease; }
     if (!(chips || []).length) return;
     chipBox.appendChild(el("div", "rq-chips-label", "選択肢をタップするか、自由に入力してください"));
     chips.forEach(function (c) {
-      var b = el("button", "rq-pill rq-chip");
-      b.type = "button";
+      var b = button("rq-pill rq-chip", null, function () { send(c); });
       b.appendChild(el("i", "bi bi-hand-index-thumb"));
-      b.appendChild(document.createTextNode((O.frequency_hints && O.frequency_hints[c]) || c));
-      b.addEventListener("click", function () { send(c); });
+      b.appendChild(document.createTextNode(optionLabel(c)));
       chipBox.appendChild(b);
     });
   }
@@ -12834,8 +12852,9 @@ summary { transition: color 0.15s ease; }
     if (upto > conv.shownSteps) { sc.classList.remove("is-bump"); void sc.offsetWidth; sc.classList.add("is-bump"); }
   }
   var iconFont = document.fonts && document.fonts.load ? document.fonts.load('16px "bootstrap-icons"').catch(function () {}) : Promise.resolve();
+  var FLOW_EMPTY = '<div class="rq-flow-empty">ここに流れができていきます</div>';
   async function renderDef(def) {
-    if (!def) { flowBox.innerHTML = '<div class="rq-flow-empty">ここに流れができていきます</div>'; conv.lastNodes = []; return; }
+    if (!def) { flowBox.innerHTML = FLOW_EMPTY; conv.lastNodes = []; return; }
     if (!window.mermaid) return;
     await iconFont;
     try {
@@ -12870,8 +12889,7 @@ summary { transition: color 0.15s ease; }
   function addNote(text) {
     var n = el("div", "rq-note is-new", text);
     n.addEventListener("click", function () { $("rq-flowpane").scrollIntoView({ behavior: "smooth", block: "center" }); });
-    msgBox.appendChild(n);
-    msgBox.scrollTop = msgBox.scrollHeight;
+    appendMsg(n);
   }
   function setFlowDone(done) {
     $("rq-confirm").classList.toggle("d-none", !done);
@@ -12947,14 +12965,8 @@ summary { transition: color 0.15s ease; }
     var box = $("rq-dup-note");
     box.innerHTML = "";
     box.appendChild(el("div", null, "同じ名前の業務「" + task.name + "」を登録済みです（月 " + task.hours + " h）。このまま始めると別の案件になります。"));
-    var go = el("button", "btn btn-sm btn-outline-dark", "別の業務として続ける");
-    go.type = "button";
-    go.addEventListener("click", function () { box.classList.add("d-none"); startIntake(true, origin, monthlyName); });
-    var stop = el("button", "btn btn-sm btn-outline-secondary", "やめる（下の一覧で取り消せます）");
-    stop.type = "button";
-    stop.addEventListener("click", function () { box.classList.add("d-none"); });
-    box.appendChild(go);
-    box.appendChild(stop);
+    box.appendChild(button("btn btn-sm btn-outline-dark", "別の業務として続ける", function () { box.classList.add("d-none"); startIntake(true, origin, monthlyName); }));
+    box.appendChild(button("btn btn-sm btn-outline-secondary", "やめる（下の一覧で取り消せます）", function () { box.classList.add("d-none"); }));
     box.classList.remove("d-none");
   }
   async function startIntake(skipDup, origin, monthlyName) {
@@ -12962,7 +12974,7 @@ summary { transition: color 0.15s ease; }
       var ok = await savePerson(true);
       if (!ok) { toast("先に「あなたのこと」を入力してください"); return; }
     }
-    var title = $("rq-title").value.trim();
+    var title = titleInput.value.trim();
     if (!skipDup) {
       var dupTask = ownTask(title);
       if (dupTask) { showDupNote(dupTask, origin, monthlyName); return; }
@@ -12973,26 +12985,20 @@ summary { transition: color 0.15s ease; }
     $("rq-replay").classList.add("d-none");
     msgBox.innerHTML = "";
     stepsBox.innerHTML = "";
-    flowBox.innerHTML = '<div class="rq-flow-empty">ここに流れができていきます</div>';
+    flowBox.innerHTML = FLOW_EMPTY;
     $("rq-flow-title").textContent = title || "流れ図";
     $("rq-stepcount").textContent = "手順 0";
     $("rq-progress").textContent = "AI が質問します";
-    $("rq-bulk").classList.add("d-none");
-    pickBox.classList.add("d-none");
-    resultBox.classList.add("d-none");
-    finalBox.classList.add("d-none");
-    intakeBox.classList.remove("d-none");
+    bulkBox.classList.add("d-none");
+    showOnly(intakeBox);
     setFlowDone(false);
     intakeBox.scrollIntoView({ behavior: "smooth", block: "start" });
     await turn(null, null);
   }
   function backToPick(quiet) {
     conv = null;
-    intakeBox.classList.add("d-none");
-    finalBox.classList.add("d-none");
-    resultBox.classList.add("d-none");
-    pickBox.classList.remove("d-none");
-    $("rq-title").value = "";
+    showOnly(pickBox);
+    titleInput.value = "";
     renderSuggest();
     if (!quiet) pickBox.scrollIntoView({ behavior: "smooth", block: "start" });
   }
@@ -13001,17 +13007,18 @@ summary { transition: color 0.15s ease; }
     if (!k) return "";
     return ((CFG.monthly && CFG.monthly.wants_tasks) || []).concat(S.suggested || []).filter(function (n) { return normName(n) === k; })[0] || "";
   }
-  $("rq-start").addEventListener("click", function () { startIntake(false, "", monthlySource($("rq-title").value)); });
-  $("rq-title").addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); startIntake(false, "", monthlySource($("rq-title").value)); } });
+  function startFromTitle() { startIntake(false, "", monthlySource(titleInput.value)); }
+  $("rq-start").addEventListener("click", startFromTitle);
+  titleInput.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); startFromTitle(); } });
   $("rq-send").addEventListener("click", function () { send(); });
   input.addEventListener("keydown", function (e) { if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); send(); } });
   $("rq-restart").addEventListener("click", function () { if (!conv || confirm("聞き取りを最初からやり直しますか？")) backToPick(); });
-  $("rq-bulk-toggle").addEventListener("click", function () { $("rq-bulk").classList.toggle("d-none"); if (!$("rq-bulk").classList.contains("d-none")) $("rq-bulk-text").focus(); });
+  $("rq-bulk-toggle").addEventListener("click", function () { bulkBox.classList.toggle("d-none"); if (!bulkBox.classList.contains("d-none")) bulkText.focus(); });
   $("rq-bulk-send").addEventListener("click", function () {
-    var text = $("rq-bulk-text").value.trim();
+    var text = bulkText.value.trim();
     if (!text) { toast("手順を書いてください"); return; }
-    $("rq-bulk-text").value = "";
-    $("rq-bulk").classList.add("d-none");
+    bulkText.value = "";
+    bulkBox.classList.add("d-none");
     turn(text, null);
   });
   $("rq-photo").addEventListener("change", async function () {
@@ -13053,9 +13060,8 @@ summary { transition: color 0.15s ease; }
   pills($("rq-duration"), O.durations, true);
   pills($("rq-wish"), O.wishes, true);
   pills($("rq-shift"), O.shift_options, true);
-  pills($("rq-skills-have"), O.skills, false);
-  pills($("rq-skills-learn"), O.skills, false);
   [$("rq-skills-have"), $("rq-skills-learn")].forEach(function (box) {
+    pills(box, O.skills, false);
     box.addEventListener("click", function (e) {
       var b = e.target.closest(".rq-pill");
       if (!b || !b.classList.contains("is-on")) return;
@@ -13095,26 +13101,20 @@ summary { transition: color 0.15s ease; }
     var j = await api("POST", CFG.api.tasks, Object.assign({}, body, { emp_id: empNow() }));
     btn.disabled = false;
     btn.innerHTML = '<i class="bi bi-plus-lg"></i> この業務を登録';
-    $("rq-dup").classList.add("d-none");
+    var box = $("rq-dup");
+    box.classList.add("d-none");
     if (!j._ok && j.duplicate) {
-      var box = $("rq-dup");
       box.innerHTML = "";
       box.appendChild(el("div", null, "同じ名前の業務「" + j.duplicate.name + "」を " + j.duplicate.created_at + " に登録済みです（月 " + j.duplicate.hours + " h）。どうしますか？" + (j.duplicate.can_delete ? "" : "（前の登録は改善チームが対応を始めているため取り消せません）")));
-      var replace = el("button", "btn btn-sm btn-primary", "前の登録を取り消して、この内容で登録");
-      replace.type = "button";
-      replace.addEventListener("click", async function () {
-        var d = await api("DELETE", CFG.api.tasks + "/" + j.duplicate.id, { emp_id: empNow() });
-        if (!d._ok) { if (!respondentLost(d)) toast(d.message || "取り消せませんでした"); return; }
+      var replace = button("btn btn-sm btn-primary", "前の登録を取り消して、この内容で登録", async function () {
+        var d = await withdrawTask(j.duplicate.id);
+        if (!d._ok) return;
         S.tasks = d.tasks || S.tasks;
         renderRegistered();
         registerTask(Object.assign({}, body, { force: true }), btn);
       });
-      var both = el("button", "btn btn-sm btn-outline-dark", "別の業務として登録");
-      both.type = "button";
-      both.addEventListener("click", function () { registerTask(Object.assign({}, body, { force: true }), btn); });
-      var cancel = el("button", "btn btn-sm btn-outline-secondary", "やめる");
-      cancel.type = "button";
-      cancel.addEventListener("click", function () { box.classList.add("d-none"); });
+      var both = button("btn btn-sm btn-outline-dark", "別の業務として登録", function () { registerTask(Object.assign({}, body, { force: true }), btn); });
+      var cancel = button("btn btn-sm btn-outline-secondary", "やめる", function () { box.classList.add("d-none"); });
       if (j.duplicate.can_delete) box.appendChild(replace);
       box.appendChild(both);
       box.appendChild(cancel);
@@ -13151,7 +13151,7 @@ summary { transition: color 0.15s ease; }
     }
   }
   $("rq-another").addEventListener("click", function () { backToPick(); });
-  $("rq-next-monthly").addEventListener("click", function () { $("rq-title").value = this.dataset.task; startIntake(false, "monthly", this.dataset.task); });
+  $("rq-next-monthly").addEventListener("click", function () { titleInput.value = this.dataset.task; startIntake(false, "monthly", this.dataset.task); });
   $("rq-replay").addEventListener("click", async function () {
     if (!conv || busy || !conv.frames.length) return;
     var btn = this;
@@ -13207,13 +13207,13 @@ summary { transition: color 0.15s ease; }
   // ---------- 初期表示 ----------
   renderRegistered();
   renderSuggest();
-  if (CFG.prefill) $("rq-title").value = CFG.prefill;
+  if (CFG.prefill) titleInput.value = CFG.prefill;
   if (S.respondent) {
     empInput.value = S.respondent.emp_id || "";
     confirmedId = normId(S.respondent.emp_id);
     found = { workplace_id: S.respondent.workplace_id };
     fillSelects(S.respondent.workplace_id, S.respondent.work_pattern);
-    setIdentity("社員IDを確認しました");
+    setIdentity(ID_OK);
   } else if (CFG.emp) {
     empInput.value = CFG.emp;
     if (!CFG.monthly) lookupEmp();
