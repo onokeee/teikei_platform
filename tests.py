@@ -1,4 +1,5 @@
 """スモークテスト。python tests.py で全部、python tests.py smoke_board のように名前を付けると1本。一時ファイルの SQLite を使う"""
+import csv
 import io
 import json
 import os
@@ -679,6 +680,8 @@ def smoke_login_monthly():
     check(r.status_code == 400 and "回答済み" in r.get_json()["message"], "2回目は回答済みで拒否（1人1回）")
     code, html, r = get(f"/monthly/?period={period}&emp=E009")
     check("回答済み" in html and 'id="mq-form" class="card mq-card d-none"' in html, "回答済みの人はフォームの代わりに回答済み表示")
+    check('id="mq-other-id"' in html and "別の社員IDで回答する" in html and html.index('id="mq-other-id"') < html.index('id="mq-form"') and 'getElementById("mq-other-id").addEventListener' in html and "empInput.focus()" in html,
+          "P5: 回答済みの社員IDを入れても「別の社員IDで回答する」で社員IDの欄を空にしてフォームに戻れる")
     r = client.get(f"/monthly/api/employee/E009?period={period}")
     check(r.get_json()["answered"] is True, "照会 API が回答済みを返す")
     bad = dict(payload, emp_id="E010", name="加藤 恵", answers=dict(payload["answers"], has=""))
@@ -700,6 +703,18 @@ def smoke_login_monthly():
     check(r.status_code == 302 and "/monthly/done" in r.headers["Location"], "通常のフォーム送信でも受付")
     code, html, r = get(f"/monthly/done?period={period}")
     check(code == 200 and "回答を受け付けました" in html and "自動化を検討する" in html and "src=monthly" in html and "日報の転記" in html, "完了ページ（なくしたい業務があれば「自動化を検討する」へ）")
+    with app.app_context():
+        MonthlyResponse.query.filter_by(period=period, emp_id="E001").delete()
+        r001 = Respondent.query.filter_by(emp_id="E001").first()
+        new_wp = next(w for w in (1, 2, 3) if w != r001.workplace_id)
+        new_pat = "交代勤務" if r001.work_pattern != "交代勤務" else "普通勤務"
+        db.session.commit()
+    r = client.post("/monthly/submit", json=dict(payload, emp_id="E001", workplace_id=str(new_wp), work_pattern=new_pat))
+    with app.app_context():
+        r001 = Respondent.query.filter_by(emp_id="E001").first()
+        e001 = Employee.query.filter_by(emp_id="E001").first()
+        check(r.status_code == 200 and (r001.workplace_id, r001.work_pattern) == (new_wp, new_pat) == (e001.workplace_id, e001.work_pattern),
+              "P11: 月次で選んだ職場・勤務形態で、「自動化を検討」の回答者と対象者一覧の値も更新する（新しい選択が勝つ）")
 
     # ---- 設問の編集（要ログイン） ----
     r = client.post("/login", data={"emp_id": "admin", "password": "adminpass"})
@@ -707,6 +722,20 @@ def smoke_login_monthly():
     check(code == 200 and "qe-list" in html and "基本設問に戻す" in html, "設問エディタ")
     r = client.get("/monthly/admin/questions?period=default")
     check(r.get_json()["questions"][0]["key"] == "has", "基本設問の取得")
+    base_qs = r.get_json()["questions"]
+    far = "2031-05"
+    code, html, r = get(f"/monthly/admin?period={far}")
+    j_q = client.get(f"/monthly/admin/questions?period={far}").get_json()
+    with app.app_context():
+        none_yet = MonthlySurvey.query.filter_by(period=far).first() is None
+    check(code == 200 and none_yet and j_q["questions"] is None and "まだありません" in html and 'id="qe-active" checked' in html,
+          "P14: 設問の編集画面や設問の取得を開いただけでは、その月度の設問セットを作らない")
+    r = client.post("/monthly/admin/save", json={"period": far, "questions": base_qs, "is_active": True})
+    with app.app_context():
+        made = MonthlySurvey.query.filter_by(period=far).first()
+        check(r.status_code == 200 and made is not None and len(made.questions) == len(base_qs), "P14: 保存したときに設問セットを作る")
+        db.session.delete(made)
+        db.session.commit()
     with app.app_context():
         survey = MonthlySurvey.query.filter_by(period=period).first()
         qs = survey.questions
@@ -882,6 +911,28 @@ def smoke_login_monthly():
     html11 = client.get(r.headers["Location"]).data.decode("utf-8")
     check('"self_improve": true' in html11 and '"stance": ' in html11 and 'id="rq-from-monthly"' in html11 and "rq-next-monthly" in html11,
           "アンケートから来ると、答え（業務名・進め方）を入力済みで始める準備が整う")
+    with app.app_context():
+        x111 = MonthlyResponse.query.filter_by(period=period, emp_id="X111").first().id
+        old11 = MonthlyResponse(period=prev, emp_id="X111", name="", workplace_id=2, answers_json=json.dumps({"has": "ある", "wants": "ある", "wants_tasks": "前月の業務", "stance": "改善チームに依頼したい"}, ensure_ascii=False))
+        db.session.add(old11)
+        db.session.commit()
+        old11 = old11.id
+    with client.session_transaction() as sess:
+        handed = "monthly_last" in sess
+    check(f"m={x111}" in j11["register_url"] and f"m={x111}" in r.headers["Location"] and not handed,
+          "P4: 月次の送信後のリンクに回答の番号（m）を付けて引き継ぎ、引き継いだら控え（monthly_last）を消す")
+
+    def shown(page, text):
+        return text in page or json.dumps(text)[1:-1] in page
+
+    html_old = client.get("/survey/", query_string={"emp": "ｘ１１１", "src": "monthly", "m": old11}).data.decode("utf-8")
+    html_bad = client.get("/survey/", query_string={"emp": "E009", "src": "monthly", "m": old11}).data.decode("utf-8")
+    check(f'"period": "{prev}"' in html_old and shown(html_old, "前月の業務") and '"self_improve": false' in html_old and shown(html_old, '"x111"') and "monthly: null" in html_bad,
+          "P4: 引き継ぐのは m の回答そのもの（社員IDは全角・小文字でも同じ人。別の人の回答番号なら引き継がない）")
+    with client.session_transaction() as sess:
+        sess["monthly_last"] = x111
+    code, html_d, r_d = get(f"/monthly/done?period={prev}")
+    check(code == 200 and "前月の業務" in html_d and "週報の作成" not in html_d and f"m={old11}" in html_d, "P4: 完了ページは URL の月度の回答を出す（直前に送った別の月度の回答ではなく）")
     r = client.post("/monthly/submit", json=dict(full, emp_id="X108", name="複数 一", workplace_id="1", answers=dict(base_ans, wants="ない", task_names=["日報の集計", " ", "出勤簿の転記"])))
     with app.app_context():
         row = MonthlyResponse.query.filter_by(period=period, emp_id="X108").first()
@@ -1053,6 +1104,29 @@ def smoke_login_monthly():
         MonthlyResponse.query.filter(MonthlyResponse.period.in_(["2002-01", "2002-02", "2002-03"])).delete(synchronize_session=False)
         Employee.query.filter(Employee.emp_id.in_(["M1", "M2", "M3", "M9"])).delete(synchronize_session=False)
         db.session.commit()
+        from datetime import datetime as _dt
+        from sqlalchemy import text as _sql
+        db.session.expunge_all()
+        db.session.add(Employee(emp_id="C1", name="追加 一", source="manual", created_at=_dt(2003, 2, 10)))
+        db.session.add(Employee(emp_id="C2", name="追加 二", source="answer", created_at=_dt(2003, 3, 20)))
+        db.session.add(MonthlyResponse(period="2003-01", emp_id="C2", name="", workplace_id=1, answers_json="{}", created_at=_dt(2003, 1, 25)))
+        db.session.commit()
+        ps = ["2003-01", "2003-02", "2003-03", "2003-04"]
+        pick = lambda: [x for x in app_module.member_rows() if x["emp"].emp_id in ("C1", "C2")]
+        before = app_module.member_stats(pick(), ps)
+        db.session.add(MonthlyResponse(period="2003-04", emp_id="C1", name="", workplace_id=1, answers_json="{}"))
+        db.session.commit()
+        after = app_module.member_stats(pick(), ps)
+        check([before[p]["members"] for p in ps] == [1, 2, 2, 2] and [after[p]["members"] for p in ps] == [1, 2, 2, 2] and after["2003-04"]["answered"] == 1,
+              f"P8: 分母に入るのは「対象者一覧に載った月」と「初めて回答した月」の早いほうから。あとで初めて回答しても過去の月は変わらない: {[before[p]['members'] for p in ps]} → {[after[p]['members'] for p in ps]}")
+        db.session.execute(_sql("UPDATE employees SET created_at = NULL WHERE emp_id = 'C2'"))
+        db.session.commit()
+        app_module._backfill_member_since()
+        db.session.commit()
+        check(Employee.query.filter_by(emp_id="C2").first().created_at == _dt(2003, 1, 25), "P8: 載った日が空の行は、最初の月次の回答・最初の業務・更新日のうち最も早い日で埋める")
+        MonthlyResponse.query.filter(MonthlyResponse.emp_id.in_(["C1", "C2"])).delete(synchronize_session=False)
+        Employee.query.filter(Employee.emp_id.in_(["C1", "C2"])).delete(synchronize_session=False)
+        db.session.commit()
         e009 = Employee.query.filter_by(emp_id="E009").first().id
     client.post("/login", data={"emp_id": "admin", "password": "adminpass"})
     code, html, r = get("/admin/employees")
@@ -1068,6 +1142,55 @@ def smoke_login_monthly():
     check("月次アンケート回答率" in html and "対象 " in html, "ダッシュボードの回答率は対象者一覧の最新月で出す")
     code, html, r = get("/admin/")
     check("アンケート対象者数" not in html and "目標期限" not in html and "target_respondents" not in html, "管理: 対象者数・目標期限の設定はない")
+    with app.app_context():
+        answered_n = len(app_module.answered_people())
+    check(f"回答した人 {answered_n} 人（業務を1件以上登録したか、月次アンケートに回答した人。対象外は除く）" in html and f"回答した人 {answered_n} 人／業務" in html and "一度でも回答した人）" not in html,
+          f"P9: 管理のトップの人数は「回答した人」（対象外とまだ回答のない人を除く）: {answered_n} 人")
+
+    # ---- 対象外の人は回答できず、回答率と同じ数え方で回答数を出す ----
+    EXCL = "この社員IDは対象外になっています。管理者に連絡してください"
+    with app.app_context():
+        e011 = Employee.query.filter_by(emp_id="E011").first().id
+    client.post(f"/admin/employees/{e011}/toggle", json={"excluded": True})
+    j = client.get(f"/monthly/api/employee/e011?period={period}").get_json()
+    r_m = client.post("/monthly/submit", json=dict(full, emp_id="E011", workplace_id="1"))
+    r_s = client.post("/survey/api/respondent", json={"emp_id": "E011", "workplace_id": 1, "work_pattern": "普通勤務"})
+    check(j["found"] and j.get("excluded") and j["message"] == EXCL and r_m.status_code == 400 and r_m.get_json()["errors"]["emp_id"] == EXCL and r_s.status_code == 400 and r_s.get_json()["errors"]["emp_id"] == EXCL,
+          "P7: 対象外の社員IDは回答できない（照会は見つかった＋対象外、月次の送信・あなたのことの保存は対象外のメッセージ）")
+    code, html_f, r = get(f"/monthly/?period={period}&emp=E013")
+    js_sv = client.get("/static/survey.js").data.decode("utf-8")
+    check("j.excluded" in html_f and (EXCL in html_f or json.dumps(EXCL)[1:-1] in html_f) and "j.excluded" in js_sv and "setIdentity(j.errors.emp_id, true)" in js_sv,
+          "P7: 月次アンケートと「自動化を検討」の両方の画面で対象外のメッセージを出す")
+    with app.app_context():
+        st_now = app_module.member_stats(app_module.member_rows(), [period])[period]
+        row_now = next(x for x in app_module.monthly_summary() if x["period"] == period)
+        excluded_answers = MonthlyResponse.query.filter_by(period=period, emp_id="E011").count()
+    code, html_r, r = get("/monthly/results")
+    code, html_i, r = get("/")
+    check(excluded_answers == 1 and row_now["member_answered"] == st_now["answered"] and row_now["n"] == row_now["member_answered"] + 1 and "うち対象者" in html_r and f"（うち対象者 {row_now['member_answered']} 人）" in html_i,
+          f"P7: 回答率の隣の回答数は対象者だけで数え、対象外の人の回答があれば「回答 N 人（うち対象者 n 人）」と出す: {row_now['n']} / {row_now['member_answered']}")
+    client.post(f"/admin/employees/{e011}/toggle", json={"excluded": False})
+
+    # ---- 職場の削除は使われていないときだけ。名前は変えられる ----
+    with app.app_context():
+        wp_used = app_module.Workplace.query.filter_by(name="製造1課").first().id
+    html_w = client.post(f"/admin/workplace/{wp_used}/delete", follow_redirects=True).data.decode("utf-8")
+    with app.app_context():
+        kept = db.session.get(app_module.Workplace, wp_used) is not None
+    check(kept and "使われているため削除できません" in html_w and "業務 " in html_w and "月次の回答 " in html_w and "対象者 " in html_w, "P13: 業務・月次の回答・対象者・回答者が使っている職場は削除せず、何が使っているかを出す")
+    client.post(f"/admin/workplace/{wp_used}/update", data={"name": "製造1課（第一）"})
+    html_w = client.post(f"/admin/workplace/{wp_used}/update", data={"name": "製造2課"}, follow_redirects=True).data.decode("utf-8")
+    with app.app_context():
+        renamed = db.session.get(app_module.Workplace, wp_used).name
+    client.post(f"/admin/workplace/{wp_used}/update", data={"name": "製造1課"})
+    client.post("/admin/workplace/add", data={"name": "試験の職場"})
+    with app.app_context():
+        wp_new = app_module.Workplace.query.filter_by(name="試験の職場").first().id
+    client.post(f"/admin/workplace/{wp_new}/delete")
+    code, html_a, r = get("/admin/")
+    with app.app_context():
+        check(renamed == "製造1課（第一）" and "同じ名前の職場があります" in html_w and db.session.get(app_module.Workplace, wp_new) is None and f"/admin/workplace/{wp_used}/update" in html_a,
+              "P13: 管理で職場名を変えられ（同じ名前は不可）、使われていない職場は削除できる")
 
     # ---- DX人財情報 ----
     client.post("/login", data={"emp_id": "admin", "password": "adminpass"})
@@ -1091,7 +1214,166 @@ def smoke_login_monthly():
     r = client.get("/people/", query_string={"workplace_id": 99})
     check(r.status_code == 200 and "該当する人はいません" in r.data.decode("utf-8"), "該当なしの表示")
 
+    # ---- 社員IDの表記ゆれ（全角・小文字）は同じ人。回答のある人は削除せず対象外に ----
+    with app.app_context():
+        n_before = Employee.query.count()
+    r = client.post("/admin/employees/add", data={"emp_id": "ｅ００９", "name": "小林 直樹", "workplace_id": "1", "work_pattern": ""}, follow_redirects=True)
+    csv_body = "社員ID,氏名\n" + "ｅ０１０ ,加藤 恵\n" + "n001,新規 社員\n"
+    r2 = client.post("/admin/employees/import", data={"file": (io.BytesIO(csv_body.encode("utf-8")), "emp.csv")}, content_type="multipart/form-data", follow_redirects=True)
+    with app.app_context():
+        check(Employee.query.count() == n_before and "社員情報を更新しました" in r.data.decode("utf-8") and "追加 0 人、更新 2 人" in r2.data.decode("utf-8") and Employee.query.filter_by(emp_id="ｅ００９").first() is None,
+              "P6: 手動追加・CSV取込の社員IDは全角を半角にし、大文字・小文字の違いも同じ人として上書きする")
+        n001 = Employee.query.filter_by(emp_id="N001").first().id
+        db.session.add(Employee(emp_id="R001", name="保存だけ", source="manual"))
+        db.session.add(Respondent(emp_id="r001", name="", workplace_id=1, work_pattern="普通勤務"))
+        db.session.commit()
+        r001 = Employee.query.filter_by(emp_id="R001").first().id
+    code, html, r = get("/admin/employees")
+    check(f"/admin/employees/{n001}/delete" in html and f"/admin/employees/{e009}/delete" not in html and f"/admin/employees/{r001}/delete" not in html, "P10: 対象者一覧の削除ボタンは、まだ回答も登録もない人だけに出す")
+    html_x = client.post(f"/admin/employees/{e009}/delete", follow_redirects=True).data.decode("utf-8")
+    html_y = client.post(f"/admin/employees/{r001}/delete", follow_redirects=True).data.decode("utf-8")
+    client.post(f"/admin/employees/{n001}/delete")
+    with app.app_context():
+        check(db.session.get(Employee, e009) is not None and db.session.get(Employee, r001) is not None and "削除できません" in html_x and "「対象外」にチェック" in html_x and "削除できません" in html_y and db.session.get(Employee, n001) is None,
+              "P10: 月次の回答・業務・「あなたのこと」の記録がある人は削除せず「対象外」を案内する。まだ何もない人は削除できる")
+
+    _people_checks(check)
+    _migration_checks(check)
     return fails
+
+
+def _people_checks(check):
+    import app as app_module
+    from datetime import datetime, timedelta
+
+    tmpdir = tempfile.mkdtemp()
+    dbfile = os.path.join(tmpdir, "people.sqlite3").replace("\\", "/")
+    app = create_app({"SQLALCHEMY_DATABASE_URI": "sqlite:///" + dbfile, "TESTING": True})
+    client = app.test_client()
+    client.post("/login", data={"emp_id": "admin", "password": "adminpass"})
+    cur = current_period()
+    prev = shift_period(cur, -1)
+    now = datetime.now()
+    old, mid, new = now - timedelta(days=60), now - timedelta(days=30), now - timedelta(days=1)
+    with app.app_context():
+        w1, w2, w3 = [w.id for w in app_module.Workplace.query.order_by(app_module.Workplace.sort, app_module.Workplace.id).limit(3).all()]
+        for e in ("P001", "P002", "P003", "P004", "P005", "P006", "P007", "P008"):
+            db.session.add(Employee(emp_id=e, name=f"氏名 {e}", source="answer", active=(e != "P006")))
+
+        def resp(e, wp, skills="", learn=""):
+            r = Respondent(emp_id=e, name=f"氏名 {e}", workplace_id=wp, work_pattern="普通勤務", c2_skills=skills, c3_learn=learn)
+            db.session.add(r)
+            db.session.flush()
+            return r
+
+        def task(r, name, at, checked=False, assignment="未定"):
+            db.session.add(Task(respondent_id=r.id, workplace_id=r.workplace_id, name=name, frequency="毎週", duration="15分未満", wish="減らしたい",
+                                self_improve=app_module.SELF_IMPROVE_YES if checked else app_module.SELF_IMPROVE_NO, assignment=assignment, created_at=at))
+
+        def monthly(e, period, wp, at, **answers):
+            row = MonthlyResponse(period=period, emp_id=e, name=f"氏名 {e}", workplace_id=wp, answers_json=json.dumps(answers, ensure_ascii=False), created_at=at)
+            db.session.add(row)
+            db.session.flush()
+            return row.id
+
+        task(resp("P001", w1, skills="特になし", learn="Python|特になし"), "一の業務", old, checked=True)
+        monthly("P001", prev, w1, mid, has="ある", wants="ある", wants_tasks="一の業務", stance="改善チームに依頼したい")
+        monthly("P002", prev, w1, mid, has="ある", wants="ある", wants_tasks="二の業務", stance="学びながら改善チームと一緒に取り組みたい")
+        task(resp("P002", w1), "二の業務", new)
+        task(resp("P003", w2), "三の業務", mid)
+        want_id = monthly("P004", prev, w2, mid, has="ある", wants="ある", wants_tasks="検査記録の転記\n日報の集計", stance="自分で取り組みたい")
+        monthly("P004", cur, w2, new, has="ある", wants="ない")
+        resp("P005", w3)
+        monthly("P006", cur, w3, new, has="ない")
+        task(resp("P007", w2), "七の業務", mid, assignment="自主改善")
+        db.session.commit()
+    client.post("/logout")
+    client.post("/survey/api/respondent", json={"emp_id": "P008", "workplace_id": w3, "work_pattern": "普通勤務"})
+    client.post("/login", data={"emp_id": "admin", "password": "adminpass"})
+    with app.test_request_context():
+        people = {p["emp_id"]: p for p in app_module.dx_people()}
+        k = app_module.kpis()
+        wps = {w["workplace"].id: w for w in app_module.workplace_stats()}
+        quiet = next((s for s in app_module.suggest_actions(limit=50) if s["title"].startswith("まだ回答のない職場")), None)
+        all_details = " ".join(s["detail"] for s in app_module.suggest_actions(limit=50))
+        have, learn = app_module.skills_summary()
+        w3_name = db.session.get(app_module.Workplace, w3).name
+        w1_name = db.session.get(app_module.Workplace, w1).name
+    check(set(people) == {"P001", "P002", "P003", "P004", "P007"},
+          f"P9: 回答した人は業務を1件以上登録したか月次に回答した人だけ（あなたのことの保存だけの人・対象外の人は入らない）: {sorted(people)}")
+    check(k["respondent_count"] == 5 and k["self_improver_count"] == 2 and {e for e, p in people.items() if p["positive"]} == {"P002", "P004"},
+          f"P9・P17・P21: 自主改善者と分母は同じ「回答した人」から（{k['self_improver_count']}／{k['respondent_count']}）。チェックと月次の進め方は新しいほうで決め、チェックなしは否定に数えない")
+    check((wps[w1]["respondents"], wps[w1]["self_improvers"], wps[w2]["respondents"], wps[w2]["self_improvers"], wps[w3]["respondents"]) == (2, 1, 3, 1, 0)
+          and all(w["self_improvers"] <= w["respondents"] for w in wps.values()),
+          f"P9・P17: 職場別の「回答した人」と自主改善は同じ人の集まりで数える: {[(w['respondents'], w['self_improvers']) for w in wps.values()]}")
+    check(quiet is not None and w3_name in quiet["title"] and w1_name not in quiet["title"] and "記入会" not in all_details,
+          f"P9: 「まだ回答のない職場」は月次の回答も業務もない職場（対象外の人の回答は数えない）。「記入会」という言葉は使わない: {quiet and quiet['title']}")
+    p1, p2, p3, p4, p7 = (people[e] for e in ("P001", "P002", "P003", "P004", "P007"))
+    check(p3["wish"] == "チェックなし" and p2["wish"] == "チェックなし" and p1["wish"] == "スキルを身につけながら、一緒にやってみたい" and not p1["positive"] and p2["positive"],
+          "P21: 「一緒にやってみたい」にチェックしなかった業務は「チェックなし」（改善チームに任せたいとはみなさない）")
+    check(p4["stance_latest"] == "自分で取り組みたい" and p4["stance_label"] == period_label(prev) and p4["self_positive_count"] == 1 and p1["self_positive_count"] == 0,
+          "P16: 進め方は空でない直近の回答とその月度で出し、自分で／一緒にの回数も数える")
+    check("特になし" not in have and "特になし" not in learn and learn.get("Python") == 1 and p1["skills"] == [] and p1["skills_none"],
+          f"P20: 「特になし」は技術の人数・グラフ・学びたい人・教育テーマに数えない: {dict(have)} {dict(learn)}")
+    check([x["label"] for x in p7["target_tasks"]] == ["伴走"] and [x["label"] for x in p1["target_tasks"]] == ["希望"], "P23: 担当区分が「自主改善」の案件は業務欄に「伴走」と出す")
+    check(p4["monthly_wants"] == ["検査記録の転記", "日報の集計"] and p4["monthly_wants_id"] == want_id, "P24: 業務0件の人は、直近の月次で挙げたなくしたい業務を出す")
+    html = client.get("/people/").data.decode("utf-8")
+    check("チェックなし" in html and "改善チームに任せたい" not in html and ">伴走<" in html and f"/survey/start?emp=P004&amp;src=monthly&amp;m={want_id}" in html and "検査記録の転記・日報の集計" in html
+          and "自分で／一緒に 1回（回答 2 回中）" in html and "自分で／一緒に 0回（回答 1 回中）" in html and period_label(prev) in html and ">特になし<" in html,
+          "P16・P20・P21・P23・P24: DX人財情報の一覧（チェックなし・伴走・月次の進め方と回数・特になし・業務0件の人の自動化を検討へのリンク）")
+    check(f">{len(people)}<span" in html and "業務を1件以上登録したか、月次アンケートに回答した人（対象外は除く）" in html, "P9: DX人財情報の「回答した人」も同じ決まり")
+    rows = list(csv.reader(io.StringIO(client.get("/admin/export/respondents.csv").data.decode("utf-8-sig"))))
+    by_id = {x[0]: x for x in rows[1:]}
+    check(set(by_id) == set(people) and "P004" in by_id and "自分で取り組みたい" in by_id["P004"] and period_label(prev) in by_id["P004"] and by_id["P003"][5] == "チェックなし",
+          f"P19: 回答者CSVは DX人財情報と同じ人・同じ値（月次だけの人も入る）: {sorted(by_id)}")
+    html = client.get("/").data.decode("utf-8")
+    check("自ら改善に取り組みたい人（回答した人 5 人中）" in html and "<th class=\"text-end\">回答した人</th>" in html and "（うち対象者 1 人）" in html,
+          "P9・P17・P7: ダッシュボードの自主改善者の分母・職場別の「回答した人」・月次カードの回答数（うち対象者）")
+    html = client.get("/admin/").data.decode("utf-8")
+    check("回答した人 5 人（" in html, "P9: 管理のトップも同じ人数")
+    rid = None
+    with app.app_context():
+        rid = Respondent.query.filter_by(emp_id="P008").first()
+        check(rid is not None and "P008" not in {p["emp_id"] for p in app_module.dx_people()}, "P9: 「あなたのこと」を保存しただけでは回答した人にならない")
+
+
+def _migration_checks(check):
+    import sqlite3
+    from datetime import datetime
+
+    tmpdir = tempfile.mkdtemp()
+    path = os.path.join(tmpdir, "old.sqlite3")
+    uri = "sqlite:///" + path.replace("\\", "/")
+    app1 = create_app({"SQLALCHEMY_DATABASE_URI": uri, "TESTING": True})
+    with app1.app_context():
+        db.session.add(MonthlyResponse(period="2004-03", emp_id="Q001", name="", workplace_id=1, answers_json="{}", created_at=datetime(2004, 3, 9)))
+        db.session.commit()
+        db.engine.dispose()
+    con = sqlite3.connect(path)
+    con.executescript(
+        "CREATE TABLE employees_old (id INTEGER PRIMARY KEY, emp_id VARCHAR(50) NOT NULL UNIQUE, name VARCHAR(100) NOT NULL, department VARCHAR(100), work_pattern VARCHAR(20) DEFAULT '', "
+        "workplace_id INTEGER, email VARCHAR(200), active BOOLEAN, source VARCHAR(20), is_demo BOOLEAN, updated_at DATETIME);"
+        "DROP TABLE employees; ALTER TABLE employees_old RENAME TO employees;"
+    )
+    con.executemany("INSERT INTO employees (emp_id, name, department, work_pattern, email, active, source, is_demo, updated_at) VALUES (?, ?, '', '', '', ?, ?, 0, ?)", [
+        ("Q001", "", 1, "answer", "2004-05-01 00:00:00.000000"),
+        ("ｑ００１", "正しい 名前", 0, "manual", "2004-04-01 00:00:00.000000"),
+        ("q001", "", 1, "answer", "2004-06-01 00:00:00.000000"),
+        ("Ｑ００２", "全角 だけ", 1, "csv", "2004-07-01 00:00:00.000000"),
+    ])
+    con.commit()
+    con.close()
+    app2 = create_app({"SQLALCHEMY_DATABASE_URI": uri, "TESTING": True})
+    with app2.app_context():
+        from sqlalchemy import inspect
+        cols = {c["name"] for c in inspect(db.engine).get_columns("employees")}
+        rows = Employee.query.order_by(Employee.emp_id).all()
+        check("created_at" in cols and [e.emp_id for e in rows] == ["Q001", "Q002"],
+              f"P6: 起動時に、全角・大文字小文字だけが違う社員IDの行を1行にまとめ、半角にそろえる: {[e.emp_id for e in rows]}")
+        check(rows[0].active is False and rows[0].name == "正しい 名前", "P6: まとめるとき、どれかが対象外なら対象外のまま、氏名はいちばん確かなものを残す")
+        check(rows[0].created_at == datetime(2004, 3, 9) and rows[1].created_at == datetime(2004, 7, 1),
+              f"P8: 起動時に employees へ載った日（created_at）を足し、最初の月次の回答・最初の業務・更新日の早いほうで埋める: {[e.created_at for e in rows]}")
+        db.engine.dispose()
 
 def smoke_request():
     import urllib.request
@@ -1143,11 +1425,32 @@ def smoke_request():
     r = client.post("/survey/api/respondent", json={"emp_id": "T001", "name": "試験 太郎", "workplace_id": 1, "work_pattern": "交代勤務"})
     j = r.get_json()
     check(r.status_code == 200 and j["suggested"] == ["日報の集計", "出勤簿の転記"] and j["suggested_wants"] == ["日報の集計"] and j["respondent"]["work_pattern"] == "交代勤務", f"アンケートで挙げた業務が候補に出て（なくしたい業務が先）、勤務形態が保存される: {j.get('suggested')}")
+    check(j["stance"] and j["stance"]["value"] == "改善チームに依頼したい" and j["stance"]["self_improve"] is False and j["stance"]["period"] == current_period(),
+          f"P22: あなたのことを保存すると、月次の直近の進め方（空でないもの）と月度を返す（月次から来たときに限らない）: {j.get('stance')}")
     code, html_m, r = get("/survey/?emp=T001&src=monthly")
     check(code == 200 and '"self_improve": false' in html_m and ('"wants_tasks": ["\\u65e5' in html_m or '"wants_tasks": ["日報の集計"]' in html_m), "アンケートから来ると、なくしたい業務と進め方（依頼したい＝チェックなし）を渡す")
     check('"respondent": null' in html_m, "開いたときは前の回答者を戻さず、空で始める")
     check('"workplace_id": 1' in html_m, "月次アンケートから来たときは、その回答で選んだ職場を引き継ぐ")
     client.post("/survey/api/respondent", json={"emp_id": "T001", "workplace_id": 1, "work_pattern": "交代勤務"})
+    r1 = client.post("/survey/api/tasks", json={"emp_id": "T002", "name": "別人の業務", "state": {}, "messages": []})
+    r2 = client.post("/survey/api/intake", json={"emp_id": "T002", "title": "x", "messages": [], "state": {}})
+    r3 = client.delete("/survey/api/tasks/999999", json={"emp_id": "T002"})
+    r4 = client.post("/survey/api/tasks", json={"emp_id": "", "name": "x", "state": {}, "messages": []})
+    check(all(x.status_code == 409 and "あなたのこと" in x.get_json()["message"] and x.get_json()["errors"]["_"] == "respondent" for x in (r1, r2, r3, r4)),
+          "P1: 画面の社員ID（emp_id）が保存した回答者と違えば、聞き取り・登録・取り消しは 409 で「あなたのこと」を入れ直すよう返す")
+    r = client.post("/survey/api/tasks", json={"emp_id": "ｔ００１", "name": "", "state": {}, "messages": []})
+    check(r.status_code == 400 and "name" in r.get_json()["errors"], "P1: 全角・小文字でも同じ社員IDなら同じ人として通す（入力チェックへ進む）")
+    js_rq = client.get("/static/survey.js").data.decode("utf-8")
+    check("function forgetPerson()" in js_rq and "clearSelects();" in js_rq and "api(\"POST\", CFG.api.reset)" in js_rq and js_rq.count("emp_id: empNow()") >= 4 and "respondentLost(j)" in js_rq,
+          "P1: 社員IDを打ち替えた・見つからないときは回答者・登録一覧・候補・職場・勤務形態を消してリセットし、聞き取り・登録・取り消しに社員IDを付けて送る")
+    check("confirmedId && confirmedId !== key" in js_rq and js_rq.index("forgetPerson();\n      confirmedId = key;") < js_rq.index("if (v.workplace_id && v.work_pattern) debounce"),
+          "P2: 別の人の社員IDが見つかったときは、前の人の職場・勤務形態を消してから（自動保存はしない）")
+    check("resetPage();" in js_rq and "function resetPage()" in js_rq and "history.replaceState" in js_rq and js_rq.index("await api(\"POST\", CFG.api.reset);\n    resetPage();") > 0,
+          "P3: 送信して完了で回答者をリセットし、お礼のあと画面を空に戻す（URL の社員IDも消す）")
+    check("if (j.respondent) S.respondent = j.respondent;" in js_rq, "P18: 登録のあと S.respondent を新しい値にして、技術の欄の事前選択に使う")
+    check("O.skill_none" in js_rq and "S.stance" in js_rq and "conv.origin === \"monthly\" && CFG.monthly && CFG.monthly.self_improve" not in js_rq,
+          "P20・P22: 技術の「特になし」は他と同時に選べない。「一緒にやってみたい」の事前チェックは月次からに限らず直近の進め方から")
+    check("t.can_delete" in js_rq and "t.stage" in js_rq and "j.duplicate.can_delete" in js_rq, "P15: 登録一覧に段階を出し、取り消せないときは「取り消す」を出さない")
 
     calls, script = [], []
 
@@ -1254,10 +1557,21 @@ def smoke_request():
         r = client.post("/survey/api/tasks", json={"state": final_state, "messages": msgs, "frequency": "毎日", "duration": "15〜30分", "wish": "減らしたい"})
         check(r.status_code == 400 and "shift" in r.get_json()["errors"], "交代勤務の人は、いつやるか（昼勤／夜勤／両方）がないと登録できない")
         script.append(message(finalize))
-        r = client.post("/survey/api/tasks", json={"state": final_state, "messages": msgs, "frequency": "毎日", "duration": "15〜30分", "wish": "減らしたい", "self_improve": True, "skills": ["Excel関数"], "learn": ["Python"], "shift": "夜勤"})
+        with app.app_context():
+            e_t1 = Employee.query.filter_by(emp_id="T001").first()
+            e_t1.workplace_id, e_t1.work_pattern = 2, "普通勤務"
+            db.session.commit()
+        r = client.post("/survey/api/tasks", json={"emp_id": "T001", "state": final_state, "messages": msgs, "frequency": "毎日", "duration": "15〜30分", "wish": "減らしたい", "self_improve": True, "skills": ["Excel関数", "特になし"], "learn": ["Python"], "shift": "夜勤"})
         j = r.get_json()
         b = calls[-1]["body"]
         check(r.status_code == 200 and j["success"] and j["first_impression"] == finalize["first_impression"] and len(j["tasks"]) == 1 and j["suggested"] == ["出勤簿の転記"], "登録: AI の一言が返り、候補から登録した業務が消える")
+        check(j["respondent"]["c2_skills"] == ["Excel関数"] and j["respondent"]["c3_learn"] == ["Python"], f"P18・P20: 登録の応答に新しい技術が入り、「特になし」は他の技術と一緒には残らない: {j['respondent']['c2_skills']}")
+        check(j["tasks"][0]["stage"] == "開始" and j["tasks"][0]["can_delete"] is True, f"P15: 登録した業務に段階と取り消せるかが付く: {j['tasks'][0].get('stage')}")
+        with app.app_context():
+            e_t1 = Employee.query.filter_by(emp_id="T001").first()
+            t_new = Task.query.filter_by(name="日報の集計").first()
+            check((e_t1.workplace_id, e_t1.work_pattern) == (2, "普通勤務") and t_new.workplace_id == 1,
+                  "P11: 業務の登録で、対象者一覧の職場・勤務形態を回答者の古い値で上書きしない（業務の職場は「あなたのこと」の選択）")
         fin_in = b["input"][0]["content"]
         check("業務分析アシスタント" in b["instructions"] and "聞き取りの結果" in fin_in and "減らしたい" in fin_in and "製造実行・管理" in fin_in and "## 勤務\n夜勤" in fin_in and "temperature" not in calls[-1]["raw"] and [x["name"] for x in b["tools"]] == ["search_similar_tasks", "duplicate_outputs"], "登録時の分析: state・希望・勤務・業務領域リストと2つの道具を送る。temperature なし")
         with app.app_context():
@@ -1290,6 +1604,26 @@ def smoke_request():
         with app.app_context():
             t2 = Task.query.filter_by(name="相談したい業務").first()
             check(t2 is not None and t2.is_candidate and len(t2.ai_extra_dict["hearing_questions"]) == 2, "相談の案件は候補に数え、ヒアリング質問が残る")
+            t2_id = t2.id
+        refused = []
+        for change in ({"decision": "廃止"}, {"status": "保留"}, {"stage": "request", "status": "対応中"}):
+            with app.app_context():
+                t2 = db.session.get(Task, t2_id)
+                t2.decision, t2.status, t2.stage = "未定", "受付", "start"
+                for k_, v_ in change.items():
+                    setattr(t2, k_, v_)
+                db.session.commit()
+            r = client.delete(f"/survey/api/tasks/{t2_id}", json={"emp_id": "T001"})
+            refused.append(r.status_code == 409 and r.get_json()["message"] == "改善チームが対応を始めているため取り消せません")
+        r = client.post("/survey/api/tasks", json={"emp_id": "T001", "name": "相談したい業務", "state": state(title="相談したい業務", steps=[step1]), "messages": [], "frequency": "毎週", "duration": "15分未満", "wish": "まずは相談したい", "shift": "昼勤"})
+        dup = r.get_json()
+        with app.app_context():
+            st2 = next(x for x in app_module._state(db.session.get(Task, t2_id).respondent)["tasks"] if x["id"] == t2_id)
+            check(all(refused) and db.session.get(Task, t2_id) is not None and r.status_code == 409 and dup["duplicate"]["can_delete"] is False and st2["can_delete"] is False and st2["stage"] == "要求定義",
+                  f"P15: 方針を決めた・保留・段階が進んだ案件は、本人は取り消せない（409）。二重登録の警告でも「前の登録を取り消す」は出さない: {refused}")
+            t2 = db.session.get(Task, t2_id)
+            t2.stage, t2.status = "start", "受付"
+            db.session.commit()
 
         script.append(urllib.error.URLError("接続できない（テスト）"))
         r = client.post("/survey/api/tasks", json={"name": "AIなしでも登録", "state": state(title="AIなしでも登録", steps=[step1, step4], sources=["生産管理システム"], recipients=["課長"], shift="昼勤・夜勤の両方"), "messages": [], "frequency": "毎月", "duration": "1〜2時間", "wish": "なくしたい"})
@@ -1315,7 +1649,12 @@ def smoke_request():
         check("手順（聞き取り）" in csv_text and "生産管理システムから前日の実績をCSVで出す → " in csv_text and ",夜勤," in csv_text and "AI推定の項目" in csv_text, "改善案件の CSV に勤務・手順・AI推定の項目が出る")
         check("勤務形態" in client.get("/monthly/export.csv").data.decode("utf-8-sig") and "勤務形態" in client.get("/admin/export/respondents.csv").data.decode("utf-8-sig"), "月次・回答者の CSV に勤務形態が出る")
         client.post("/logout")
-        r = client.delete(f"/survey/api/tasks/{tid}")
+        with client.session_transaction() as sess:
+            left = dict(sess)
+        r = client.delete(f"/survey/api/tasks/{tid}", json={"emp_id": "T001"})
+        check(r.status_code == 400 and "user" not in left and "respondent_id" not in left, f"P12: ログアウトでセッションを丸ごと消す（回答者も残らない）: {sorted(left)}")
+        client.post("/survey/api/respondent", json={"emp_id": "T001", "workplace_id": 1, "work_pattern": "交代勤務"})
+        r = client.delete(f"/survey/api/tasks/{tid}", json={"emp_id": "T001"})
         check(r.status_code == 200 and r.get_json()["success"] and "日報の集計" in r.get_json()["suggested"], "取り消すと候補に戻る")
         check(not script, "用意した応答をすべて使った")
         check("確か<br/>" not in app_module.wrap("棚の在庫数を確かめて台帳に記入する") and "まと<br/>" not in app_module.wrap("集めた数字を資料にまとめて課長に渡す"), "流れ図の改行は語の途中（確か／める、まと／める）で切らない")
@@ -1329,11 +1668,11 @@ def smoke_request():
     check(r.status_code == 400 and "見つかりません" in r.get_json()["errors"].get("emp_id", ""), "見つからない社員IDは、氏名を入れても進めない")
     r = client.post("/survey/api/intake", json={"title": "x", "messages": [], "state": {}})
     check(r.status_code == 400, "あなたのことを保存していないと聞き取りできない")
-    client.post("/survey/api/respondent", json={"emp_id": "T002", "name": "試験 次郎", "workplace_id": 1, "work_pattern": "普通勤務"})
     client.post("/login", data={"emp_id": "admin", "password": "adminpass"})
     client.post("/admin/ai", data={"openai_api_url": "", "openai_api_key": "", "openai_model": ""})
     client.post("/logout")
-    r = client.post("/survey/api/intake", json={"title": "x", "messages": [], "state": {}})
+    client.post("/survey/api/respondent", json={"emp_id": "T002", "name": "試験 次郎", "workplace_id": 1, "work_pattern": "普通勤務"})
+    r = client.post("/survey/api/intake", json={"emp_id": "T002", "title": "x", "messages": [], "state": {}})
     check(r.status_code == 400 and "AI連携が設定されていません" in r.get_json()["message"], "AI 未設定なら聞き取りは始められず、設定を案内する")
 
     return fails

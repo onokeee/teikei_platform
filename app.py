@@ -66,7 +66,8 @@ LEGACY_WISHES = {"自動化したい": "減らしたい", "分からない": "�
 SYSTEM_SOURCES = {"生産管理システム", "品質システム", "設備データ"}
 SELF_IMPROVE_YES = "スキルを身につけながら、一緒にやってみたい"
 SELF_IMPROVE_NO = "改善チームに任せたい"
-DX_WISH_OPTIONS = [SELF_IMPROVE_YES, SELF_IMPROVE_NO]
+SELF_IMPROVE_UNCHECKED = "チェックなし"
+DX_WISH_OPTIONS = [SELF_IMPROVE_YES, SELF_IMPROVE_UNCHECKED]
 INTAKE_MAX_QUESTIONS = 6
 INTAKE_STEP_LIMIT = 12
 WORK_PATTERNS = ["普通勤務", "交代勤務"]
@@ -76,6 +77,7 @@ FREQUENCY_HINTS = {"毎日": "毎日（出勤のたび）"}
 # ---- パートC 改善への参加意欲とスキル ----
 C1_OPTIONS = ["ぜひ取り組みたい", "教えてもらえれば取り組みたい", "興味はあるが時間がない", "今は考えていない"]
 SKILLS = ["Excel関数", "ピボットテーブル", "Excel VBA", "Access", "Power Query", "Power BI", "Python", "RPA", "生成AI", "特になし"]
+SKILL_NONE = "特になし"
 
 # ---- 月間時間の算出（設計書 10. 集計・活用の流れ） ----
 FREQ_COEF = {
@@ -590,6 +592,7 @@ class Employee(db.Model):
     source = db.Column(db.String(20), default="csv")
     is_demo = db.Column(db.Boolean, default=False)
     updated_at = db.Column(db.DateTime, default=datetime.now, onupdate=datetime.now)
+    created_at = db.Column(db.DateTime, default=datetime.now)
 
     workplace = db.relationship("Workplace")
 
@@ -676,6 +679,7 @@ _ADDED_COLUMNS = {
     },
     "employees": {
         "work_pattern": "VARCHAR(20) DEFAULT ''",
+        "created_at": "DATETIME",
     },
     "monthly_responses": {
         "survey_id": "INTEGER",
@@ -736,6 +740,8 @@ def ensure_schema():
 
 # ===== 社員ID照会の控え（ldap_auth の結果を employees に残し、足りない氏名・職場を補う） =====
 ldap_status_text = ldap_auth.status_text
+EMP_NOT_FOUND = "この社員IDは見つかりません。IDを確かめてください"
+EMP_EXCLUDED = "この社員IDは対象外になっています。管理者に連絡してください"
 
 
 def workplace_for(department):
@@ -774,7 +780,11 @@ def lookup(emp_id):
         "name": name or (emp.name if emp else "") or "",
         "source": emp.source if emp else "ldap",
         "member": emp is not None,
+        "active": emp is None or emp.active is not False,
     }
+
+def emp_key(emp_id):
+    return norm_emp_id(emp_id).lower()
 
 def remember_person(emp_id, name=None, workplace_id=None, work_pattern=None):
     emp = find_employee(emp_id)
@@ -800,7 +810,7 @@ def register_member(emp_id, name="", workplace_id=None, work_pattern=""):
 # ----- KPI -----
 def kpis():
     tasks = Task.query.all()
-    respondents = Respondent.query.all()
+    people = dx_people()
     m_rows = member_rows()
     m_periods = member_periods()[-1:]
     latest = member_stats(m_rows, m_periods)[m_periods[0]] if m_periods else None
@@ -812,14 +822,14 @@ def kpis():
     sufficient = [t for t in tasks if t.is_sufficient]
     filled = [t for t in tasks if t.required_filled]
     verified = [t for t in tasks if t.verified]
-    self_improvers = [p for p in dx_people() if p["positive"]]
+    self_improvers = [p for p in people if p["positive"]]
     automated_or_eliminated = [t for t in completed if t.decision in ("廃止", "自動化")]
     candidates = [t for t in tasks if t.is_candidate]
     domain_rows = domain_analysis()
 
     return {
         "task_count": len(tasks),
-        "respondent_count": len(respondents),
+        "respondent_count": len(people),
         "member_count": len([r for r in m_rows if r["emp"].active]),
         "response_rate": latest["rate"] if latest else None,
         "response_period": period_label(m_periods[0]) if m_periods else "",
@@ -844,18 +854,18 @@ def kpis():
 # ----- 職場別・領域別 -----
 def workplace_stats():
     rows = []
-    positives = [p for p in dx_people() if p["positive"]]
+    people = dx_people()
     for wp in Workplace.query.order_by(Workplace.sort, Workplace.id).all():
         tasks = Task.query.filter_by(workplace_id=wp.id).all()
-        respondents = Respondent.query.filter_by(workplace_id=wp.id).all()
+        here = [p for p in people if wp.id in p["workplace_ids"]]
         rows.append(
             {
                 "workplace": wp,
-                "respondents": len(respondents),
+                "respondents": len(here),
                 "tasks": len(tasks),
                 "minutes": sum(t.monthly_minutes or 0 for t in tasks),
                 "candidates": len([t for t in tasks if t.is_candidate]),
-                "self_improvers": len([p for p in positives if p["workplace_id"] == wp.id]),
+                "self_improvers": len([p for p in here if p["positive"]]),
             }
         )
     return rows
@@ -979,63 +989,103 @@ def _content_words(text):
                 words.add(w[i : i + 2])
     return words
 
+# ----- 回答した人（業務を1件以上登録したか、月次アンケートに回答した人。対象外は除く。対象者一覧と同じ決まり） -----
+def person_key(emp_id, name=""):
+    key = emp_key(emp_id)
+    return ("id", key) if key else ("name", (name or "").strip())
+
+def answered_people():
+    excluded = {emp_key(e) for (e,) in db.session.query(Employee.emp_id).filter_by(active=False).all()}
+    people = OrderedDict()
+
+    def person(emp_id, name):
+        k = person_key(emp_id, name)
+        if k[0] == "id" and k[1] in excluded:
+            return None
+        if k not in people:
+            people[k] = {"key": k, "emp_id": norm_emp_id(emp_id), "name": name or "", "respondent": None, "tasks": [], "monthly": [], "workplace_ids": set()}
+        return people[k]
+
+    for t in Task.query.order_by(Task.created_at, Task.id).all():
+        p = person(t.respondent.emp_id, t.respondent.name) if t.respondent is not None else None
+        if p is None:
+            continue
+        p["respondent"] = p["respondent"] or t.respondent
+        p["tasks"].append(t)
+        if t.workplace_id:
+            p["workplace_ids"].add(t.workplace_id)
+    for m in MonthlyResponse.query.order_by(MonthlyResponse.period.desc(), MonthlyResponse.id.desc()).all():
+        p = person(m.emp_id, m.name)
+        if p is None:
+            continue
+        p["monthly"].append(m)
+        if m.workplace_id:
+            p["workplace_ids"].add(m.workplace_id)
+    for r in Respondent.query.order_by(Respondent.id).all():
+        p = people.get(person_key(r.emp_id, r.name))
+        if p is not None and p["respondent"] is None:
+            p["respondent"] = r
+    return people
+
+def latest_stance(responses):
+    for m in responses:
+        if m.answer("stance"):
+            return m.answer("stance"), m
+    return "", None
+
+def person_stance(emp_id):
+    key = emp_key(emp_id)
+    if not key:
+        return "", None
+    rows = MonthlyResponse.query.filter(db.func.lower(MonthlyResponse.emp_id) == key).order_by(MonthlyResponse.period.desc(), MonthlyResponse.id.desc()).all()
+    return latest_stance(rows)
+
 # ----- DX人財情報 -----
-def skills_summary():
+def skills_summary(people=None):
     have = Counter()
     learn = Counter()
-    for r in Respondent.query.all():
-        for s in r.skills:
-            have[s] += 1
-        for s in r.learn:
-            learn[s] += 1
+    for p in dx_people() if people is None else people:
+        have.update(p["skills"])
+        learn.update(p["learn"])
     return have, learn
 
+def _positive(checked, stance, stance_row):
+    last_check = max((t.created_at or datetime.min for t in checked), default=None)
+    if last_check is not None and (stance_row is None or last_check >= (stance_row.created_at or datetime.min)):
+        return True
+    return stance in C.MONTHLY_KPI["self_positive"]
+
 def dx_people(workplace_id=None, wish=None):
-    people = {}
-
-    def key_for(emp_id, name):
-        return ("id", emp_id) if emp_id else ("name", name)
-
-    def blank(emp_id, name, workplace, wp_id):
-        return {
-            "emp_id": emp_id or "", "name": name, "workplace": workplace, "workplace_id": wp_id, "respondent": None,
-            "wish": "", "skills": [], "learn": [], "targets": "", "target_tasks": [], "task_count": 0, "monthly": [], "work_pattern": "",
-        }
-
-    for r in Respondent.query.all():
-        p = blank(r.emp_id, r.name, r.workplace, r.workplace_id)
-        target_tasks = [t for t in r.tasks if t.self_improve in C.SELF_IMPROVE_POSITIVE]
-        if target_tasks:
-            own_wish = C.SELF_IMPROVE_YES
-        else:
-            own_wish = C.SELF_IMPROVE_NO if r.tasks else ""
-        p.update(
-            respondent=r, wish=own_wish, skills=r.skills, learn=r.learn, work_pattern=r.work_pattern or "",
-            target_tasks=target_tasks, task_count=len(r.tasks),
-        )
-        people[key_for(r.emp_id, r.name)] = p
-    for m in MonthlyResponse.query.order_by(MonthlyResponse.period.desc(), MonthlyResponse.id.desc()).all():
-        k = key_for(m.emp_id, m.name)
-        p = people.get(k)
-        if p is None:
-            p = people[k] = blank(m.emp_id, m.name, m.workplace, m.workplace_id)
-        p["monthly"].append(m)
-        if not p["work_pattern"] and m.work_pattern:
-            p["work_pattern"] = m.work_pattern
-
+    names = {emp_key(e.emp_id): e.name for e in Employee.query.all() if e.name}
     wish_rank = {opt: i for i, opt in enumerate(C.DX_WISH_OPTIONS)}
     stance_options = next((q["options"] for q in C.MONTHLY_CORE_QUESTIONS if q["key"] == "stance"), [])
     stance_rank = {opt: i for i, opt in enumerate(stance_options)}
     rows = []
-    for p in people.values():
-        latest = p["monthly"][0] if p["monthly"] else None
-        p["latest_period"] = latest.period if latest else ""
-        p["latest_label"] = period_label(latest.period) if latest else ""
-        p["stance_latest"] = latest.answer("stance") if latest else ""
-        p["self_positive_count"] = sum(1 for m in p["monthly"] if m.answer("stance") in C.MONTHLY_KPI["self_positive"])
+    for p in answered_people().values():
+        r, tasks, monthly = p["respondent"], p["tasks"], p["monthly"]
+        latest = monthly[0] if monthly else None
+        checked = [t for t in tasks if t.self_improve in C.SELF_IMPROVE_POSITIVE]
+        stance, stance_row = latest_stance(monthly)
+        raw_skills, raw_learn = (r.skills, r.learn) if r is not None else ([], [])
+        want_row = next((m for m in monthly if m.answer("wants") == "ある" and _split_names(m.answer("wants_tasks"))), None) if not tasks else None
+        p.update(
+            name=(r.name if r is not None else "") or (latest.name if latest else "") or p["name"] or names.get(p["key"][1], ""),
+            workplace=r.workplace if r is not None and r.workplace_id else (latest.workplace if latest else None),
+            work_pattern=(r.work_pattern if r is not None else "") or next((m.work_pattern for m in monthly if m.work_pattern), ""),
+            wish=C.SELF_IMPROVE_YES if checked else (C.SELF_IMPROVE_UNCHECKED if tasks else ""),
+            skills=[s for s in raw_skills if s != C.SKILL_NONE], learn=[s for s in raw_learn if s != C.SKILL_NONE],
+            skills_none=C.SKILL_NONE in raw_skills, learn_none=C.SKILL_NONE in raw_learn,
+            task_count=len(tasks), checked_count=len(checked), minutes=sum(t.monthly_minutes or 0 for t in tasks),
+            target_tasks=[{"task": t, "label": C.BUILD_STAGE_SELF if t.assignment == "自主改善" else "希望"} for t in tasks if t in checked or t.assignment == "自主改善"],
+            latest_period=latest.period if latest else "",
+            stance_latest=stance, stance_label=period_label(stance_row.period) if stance_row else "",
+            self_positive_count=sum(1 for m in monthly if m.answer("stance") in C.MONTHLY_KPI["self_positive"]),
+            positive=_positive(checked, stance, stance_row),
+            monthly_wants=_split_names(want_row.answer("wants_tasks")) if want_row else [],
+            monthly_wants_id=want_row.id if want_row else None, monthly_wants_label=period_label(want_row.period) if want_row else "",
+        )
+        p["workplace_id"] = p["workplace"].id if p["workplace"] is not None else None
         p["wish_positive"] = p["wish"] in C.SELF_IMPROVE_POSITIVE
-        r = p["respondent"]
-        p["positive"] = (r.wants_to_improve if r is not None else False) or p["stance_latest"] in C.MONTHLY_KPI["self_positive"]
         if workplace_id and p["workplace_id"] != workplace_id:
             continue
         if wish == "positive" and not p["positive"]:
@@ -1137,7 +1187,7 @@ def suggest_actions(limit=10):
             {
                 "kind": "回答促進",
                 "title": f"まだ回答のない職場: {'、'.join(quiet)}",
-                "detail": "推進メンバーから記入会の案内とフォローをお願いします。",
+                "detail": "月次アンケートの回答も「自動化を検討」の登録もまだありません。推進メンバーから職場に声をかけ、回答をお願いしてください。",
                 "url": ("admin.index", {}),
             }
         )
@@ -1151,20 +1201,22 @@ def _period_of(dt):
 def member_rows():
     answered = defaultdict(set)
     for emp_id, period in db.session.query(MonthlyResponse.emp_id, MonthlyResponse.period).all():
-        answered[norm_emp_id(emp_id).lower()].add(period)
+        answered[emp_key(emp_id)].add(period)
     considered, first_task = Counter(), {}
     for emp_id, created in db.session.query(Respondent.emp_id, Task.created_at).join(Task, Task.respondent_id == Respondent.id).all():
-        key = norm_emp_id(emp_id).lower()
+        key = emp_key(emp_id)
         considered[key] += 1
         p = _period_of(created)
         if p and (key not in first_task or p < first_task[key]):
             first_task[key] = p
+    saved = {emp_key(x) for (x,) in db.session.query(Respondent.emp_id).all()}
     rows = []
     for e in Employee.query.order_by(Employee.emp_id).all():
-        key = e.emp_id.lower()
+        key = emp_key(e.emp_id)
         periods = answered.get(key, set())
-        starts = [p for p in (min(periods) if periods else None, first_task.get(key)) if p]
-        rows.append({"emp": e, "answered": periods, "since": min(starts) if starts else None, "considered": considered.get(key, 0)})
+        starts = [p for p in (_period_of(e.created_at), min(periods) if periods else None, first_task.get(key)) if p]
+        rows.append({"emp": e, "answered": periods, "since": min(starts) if starts else None, "considered": considered.get(key, 0),
+                     "deletable": not periods and key not in saved})
     return rows
 
 def member_periods():
@@ -1200,6 +1252,8 @@ def monthly_summary():
                 "label": period_label(p),
                 "n": n,
                 "response_rate": member[p]["rate"],
+                "member_answered": member[p]["answered"],
+                "members": member[p]["members"],
                 "has_rate": rate("has", kpi["has_positive"]),
                 "hours_month": hours_month,
                 "pattern_counts": {p: pattern_counts[p] for p in list(C.WORK_PATTERNS) + ["未設定"] if pattern_counts.get(p)},
@@ -4024,6 +4078,8 @@ def seed_masters():
                 if row.emp_id in patterns:
                     row.work_pattern = patterns[row.emp_id]
                     changed = True
+    changed = _backfill_member_since() or changed
+    changed = _merge_employees() or changed
     changed = _sync_members() or changed
     changed = _migrate_monthly_questions() or changed
     for m in FlowMap.query.filter(FlowMap.kind != "info").all():
@@ -4040,7 +4096,7 @@ def _sync_members():
     for r in Respondent.query.all():
         if norm_emp_id(r.emp_id) and r.tasks:
             answered.setdefault(norm_emp_id(r.emp_id).lower(), (r.emp_id, r.name, r.workplace_id, r.work_pattern))
-    existing = {e.emp_id.lower(): e for e in Employee.query.all()}
+    existing = {emp_key(e.emp_id): e for e in Employee.query.all()}
     changed = False
     for key, (emp_id, name, wp, pat) in answered.items():
         if key not in existing:
@@ -4051,6 +4107,56 @@ def _sync_members():
             db.session.delete(e)
             changed = True
     return changed
+
+_SOURCE_RANK = {"manual": 0, "csv": 1, "answer": 2, "ldap": 3}
+
+
+def _merge_employees():
+    groups = defaultdict(list)
+    for e in Employee.query.order_by(Employee.id).all():
+        groups[emp_key(e.emp_id)].append(e)
+    changed = False
+    for rows in groups.values():
+        rows.sort(key=lambda e: (e.emp_id != norm_emp_id(e.emp_id), _SOURCE_RANK.get(e.source, 9), e.id))
+        keep, others = rows[0], rows[1:]
+        if others:
+            named = sorted((e for e in rows if (e.name or "").strip()), key=lambda e: e.updated_at or datetime.min, reverse=True)
+            named.sort(key=lambda e: _SOURCE_RANK.get(e.source, 9) > 1)
+            keep.name = named[0].name.strip() if named else ""
+            keep.active = all(e.active is not False for e in rows)
+            keep.is_demo = all(e.is_demo for e in rows)
+            for field in ("department", "email", "work_pattern", "workplace_id"):
+                if not getattr(keep, field):
+                    setattr(keep, field, next((getattr(e, field) for e in others if getattr(e, field)), getattr(keep, field)))
+            keep.created_at = min((e.created_at for e in rows if e.created_at), default=keep.created_at)
+            for e in others:
+                db.session.delete(e)
+            db.session.flush()
+        if others or keep.emp_id != norm_emp_id(keep.emp_id):
+            keep.emp_id = norm_emp_id(keep.emp_id)
+            changed = True
+    if changed:
+        db.session.flush()
+    return changed
+
+def _backfill_member_since():
+    rows = Employee.query.filter(Employee.created_at.is_(None)).all()
+    if not rows:
+        return False
+    first = {}
+
+    def seen(emp_id, at):
+        key = emp_key(emp_id)
+        if key and at and (key not in first or at < first[key]):
+            first[key] = at
+
+    for emp_id, at in db.session.query(MonthlyResponse.emp_id, MonthlyResponse.created_at).all():
+        seen(emp_id, at)
+    for emp_id, at in db.session.query(Respondent.emp_id, Task.created_at).join(Task, Task.respondent_id == Respondent.id).all():
+        seen(emp_id, at)
+    for e in rows:
+        e.created_at = min([x for x in (first.get(emp_key(e.emp_id)), e.updated_at) if x], default=None) or datetime.now()
+    return True
 
 def _stance_from_old(ask, self_answer):
     if self_answer == "取り組みたい":
@@ -4557,7 +4663,7 @@ def login():
 
 @bp_auth.post("/logout")
 def logout():
-    session.pop("user", None)
+    session.clear()
     flash("ログアウトしました。", "secondary")
     return redirect(url_for("board.index"))
 
@@ -4739,7 +4845,12 @@ def _task_json(t):
         "ai_flags": t.ai_flags_list,
         "steps": t.steps,
         "shift": t.shift or "",
+        "stage": t.stage_name + ("（保留中）" if t.is_on_hold else ""),
+        "can_delete": _withdrawable(t),
     }
+
+def _withdrawable(t):
+    return t.stage_key == "start" and not t.is_on_hold and (t.decision or "未定") == "未定"
 
 def _split_names(text):
     out = []
@@ -4759,22 +4870,32 @@ def _suggested_tasks(r):
     keep = [n for n in names if normalize_text(n) not in done][:8]
     return keep, [n for n in keep if n in wants]
 
+def _stance_json(emp_id):
+    stance, row = person_stance(emp_id)
+    if not stance:
+        return None
+    return {"value": stance, "period": row.period, "period_label": period_label(row.period), "self_improve": stance in C.MONTHLY_KPI["self_positive"]}
+
 def _state(r):
     if r is None:
-        return {"respondent": None, "tasks": [], "suggested": [], "suggested_wants": []}
+        return {"respondent": None, "tasks": [], "suggested": [], "suggested_wants": [], "stance": None}
     tasks = Task.query.filter_by(respondent_id=r.id).order_by(Task.created_at).all()
     suggested, wants = _suggested_tasks(r)
-    return {"respondent": _respondent_json(r), "tasks": [_task_json(t) for t in tasks], "suggested": suggested, "suggested_wants": wants}
+    return {"respondent": _respondent_json(r), "tasks": [_task_json(t) for t in tasks], "suggested": suggested, "suggested_wants": wants, "stance": _stance_json(r.emp_id)}
 
-def _monthly_context(emp, src):
-    if src != "monthly" or not emp:
+def _monthly_context(emp, src, m=None):
+    key = emp_key(emp)
+    if src != "monthly" or not key:
         return None
-    row = db.session.get(MonthlyResponse, session["monthly_last"]) if session.get("monthly_last") else None
-    if row is not None and row.emp_id != emp:
-        row = None
-    if row is None:
-        row = MonthlyResponse.query.filter_by(emp_id=emp).order_by(MonthlyResponse.period.desc(), MonthlyResponse.id.desc()).first()
-    if row is None or row.answer("wants") != "ある":
+    if m:
+        row = db.session.get(MonthlyResponse, m)
+    else:
+        row = db.session.get(MonthlyResponse, session["monthly_last"]) if session.get("monthly_last") else None
+        if row is not None and emp_key(row.emp_id) != key:
+            row = None
+        if row is None:
+            row = MonthlyResponse.query.filter(db.func.lower(MonthlyResponse.emp_id) == key).order_by(MonthlyResponse.period.desc(), MonthlyResponse.id.desc()).first()
+    if row is None or emp_key(row.emp_id) != key or row.answer("wants") != "ある":
         return None
     wants = _split_names(row.answer("wants_tasks"))
     if not wants:
@@ -4795,24 +4916,28 @@ def _options():
         "frequency_hints": C.FREQUENCY_HINTS,
         "self_improve_yes": C.SELF_IMPROVE_YES,
         "skills": C.SKILLS,
+        "skill_none": C.SKILL_NONE,
         "max_questions": C.INTAKE_MAX_QUESTIONS,
     }
 
 @bp_survey.route("/")
 def index():
-    emp = (request.args.get("emp") or "").strip()
+    emp = norm_emp_id(request.args.get("emp"))
     task = (request.args.get("task") or "").strip()[:200]
     src = (request.args.get("src") or "").strip()
     session.pop("respondent_id", None)
-    r = None
-    return render_template("survey/index.html", state=_state(r), options=_options(), emp=emp, prefill=task, monthly=_monthly_context(emp, src))
+    monthly = _monthly_context(emp, src, request.args.get("m", type=int))
+    if monthly is not None:
+        session.pop("monthly_last", None)
+    return render_template("survey/index.html", state=_state(None), options=_options(), emp=emp, prefill=task, monthly=monthly)
 
 @bp_survey.route("/start")
 def start():
-    emp = (request.args.get("emp") or "").strip()
+    emp = norm_emp_id(request.args.get("emp"))
     task = (request.args.get("task") or "").strip()[:200]
     src = (request.args.get("src") or "").strip()
-    return redirect(url_for("survey.index", emp=emp or None, task=task or None, src=src or None))
+    m = request.args.get("m", type=int)
+    return redirect(url_for("survey.index", emp=emp or None, task=task or None, src=src or None, m=m or None))
 
 # ----- API: あなたのこと -----
 @bp_survey.post("/api/respondent")
@@ -4827,7 +4952,9 @@ def api_respondent():
     if not emp_id:
         errors["emp_id"] = "入力してください"
     elif not info:
-        errors["emp_id"] = "この社員IDは見つかりません。IDを確かめてください"
+        errors["emp_id"] = EMP_NOT_FOUND
+    elif not info["active"]:
+        errors["emp_id"] = EMP_EXCLUDED
     if not workplace_id:
         errors["workplace_id"] = "選択してください"
     if work_pattern not in C.WORK_PATTERNS:
@@ -4876,19 +5003,21 @@ def _clean_messages(items):
     return out[-40:]
 
 
-def _need_respondent():
+def _need_respondent(emp_id=None):
     r = _current()
     if r is None:
         return None, (jsonify({"success": False, "message": "先に「あなたのこと」を保存してください", "errors": {"_": "respondent"}}), 400)
+    if emp_id is not None and emp_key(emp_id) != emp_key(r.emp_id):
+        return None, (jsonify({"success": False, "message": "画面の社員IDと登録先の人が違います。「あなたのこと」を入れ直してください", "errors": {"_": "respondent"}}), 409)
     return r, None
 
 
 @bp_survey.post("/api/intake")
 def api_intake():
-    r, err = _need_respondent()
+    data = request.get_json(silent=True) or {}
+    r, err = _need_respondent(data.get("emp_id"))
     if err:
         return err
-    data = request.get_json(silent=True) or {}
     messages = _clean_messages(data.get("messages"))
     state = _clean_state(data.get("state") or {})
     if not state["title"] and data.get("title"):
@@ -5009,10 +5138,10 @@ def _finalize_task(task, state, messages):
 
 @bp_survey.post("/api/tasks")
 def api_task_create():
-    r, err = _need_respondent()
+    data = request.get_json(silent=True) or {}
+    r, err = _need_respondent(data.get("emp_id"))
     if err:
         return err
-    data = request.get_json(silent=True) or {}
     state = _clean_state(data.get("state") or {})
     messages = _clean_messages(data.get("messages"))
     errors = {}
@@ -5042,7 +5171,8 @@ def api_task_create():
     if dup is not None and not data.get("force"):
         return jsonify({
             "success": False, "message": f"同じ名前の業務「{dup.name}」を登録済みです",
-            "duplicate": {"id": dup.id, "name": dup.name, "hours": round((dup.monthly_minutes or 0) / 60, 1), "created_at": dup.created_at.strftime("%Y/%m/%d") if dup.created_at else ""},
+            "duplicate": {"id": dup.id, "name": dup.name, "hours": round((dup.monthly_minutes or 0) / 60, 1), "created_at": dup.created_at.strftime("%Y/%m/%d") if dup.created_at else "",
+                          "can_delete": _withdrawable(dup)},
         }), 409
     try:
         headcount = max(1, int(data.get("headcount") or 1))
@@ -5056,6 +5186,7 @@ def api_task_create():
     if data.get("self_improve"):
         skills = [v for v in (data.get("skills") or []) if v in C.SKILLS]
         learn = [v for v in (data.get("learn") or []) if v in C.SKILLS]
+        skills, learn = [[v for v in vals if v != C.SKILL_NONE] if len(vals) > 1 else vals for vals in (skills, learn)]
         r.c2_skills = C.join_list(skills)
         r.c3_learn = C.join_list(learn)
         r.part_c_done = True
@@ -5064,19 +5195,22 @@ def api_task_create():
     db.session.flush()
     _finalize_task(task, state, messages)
     task.compute_minutes()
-    register_member(r.emp_id, r.name, r.workplace_id, r.work_pattern)
+    if find_employee(r.emp_id) is None:
+        register_member(r.emp_id, r.name, r.workplace_id, r.work_pattern)
     db.session.commit()
     return jsonify({"success": True, "task": _task_json(task), "first_impression": task.ai_extra_dict.get("first_impression") or "", **_state(r)})
 
 
 @bp_survey.delete("/api/tasks/<int:task_id>")
 def api_task_delete(task_id):
-    r, err = _need_respondent()
+    r, err = _need_respondent((request.get_json(silent=True) or {}).get("emp_id"))
     if err:
         return err
     task = db.session.get(Task, task_id)
     if task is None or task.respondent_id != r.id:
         abort(404)
+    if not _withdrawable(task):
+        return jsonify({"success": False, "message": "改善チームが対応を始めているため取り消せません"}), 409
     db.session.delete(task)
     db.session.commit()
     return jsonify({"success": True, **_state(r)})
@@ -5520,18 +5654,19 @@ def index():
     wish = (request.args.get("wish") or "").strip()
     everyone = dx_people()
     people = dx_people(workplace_id=workplace_id, wish=wish or None) if (workplace_id or wish) else everyone
-    have, learn = skills_summary()
+    have, learn = skills_summary(everyone)
     latest_period = max((p["latest_period"] for p in everyone if p["latest_period"]), default="")
+    in_latest = [p["monthly"][0] for p in everyone if latest_period and p["latest_period"] == latest_period]
     summary = {
         "total": len(everyone),
         "positive": len([p for p in everyone if p["positive"]]),
-        "self_now": len([p for p in everyone if latest_period and p["latest_period"] == latest_period and p["stance_latest"] in C.MONTHLY_KPI["self_positive"]]),
+        "self_now": len([m for m in in_latest if m.answer("stance") in C.MONTHLY_KPI["self_positive"]]),
         "period_label": period_label(latest_period) if latest_period else "月次の回答はまだありません",
         "learners": len([p for p in everyone if p["learn"]]),
     }
     positive_counts = Counter((p["work_pattern"] or "未設定") for p in everyone if p["positive"])
     summary["positive_by_pattern"] = {k: positive_counts[k] for k in list(C.WORK_PATTERNS) + ["未設定"] if positive_counts.get(k)}
-    latest_stances = Counter(p["stance_latest"] for p in everyone if latest_period and p["latest_period"] == latest_period and p["stance_latest"])
+    latest_stances = Counter(m.answer("stance") for m in in_latest if m.answer("stance"))
     stance_options = next((q["options"] for q in C.MONTHLY_CORE_QUESTIONS if q["key"] == "stance"), [])
     wish_counts = [("検討: " + opt, len([p for p in everyone if p["wish"] == opt])) for opt in C.DX_WISH_OPTIONS]
     wish_counts += [("月次: " + opt, latest_stances.get(opt, 0)) for opt in stance_options]
@@ -5555,13 +5690,13 @@ def index():
     return render_template(
         "admin/index.html",
         workplaces=_workplaces(),
+        workplace_usage=_workplace_usage(),
         domains=_domains(),
         ai_status=ai_status_text(),
         ldap_status=ldap_status_text(),
         demo_count=Task.query.filter_by(is_demo=True).count(),
-        respondent_count=Respondent.query.count(),
+        answered_count=len(answered_people()),
         task_count=Task.query.count(),
-        employee_count=Employee.query.count(),
         auth_status=auth_status_text(),
     )
 
@@ -5628,11 +5763,36 @@ def add_workplace():
         flash("職場を追加しました。", "success")
     return redirect(url_for("admin.index"))
 
+_WORKPLACE_USERS = (("業務", "件", Task), ("月次の回答", "件", MonthlyResponse), ("対象者", "人", Employee), ("「自動化を検討」の回答者", "人", Respondent))
+
+
+def _workplace_usage():
+    usage = defaultdict(list)
+    for label, unit, model in _WORKPLACE_USERS:
+        for wp_id, n in db.session.query(model.workplace_id, db.func.count(model.id)).filter(model.workplace_id.isnot(None)).group_by(model.workplace_id).all():
+            usage[wp_id].append(f"{label} {n} {unit}")
+    return usage
+
+@bp_admin.post("/workplace/<int:workplace_id>/update")
+def update_workplace(workplace_id):
+    w = _get_or_404(Workplace, workplace_id)
+    name = (request.form.get("name") or "").strip()
+    if not name:
+        flash("職場名を入力してください。", "danger")
+    elif Workplace.query.filter(Workplace.name == name, Workplace.id != w.id).first():
+        flash("同じ名前の職場があります。", "warning")
+    elif name != w.name:
+        w.name = name
+        db.session.commit()
+        flash("職場名を変更しました。", "success")
+    return redirect(url_for("admin.index"))
+
 @bp_admin.post("/workplace/<int:workplace_id>/delete")
 def delete_workplace(workplace_id):
     w = _get_or_404(Workplace, workplace_id)
-    if w.respondents:
-        flash("回答者が紐づいている職場は削除できません。", "warning")
+    used = _workplace_usage().get(w.id)
+    if used:
+        flash(f"「{w.name}」は使われているため削除できません（{'・'.join(used)}）。名前を変えるときは、職場名を直して保存してください。", "warning")
     else:
         db.session.delete(w)
         db.session.commit()
@@ -5696,7 +5856,8 @@ def employees():
     )
 
 def _upsert_employee(emp_id, name, department, email, workplace_id=None, source="manual", work_pattern=None):
-    emp = Employee.query.filter_by(emp_id=emp_id).first()
+    emp_id = norm_emp_id(emp_id)
+    emp = find_employee(emp_id)
     created = emp is None
     if emp is None:
         emp = Employee(emp_id=emp_id, name=name)
@@ -5717,7 +5878,7 @@ def _upsert_employee(emp_id, name, department, email, workplace_id=None, source=
 
 @bp_admin.post("/employees/add")
 def add_employee():
-    emp_id = (request.form.get("emp_id") or "").strip()
+    emp_id = norm_emp_id(request.form.get("emp_id"))
     name = (request.form.get("name") or "").strip()
     if not emp_id or not name:
         flash("社員IDと氏名を入力してください。", "danger")
@@ -5746,6 +5907,10 @@ def toggle_employee(employee_id):
 @bp_admin.post("/employees/<int:employee_id>/delete")
 def delete_employee(employee_id):
     e = _get_or_404(Employee, employee_id)
+    key = emp_key(e.emp_id)
+    if any(emp_key(x) == key for model in (MonthlyResponse, Respondent) for (x,) in db.session.query(model.emp_id).distinct().all()):
+        flash(f"{e.emp_id} は月次アンケートの回答か「自動化を検討」の登録があるため削除できません（削除しても次の起動で一覧に戻ります）。回答率の分母から外すときは「対象外」にチェックしてください。", "warning")
+        return redirect(url_for("admin.employees"))
     db.session.delete(e)
     db.session.commit()
     flash("社員を削除しました。", "info")
@@ -5793,7 +5958,7 @@ def import_employees():
         return redirect(url_for("admin.employees"))
     created = updated = 0
     for row in reader:
-        emp_id = (row.get(cols["emp_id"]) or "").strip()
+        emp_id = norm_emp_id(row.get(cols["emp_id"]))
         name = (row.get(cols["name"]) or "").strip()
         if not emp_id or not name:
             continue
@@ -5867,20 +6032,19 @@ def remove_demo():
     flash("デモデータを削除しました。", "info")
     return redirect(url_for("admin.index"))
 
-def _latest_stance(emp_id):
-    m = MonthlyResponse.query.filter_by(emp_id=emp_id).order_by(MonthlyResponse.period.desc(), MonthlyResponse.id.desc()).first() if emp_id else None
-    return m.answer("stance") if m else ""
-
 @bp_admin.route("/export/respondents.csv")
 def export_respondents():
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["ID", "社員ID", "氏名", "職場", "勤務形態", "登録業務数", "月間時間(分)", "一緒にやってみたい業務数", "使える技術", "学びたい技術", "最新の月次の進め方", "登録日"])
-    for r in Respondent.query.order_by(Respondent.id).all():
+    w.writerow(["社員ID", "氏名", "職場", "勤務形態", "自分で改善したい", "意欲（自動化を検討）", "月次の進め方（直近の回答）", "その月度", "月次で自分で・一緒にと答えた回数",
+                "使える技術", "学びたい技術", "登録業務数", "月間時間(分)", "一緒にやってみたい業務数", "伴走・希望の業務"])
+    for p in dx_people():
         w.writerow(
             [
-                r.id, r.emp_id or "", r.name, r.workplace.name if r.workplace else "", r.work_pattern or "", len(r.tasks), r.total_minutes,
-                len([t for t in r.tasks if t.self_improve in C.SELF_IMPROVE_POSITIVE]), "・".join(r.skills), "・".join(r.learn), _latest_stance(r.emp_id), r.created_at.strftime("%Y-%m-%d %H:%M") if r.created_at else "",
+                p["emp_id"], p["name"], p["workplace"].name if p["workplace"] else "", p["work_pattern"], "○" if p["positive"] else "", p["wish"],
+                p["stance_latest"], p["stance_label"], p["self_positive_count"] if p["monthly"] else "",
+                "・".join(p["skills"]) or (C.SKILL_NONE if p["skills_none"] else ""), "・".join(p["learn"]) or (C.SKILL_NONE if p["learn_none"] else ""),
+                p["task_count"], p["minutes"], p["checked_count"], "・".join(f"{x['task'].name}（{x['label']}）" for x in p["target_tasks"]),
             ]
         )
     return _csv_response(buf, "respondents_{}.csv".format(datetime.now().strftime("%Y%m%d")))
@@ -5925,12 +6089,15 @@ def shift_period(period, months):
 def default_questions():
     return [dict(q, options=list(q.get("options", []))) for q in C.MONTHLY_CORE_QUESTIONS]
 
+def questions_for_new(period):
+    prev = MonthlySurvey.query.filter(MonthlySurvey.period < period).order_by(MonthlySurvey.period.desc()).first()
+    return prev.questions if prev else default_questions()
+
 def get_or_create_survey(period):
     survey = MonthlySurvey.query.filter_by(period=period).first()
     if survey is None:
-        prev = MonthlySurvey.query.filter(MonthlySurvey.period < period).order_by(MonthlySurvey.period.desc()).first()
         survey = MonthlySurvey(period=period, is_active=True)
-        survey.set_questions(prev.questions if prev else default_questions())
+        survey.set_questions(questions_for_new(period))
         db.session.add(survey)
         db.session.commit()
     return survey
@@ -5977,7 +6144,9 @@ def submit():
     if not emp_id:
         errors["emp_id"] = "社員IDを入力してください"
     elif not info:
-        errors["emp_id"] = "この社員IDは見つかりません。IDを確かめてください"
+        errors["emp_id"] = EMP_NOT_FOUND
+    elif not info["active"]:
+        errors["emp_id"] = EMP_EXCLUDED
     if not workplace_id:
         errors["workplace_id"] = "職場を選んでください"
     if work_pattern not in C.WORK_PATTERNS:
@@ -6031,9 +6200,10 @@ def submit():
         period=period, emp_id=emp_id, name=name, workplace_id=workplace_id, work_pattern=work_pattern, survey_id=survey.id,
         answers_json=json.dumps(answers, ensure_ascii=False), comment=comment,
     )
-    respondent = Respondent.query.filter_by(emp_id=emp_id).first()
+    respondent = Respondent.query.filter(db.func.lower(Respondent.emp_id) == emp_key(emp_id)).first()
     row.respondent_id = respondent.id if respondent else None
-    if respondent is not None and not respondent.work_pattern:
+    if respondent is not None:
+        respondent.workplace_id = workplace_id
         respondent.work_pattern = work_pattern
     register_member(emp_id, name, workplace_id, work_pattern)
     db.session.add(row)
@@ -6047,7 +6217,7 @@ def submit():
                 "message": f"{period_label(period)}の回答を受け付けました。ご協力ありがとうございました。",
                 "wants": wants,
                 "wants_tasks": _split_names(answers.get("wants_tasks")),
-                "register_url": url_for("survey.start", emp=emp_id, src="monthly"),
+                "register_url": url_for("survey.start", emp=emp_id, src="monthly", m=row.id),
             }
         )
     return redirect(url_for("monthly.done", period=period))
@@ -6056,6 +6226,8 @@ def submit():
 def done():
     period = public_period(request.args.get("period"))
     row = db.session.get(MonthlyResponse, session.get("monthly_last")) if session.get("monthly_last") else None
+    if row is not None and row.period != period:
+        row = MonthlyResponse.query.filter(MonthlyResponse.period == period, db.func.lower(MonthlyResponse.emp_id) == emp_key(row.emp_id)).first()
     wants = _split_names(row.answer("wants_tasks")) if row is not None and row.answer("wants") == "ある" else []
     return render_template("monthly/done.html", period_label=period_label(period), row=row, wants_tasks=wants)
 
@@ -6067,6 +6239,8 @@ def api_employee(emp_id):
     if not info:
         return jsonify({"found": False, "emp_id": emp_id, "answered": False})
     answered = MonthlyResponse.query.filter_by(period=period, emp_id=info["emp_id"]).first() is not None
+    if not info["active"]:
+        return jsonify({"found": True, "excluded": True, "message": EMP_EXCLUDED, "answered": answered, "emp_id": info["emp_id"]})
     return jsonify({"found": True, "answered": answered, "emp_id": info["emp_id"]})
 
 # ----- 集計（要ログイン） -----
@@ -6130,7 +6304,7 @@ def export_csv():
 @bp_monthly.route("/admin")
 def survey_admin():
     period = parse_period(request.args.get("period"))
-    survey = get_or_create_survey(period)
+    survey = MonthlySurvey.query.filter_by(period=period).first()
     surveys = MonthlySurvey.query.order_by(MonthlySurvey.period.desc()).all()
     counts = dict(db.session.query(MonthlyResponse.period, db.func.count(MonthlyResponse.id)).group_by(MonthlyResponse.period).all())
     return render_template(
@@ -6138,7 +6312,8 @@ def survey_admin():
         period=period,
         period_label=period_label(period),
         survey=survey,
-        questions_json=json.dumps(survey.questions, ensure_ascii=False),
+        is_active=survey.is_active if survey is not None else True,
+        questions_json=json.dumps(survey.questions if survey is not None else questions_for_new(period), ensure_ascii=False),
         core_keys=sorted(C.MONTHLY_CORE_KEYS),
         surveys=surveys,
         counts=counts,
@@ -6290,7 +6465,7 @@ TEMPLATES = {
 <div class="card mb-3"><div class="card-body">
   <div class="d-flex flex-wrap justify-content-between align-items-baseline gap-2 mb-2">
     <h5 class="card-title mb-0">対象者 <span id="member-active">{{ active_count }}</span> 人 <span class="small text-muted fw-normal">（対象外 <span id="member-excluded">{{ rows|length - active_count }}</span> 人）</span></h5>
-    <span class="small text-muted"><i class="bi bi-check-lg member-yes"></i> その月に回答　<span class="member-before">－</span> 初めて回答する前の月（その月の分母に入りません）</span>
+    <span class="small text-muted"><i class="bi bi-check-lg member-yes"></i> その月に回答　<span class="member-before">－</span> 対象者になる前の月（初めて回答した月か、ここで追加した月より前。その月の分母に入りません）</span>
   </div>
   {% if rows %}
   <div class="member-wrap">
@@ -6304,7 +6479,8 @@ TEMPLATES = {
     <tr class="{% if not r.emp.active %}is-excluded{% endif %}">
       <td class="text-center"><input class="form-check-input member-exclude" type="checkbox" data-url="{{ url_for('admin.toggle_employee', employee_id=r.emp.id) }}" {% if not r.emp.active %}checked{% endif %} aria-label="{{ r.emp.emp_id }} を対象外にする"></td>
       <td>{{ r.emp.emp_id }}</td>
-      <td>{{ r.emp.name or '' }}</td>
+      <td>{{ r.emp.name or '' }}{% if r.deletable %}
+        <form method="post" action="{{ url_for('admin.delete_employee', employee_id=r.emp.id) }}" class="d-inline" data-confirm="{{ r.emp.emp_id }} を対象者一覧から削除しますか？（まだ回答のない人だけ削除できます）"><button class="btn btn-link btn-sm text-danger p-0 ms-1">削除</button></form>{% endif %}</td>
       <td class="text-end">{{ r.considered }} 回</td>
       {% for p in periods %}<td class="text-center member-cell">{% if p in r.answered %}<i class="bi bi-check-lg member-yes" title="回答あり"></i>{% elif r.since and p < r.since %}<span class="member-before">－</span>{% endif %}</td>{% endfor %}
     </tr>
@@ -6316,6 +6492,7 @@ TEMPLATES = {
     </tr></tfoot>
   </table>
   </div>
+  <p class="small text-muted mt-2 mb-0">下の行の「回答」は対象者（対象外を除く）のうちその月に回答した人の数で、月次集計・ダッシュボードの回答率と同じ数え方です。対象外の人は回答できず、回答率にも入りません。削除できるのは、まだ回答も「自動化を検討」の登録もない人だけです。</p>
   {% else %}
   <p class="text-muted mb-0">まだ回答した人がいません。月次アンケートか「自動化を検討」に回答すると、ここに載ります。</p>
   {% endif %}
@@ -6366,7 +6543,7 @@ document.getElementById("test-btn").addEventListener("click", async function () 
   try {
     var r = await fetch("{{ url_for('monthly.api_employee', emp_id='') }}" + encodeURIComponent(id));
     var j = await r.json();
-    msg.textContent = j.found ? ("見つかりました: " + (j.name || "（氏名なし）") + (j.member ? "（対象者一覧にあり）" : "（まだ回答なし）")) : "見つかりませんでした";
+    msg.textContent = j.found ? ("見つかりました: " + j.emp_id + (j.excluded ? "（対象外。回答できません）" : "")) : "見つかりませんでした";
   } catch (e) { msg.textContent = "照会に失敗しました"; }
 });
 document.querySelectorAll(".member-exclude").forEach(function (box) {
@@ -6606,7 +6783,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
 
     <div class="card mb-3"><div class="card-body">
       <h5 class="card-title">対象者・月次アンケート</h5>
-      <p class="small mb-1">対象者一覧 {{ employee_count }} 人（一度でも回答した人）。{{ ldap_status }}</p>
+      <p class="small mb-1">回答した人 {{ answered_count }} 人（業務を1件以上登録したか、月次アンケートに回答した人。対象外は除く）。{{ ldap_status }}</p>
       <div class="d-flex flex-wrap gap-2">
         <a class="btn btn-sm btn-outline-primary" href="{{ url_for('admin.employees') }}">対象者一覧</a>
         <a class="btn btn-sm btn-outline-primary" href="{{ url_for('monthly.survey_admin') }}">月次の設問を編集</a>
@@ -6629,7 +6806,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
 
     <div class="card mb-3"><div class="card-body">
       <h5 class="card-title">データ</h5>
-      <p class="small mb-2">回答者 {{ respondent_count }} 人／業務 {{ task_count }} 件（うちデモ {{ demo_count }} 件）</p>
+      <p class="small mb-2">回答した人 {{ answered_count }} 人／業務 {{ task_count }} 件（うちデモ {{ demo_count }} 件）</p>
       <div class="d-flex flex-wrap gap-2">
         <form method="post" action="{{ url_for('admin.load_demo') }}" data-confirm="デモデータを投入します（既存のデモデータは入れ替えます）。よろしいですか？">
           <button class="btn btn-sm btn-outline-primary">デモデータを投入</button>
@@ -6647,22 +6824,19 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
   <div class="col-lg-6">
     <div class="card mb-3"><div class="card-body">
       <h5 class="card-title">職場マスタ</h5>
-      <table class="table table-sm mb-2">
-        <tbody>
-        {% for w in workplaces %}
-        <tr>
-          <td>{{ w.name }}</td>
-          <td class="small text-muted">回答者 {{ w.respondents|length }} 人</td>
-          <td class="text-end">
-            <form method="post" action="{{ url_for('admin.delete_workplace', workplace_id=w.id) }}" data-confirm="「{{ w.name }}」を削除しますか？">
-              <button class="btn btn-sm btn-outline-danger" {% if w.respondents %}disabled{% endif %}>削除</button>
-            </form>
-          </td>
-        </tr>
-        {% endfor %}
-        </tbody>
-      </table>
-      <form method="post" action="{{ url_for('admin.add_workplace') }}" class="d-flex gap-2">
+      <p class="small text-muted">職場名は直して保存できます（業務・回答の紐づきはそのまま）。業務・月次の回答・対象者・「自動化を検討」の回答者が使っている職場は削除できません。</p>
+      {% for w in workplaces %}
+      {% set used = workplace_usage.get(w.id) %}
+      <form method="post" action="{{ url_for('admin.update_workplace', workplace_id=w.id) }}" class="row g-1 align-items-center mb-2">
+        <div class="col-8"><input type="text" name="name" class="form-control form-control-sm" value="{{ w.name }}" required aria-label="職場名"></div>
+        <div class="col-4 d-flex gap-1 justify-content-end">
+          <button class="btn btn-sm btn-outline-primary">保存</button>
+          <button class="btn btn-sm btn-outline-danger" formaction="{{ url_for('admin.delete_workplace', workplace_id=w.id) }}" {% if used %}disabled title="使われている職場は削除できません"{% endif %} onclick="return confirm('「{{ w.name }}」を削除しますか？')">削除</button>
+        </div>
+        <div class="col-12 small text-muted">{{ used|join('・') if used else '未使用（削除できます）' }}</div>
+      </form>
+      {% endfor %}
+      <form method="post" action="{{ url_for('admin.add_workplace') }}" class="d-flex gap-2 mt-2">
         <input type="text" name="name" class="form-control form-control-sm" placeholder="職場名" required>
         <button class="btn btn-sm btn-primary text-nowrap">追加</button>
       </form>
@@ -7781,7 +7955,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
     <div class="card stat h-100"><div class="card-body">
       <div class="stat-head"><span class="stat-tile tile-indigo"><i class="bi bi-people"></i></span><span class="stat-label">自主改善者</span></div>
       <div class="stat-value">{{ k.self_improver_count }}<span class="stat-unit">人</span></div>
-      <div class="stat-sub">自ら改善に取り組みたい人（回答者 {{ k.respondent_count }} 人中）</div>
+      <div class="stat-sub">自ら改善に取り組みたい人（回答した人 {{ k.respondent_count }} 人中）</div>
     </div></div>
   </div>
   <div class="col-6 col-lg-3">
@@ -7836,7 +8010,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
         <a class="small" href="{{ url_for('monthly.results') }}">月次集計へ</a>
       </div>
       {% if monthly_latest %}
-      <div class="small text-muted mb-2">最新 {{ monthly_latest.label }}：回答 {{ monthly_latest.n }} 人{% if monthly_latest.response_rate is not none %}（{{ '%.0f'|format(monthly_latest.response_rate) }}%）{% endif %}{% if monthly_latest.pattern_counts %}・{% for k, v in monthly_latest.pattern_counts.items() %}{{ k }} {{ v }}人{% if not loop.last %}／{% endif %}{% endfor %}{% endif %}</div>
+      <div class="small text-muted mb-2">最新 {{ monthly_latest.label }}：回答 {{ monthly_latest.n }} 人{% if monthly_latest.member_answered != monthly_latest.n %}（うち対象者 {{ monthly_latest.member_answered }} 人）{% endif %}{% if monthly_latest.response_rate is not none %}・回答率 {{ '%.0f'|format(monthly_latest.response_rate) }}%（{{ monthly_latest.member_answered }}／{{ monthly_latest.members }} 人）{% endif %}{% if monthly_latest.pattern_counts %}・{% for k, v in monthly_latest.pattern_counts.items() %}{{ k }} {{ v }}人{% if not loop.last %}／{% endif %}{% endfor %}{% endif %}</div>
       <div class="row g-2 text-center mb-2">
         <div class="col-4"><div class="kpi-label">PCの定型・定期業務あり</div><div class="mini-value">{{ '%.0f'|format(monthly_latest.has_rate) }}%</div></div>
         <div class="col-4"><div class="kpi-label">先月より減った</div><div class="mini-value text-green">{{ '%.0f'|format(monthly_latest.decreased_rate) }}%</div></div>
@@ -7854,7 +8028,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
       <h5 class="card-title">職場別の回答状況</h5>
       <div class="table-responsive">
       <table class="table table-sm mb-0">
-        <thead><tr><th>職場</th><th class="text-end">回答者</th><th class="text-end">業務</th><th class="text-end">月間時間</th><th class="text-end">案件候補</th><th class="text-end">自主改善</th></tr></thead>
+        <thead><tr><th>職場</th><th class="text-end">回答した人</th><th class="text-end">業務</th><th class="text-end">月間時間</th><th class="text-end">案件候補</th><th class="text-end">自主改善</th></tr></thead>
         <tbody>
         {% for w in workplaces %}
         <tr class="{% if w.respondents == 0 %}text-muted{% endif %}">
@@ -7869,6 +8043,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
         </tbody>
       </table>
       </div>
+      <p class="small text-muted mt-2 mb-0">回答した人は、その職場として業務を1件以上登録したか、月次アンケートに回答した人（対象外は除く）。自主改善はそのうち自ら改善に取り組みたい人です。</p>
     </div></div>
   </div>
 </div>
@@ -8038,12 +8213,13 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
         </div>
       </div>
       {% if response_count %}<div class="alert alert-warning py-2 small">この月度には回答があります。設問を変えると、変更前の回答と対応が取れなくなることがあります。</div>{% endif %}
+      {% if survey is none %}<div class="alert alert-info py-2 small">この月度の設問セットはまだありません。直近の月度（なければ基本設問）を表示しています。「保存する」を押すと作られます。</div>{% endif %}
       <div id="qe-list"></div>
       <button type="button" class="btn btn-outline-primary w-100 mt-2" id="qe-add"><i class="bi bi-plus-lg me-1"></i>設問を追加</button>
       <hr>
       <div class="d-flex flex-wrap justify-content-between align-items-center gap-2">
         <div class="form-check form-switch mb-0">
-          <input class="form-check-input" type="checkbox" id="qe-active" {% if survey.is_active %}checked{% endif %}>
+          <input class="form-check-input" type="checkbox" id="qe-active" {% if is_active %}checked{% endif %}>
           <label class="form-check-label" for="qe-active">この月度の回答を受け付ける</label>
         </div>
         <div class="d-flex align-items-center gap-2">
@@ -8074,7 +8250,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
         {% endfor %}
         </tbody>
       </table>
-      <p class="small text-muted mt-2 mb-0">月度の設問セットは、回答フォームが初めて開かれたときに直近の月度からコピーして自動で作られます。</p>
+      <p class="small text-muted mt-2 mb-0">月度の設問セットは、回答フォームが初めて開かれたときに直近の月度からコピーして自動で作られます。この編集画面は開いただけでは作らず、保存したときに作ります。</p>
     </div></div>
   </div>
 </div>
@@ -8217,7 +8393,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
       <div class="mq-next-title">次は、なくしたい業務の「流れ」を AI と整理してみませんか</div>
       <div class="mq-next-tasks">{% for n in wants_tasks %}<span>{{ n }}</span>{% endfor %}</div>
       <p class="small text-muted mb-3">あなたのことと業務名はアンケートの答えから入力済みです。AI の短い質問に答えると流れ図ができ、改善チームと自動化を検討できます（1件 2〜3分）。</p>
-      <a class="btn btn-primary btn-lg" href="{{ url_for('survey.start', emp=row.emp_id, src='monthly') }}"><i class="bi bi-diagram-3"></i> 自動化を検討する</a>
+      <a class="btn btn-primary btn-lg" href="{{ url_for('survey.start', emp=row.emp_id, src='monthly', m=row.id) }}"><i class="bi bi-diagram-3"></i> 自動化を検討する</a>
     </div>
     {% endif %}
   </div></div>
@@ -8241,7 +8417,8 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
   <div class="card mq-card mq-done {% if not existing %}d-none{% endif %}" id="mq-answered"><div class="card-body text-center">
     <div class="mq-check"><i class="bi bi-check-lg"></i></div>
     <h2 class="h4 mb-1">回答済み</h2>
-    <p class="text-muted mb-0">{{ period_label }}のアンケートはすでに回答いただいています。ご協力ありがとうございました。</p>
+    <p class="text-muted mb-3">{{ period_label }}のアンケートはすでに回答いただいています。ご協力ありがとうございました。</p>
+    <button type="button" class="btn btn-outline-secondary btn-sm" id="mq-other-id">別の社員IDで回答する</button>
   </div></div>
 
   <form id="mq-form" class="card mq-card {% if existing %}d-none{% endif %}" method="post" action="{{ url_for('monthly.submit') }}" novalidate>
@@ -8349,7 +8526,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
   var patSelect = document.getElementById("work_pattern");
   var msg = document.getElementById("emp-msg");
   var lookupTimer = null, empFound = null;
-  var NOT_FOUND = "この社員IDは見つかりません。IDを確かめてください";
+  var NOT_FOUND = {{ C.EMP_NOT_FOUND|tojson }}, empProblem = NOT_FOUND;
   function setMsg(text, state) { msg.textContent = text || ""; msg.classList.toggle("mq-emp-ok", state === "ok"); msg.classList.toggle("mq-emp-ng", state === "ng"); }
   async function lookupEmp() {
     var id = empInput.value.trim();
@@ -8358,21 +8535,32 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
     var r = await fetch("{{ url_for('monthly.api_employee', emp_id='') }}" + encodeURIComponent(id) + "?period={{ period }}", { headers: { Accept: "application/json" } });
     var j = await r.json();
     if (empInput.value.trim() !== id) return;
-    if (j.answered) {
+    if (j.answered && !j.excluded) {
       form.classList.add("d-none");
       answered.classList.remove("d-none");
       return;
     }
     answered.classList.add("d-none");
     form.classList.remove("d-none");
-    empFound = !!j.found;
-    if (j.found) {
+    empFound = !!j.found && !j.excluded;
+    if (empFound) {
       setMsg("社員IDを確認しました", "ok");
     } else {
-      setMsg(NOT_FOUND, "ng");
+      empProblem = j.excluded ? (j.message || {{ C.EMP_EXCLUDED|tojson }}) : NOT_FOUND;
+      setMsg(empProblem, "ng");
     }
     updateProgress();
   }
+  document.getElementById("mq-other-id").addEventListener("click", function () {
+    empInput.value = "";
+    empFound = null;
+    setMsg("");
+    answered.classList.add("d-none");
+    form.classList.remove("d-none");
+    if (window.history && history.replaceState) history.replaceState(null, "", "{{ url_for('monthly.form', period=period) }}");
+    updateProgress();
+    empInput.focus();
+  });
   var prog = document.getElementById("mq-progress");
   function answeredOf(q) {
     if (q.dataset.type === "choice") return !!q.querySelector("input:checked");
@@ -8485,7 +8673,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
       if (q.dataset.required === "1" && !val) { err.textContent = q.dataset.type === "choice" ? "選択してください" : "入力してください"; if (!firstMissing) firstMissing = q; }
       answers[key] = val;
     });
-    var missing = !form.emp_id.value.trim() ? "社員IDを入力してください" : empFound === false ? NOT_FOUND : !form.workplace_id.value ? "職場を選んでください" : !form.work_pattern.value ? "勤務形態を選んでください" : "";
+    var missing = !form.emp_id.value.trim() ? "社員IDを入力してください" : empFound === false ? empProblem : !form.workplace_id.value ? "職場を選んでください" : !form.work_pattern.value ? "勤務形態を選んでください" : "";
     if (missing) {
       errBox.textContent = missing; errBox.classList.remove("d-none");
       document.querySelector(".mq-identity").scrollIntoView({ behavior: "smooth", block: "center" });
@@ -8512,6 +8700,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
         if (window.uiCelebrate) window.uiCelebrate();
       } else {
         errBox.textContent = j.message || "送信できませんでした"; errBox.classList.remove("d-none");
+        if (j.errors && j.errors.emp_id) { empFound = false; empProblem = j.errors.emp_id; setMsg(empProblem, "ng"); updateProgress(); }
         if (j.errors) Object.keys(j.errors).forEach(function (k) { var el = form.querySelector('.mq-q[data-key="' + k + '"] .mq-err'); if (el) el.textContent = j.errors[k]; });
         submitBtn.disabled = false; submitBtn.textContent = "回答を送信する";
       }
@@ -8567,8 +8756,8 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
         {% for r in rows %}
         <tr class="{% if r.period == selected %}table-primary{% endif %}">
           <td><a href="{{ url_for('monthly.results', period=r.period) }}#detail">{{ r.label }}</a></td>
-          <td class="text-end">{{ r.n }}</td>
-          <td class="text-end">{% if r.response_rate is not none %}{{ '%.0f'|format(r.response_rate) }}%{% else %}－{% endif %}</td>
+          <td class="text-end">{{ r.n }}{% if r.member_answered != r.n %}<div class="small text-muted">うち対象者 {{ r.member_answered }}</div>{% endif %}</td>
+          <td class="text-end">{% if r.response_rate is not none %}{{ '%.0f'|format(r.response_rate) }}%<div class="small text-muted">{{ r.member_answered }}／{{ r.members }}</div>{% else %}－{% endif %}</td>
           <td class="text-end">{{ '%.0f'|format(r.has_rate) }}%</td>
           <td class="text-end">{{ '%.0f'|format(r.hours_month) }} h</td>
           <td class="text-end">{{ '%.0f'|format(r.decreased_rate) }}%</td>
@@ -8584,7 +8773,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
         </tbody>
       </table>
       </div>
-      <p class="small text-muted mt-2 mb-0">減った・増えた・自動化したいは ① で「ある」と答えた人のうちの割合、依頼したい・一緒に取り組みたい・自分で取り組みたいは「なくしたい業務がある」と答えた人のうちの割合です（その設問に答えた人が分母）。回答率は、その月までに一度でも回答した人（対象者一覧で「対象外」にした人を除く）のうち、その月に回答した人の割合です。推計月間時間 ＝ 1シフトあたり時間の換算値 × {{ C.SHIFTS_PER_MONTH }}（1か月の出勤日数の目安）。</p>
+      <p class="small text-muted mt-2 mb-0">減った・増えた・自動化したいは ① で「ある」と答えた人のうちの割合、依頼したい・一緒に取り組みたい・自分で取り組みたいは「なくしたい業務がある」と答えた人のうちの割合です（その設問に答えた人が分母）。回答率は、その月までに対象者一覧に載った人（初めて回答した月か、管理画面で追加した月から。「対象外」にした人を除く）のうち、その月に回答した人の割合です（下の小さい数字が 回答した対象者／対象者）。「うち対象者」は回答者に対象外の人が含まれるときだけ出ます。推計月間時間 ＝ 1シフトあたり時間の換算値 × {{ C.SHIFTS_PER_MONTH }}（1か月の出勤日数の目安）。</p>
     </div></div>
   </div>
 </div>
@@ -8665,7 +8854,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
       {% if not surveys %}<option value="{{ selected }}">{{ selected_label }}</option>{% endif %}
     </select>
   </form>
-  <span class="section-sub">{% if summary %}回答 {{ summary.n }} 人{% if summary.response_rate is not none %}（回答率 {{ '%.0f'|format(summary.response_rate) }}%）{% endif %}{% else %}回答はまだありません{% endif %}</span>
+  <span class="section-sub">{% if summary %}回答 {{ summary.n }} 人{% if summary.member_answered != summary.n %}（うち対象者 {{ summary.member_answered }} 人）{% endif %}{% if summary.response_rate is not none %}・回答率 {{ '%.0f'|format(summary.response_rate) }}%（{{ summary.member_answered }}／{{ summary.members }} 人）{% endif %}{% else %}回答はまだありません{% endif %}</span>
 </h2>
 {% if survey %}
 <div class="row g-3 mb-3">
@@ -8793,12 +8982,12 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
   <div class="col-6 col-lg-3"><div class="card kpi-card h-100"><div class="card-body py-2">
     <div class="kpi-label">回答した人</div>
     <div class="kpi-value fs-3">{{ summary.total }}<span class="fs-6 text-muted"> 人</span></div>
-    <div class="kpi-sub">「自動化を検討」または月次アンケート</div>
+    <div class="kpi-sub">業務を1件以上登録したか、月次アンケートに回答した人（対象外は除く）</div>
   </div></div></div>
   <div class="col-6 col-lg-3"><div class="card kpi-card h-100"><div class="card-body py-2">
     <div class="kpi-label">自分で改善したい</div>
     <div class="kpi-value fs-3">{{ summary.positive }}<span class="fs-6 text-muted"> 人</span></div>
-    <div class="kpi-sub">検討で「一緒にやってみたい」、または月次で「自分で取り組みたい」「学びながら改善チームと一緒に取り組みたい」</div>
+    <div class="kpi-sub">検討での「一緒にやってみたい」のチェックと、月次の進め方（「自分で取り組みたい」「学びながら改善チームと一緒に取り組みたい」）のうち、新しいほうで判断（チェックなしは意思表示なしとして扱う）</div>
     {% if summary.positive_by_pattern %}<div class="kpi-sub">{% for k, v in summary.positive_by_pattern.items() %}{{ k }} {{ v }}人{% if not loop.last %}／{% endif %}{% endfor %}</div>{% endif %}
   </div></div></div>
   <div class="col-6 col-lg-3"><div class="card kpi-card h-100"><div class="card-body py-2">
@@ -8853,16 +9042,23 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
       <td class="small text-nowrap">
         {% if p.stance_latest %}
         <span class="badge {{ 'text-bg-success' if p.stance_latest in C.MONTHLY_KPI['self_positive'] else ('text-bg-primary' if p.stance_latest in C.MONTHLY_KPI['ask_positive'] else 'text-bg-light border') }}">{{ p.stance_latest }}</span>
-        <div class="text-muted">{{ p.latest_label }}{% if p.self_positive_count %}・自分で／一緒に {{ p.self_positive_count }}回{% endif %}</div>
+        <div class="text-muted">{{ p.stance_label }}</div>
+        {% elif p.monthly %}<span class="text-muted">進め方の回答なし</span>
         {% else %}<span class="text-muted">－</span>{% endif %}
+        {% if p.monthly %}<div class="text-muted">自分で／一緒に {{ p.self_positive_count }}回（回答 {{ p.monthly|length }} 回中）</div>{% endif %}
       </td>
-      <td class="small dx-wide">{{ p.skills|join('・') or '－' }}</td>
-      <td class="small dx-wide">{{ p.learn|join('・') or '－' }}</td>
+      <td class="small dx-wide">{{ p.skills|join('・') or (C.SKILL_NONE if p.skills_none else '－') }}</td>
+      <td class="small dx-wide">{{ p.learn|join('・') or (C.SKILL_NONE if p.learn_none else '－') }}</td>
       <td class="small dx-tasks">
         {% if p.task_count %}<div>{{ p.task_count }} 件</div>{% endif %}
-        {% for t in p.target_tasks %}<div><a href="{{ url_for('cases.detail', task_id=t.id) }}">{{ t.name }}</a> <span class="text-muted">自分で</span></div>{% endfor %}
-        
-        {% if not p.task_count %}<span class="text-muted">－</span>{% endif %}
+        {% for x in p.target_tasks %}<div><a href="{{ url_for('cases.detail', task_id=x.task.id) }}">{{ x.task.name }}</a> <span class="badge {{ 'text-bg-primary' if x.label == C.BUILD_STAGE_SELF else 'text-bg-light border' }}">{{ x.label }}</span></div>{% endfor %}
+        {% if not p.task_count %}
+          {% if p.monthly_wants %}
+          <div class="text-muted">業務の登録なし。{{ p.monthly_wants_label }}の月次で挙げたなくしたい業務:</div>
+          <div>{{ p.monthly_wants|join('・') }}</div>
+          <a href="{{ url_for('survey.start', emp=p.emp_id, src='monthly', m=p.monthly_wants_id) }}">「自動化を検討」で流れを整理する</a>
+          {% else %}<span class="text-muted">－</span>{% endif %}
+        {% endif %}
       </td>
     </tr>
     {% else %}
@@ -11406,8 +11602,9 @@ summary { transition: color 0.15s ease; }
   idRow.appendChild(identity);
   personBox.appendChild(idRow);
   var empInput = idWrap.querySelector("input");
-  var found = null;
+  var found = null, idProblem = "", confirmedId = "";
   var NOT_FOUND = "この社員IDは見つかりません。IDを確かめてください";
+  function normId(v) { return (v || "").normalize("NFKC").trim().toLowerCase(); }
   function setIdentity(text, ng) { identity.textContent = text || ""; identity.classList.toggle("is-ng", !!ng); }
   function fillSelects(workplaceId, pattern) {
     var ws = personBox.querySelector('select[name="workplace_id"]');
@@ -11415,23 +11612,45 @@ summary { transition: color 0.15s ease; }
     var ps = personBox.querySelector('select[name="work_pattern"]');
     if (ps && pattern) ps.value = pattern;
   }
+  function clearSelects() { personBox.querySelectorAll("select").forEach(function (s) { s.value = ""; }); }
+  function forgetPerson() {
+    confirmedId = "";
+    clearSelects();
+    if (!S.respondent) return;
+    S.respondent = null;
+    takeTasks({});
+    api("POST", CFG.api.reset);
+  }
+  function respondentLost(j) {
+    if (!j || !j.errors || j.errors._ !== "respondent") return false;
+    forgetPerson();
+    toast(j.message || "「あなたのこと」を入れ直してください");
+    $("sec-person").scrollIntoView({ behavior: "smooth", block: "start" });
+    return true;
+  }
   async function lookupEmp() {
     var id = empInput.value.trim();
     found = null;
-    if (!id) { setIdentity(""); return; }
+    idProblem = "";
+    if (!id) { setIdentity(""); if (S.respondent || confirmedId) forgetPerson(); return; }
     var j = await api("GET", CFG.api.lookup + encodeURIComponent(id));
-    if (empInput.value.trim() !== id) return;
-    if (j.found) {
+    if (empInput.value.trim() !== id || !j._ok) return;
+    var key = normId(j.emp_id || id);
+    if (j.found && !j.excluded) {
+      if ((S.respondent && normId(S.respondent.emp_id) !== key) || (confirmedId && confirmedId !== key)) forgetPerson();
+      confirmedId = key;
       found = j;
       setIdentity("社員IDを確認しました");
       var v = getValues(personBox);
       if (v.workplace_id && v.work_pattern) debounce("person", function () { savePerson(false); }, 200);
     } else {
       found = false;
-      setIdentity(NOT_FOUND, true);
+      idProblem = j.excluded ? (j.message || NOT_FOUND) : NOT_FOUND;
+      if (S.respondent || confirmedId) forgetPerson();
+      setIdentity(idProblem, true);
     }
   }
-  empInput.addEventListener("input", function () { debounce("lookup", lookupEmp, 500); });
+  empInput.addEventListener("input", function () { $("rq-done").classList.add("d-none"); debounce("lookup", lookupEmp, 500); });
   empInput.addEventListener("change", lookupEmp);
   var personSaving = null;
   function savePerson(showErr) {
@@ -11439,7 +11658,7 @@ summary { transition: color 0.15s ease; }
     var v = getValues(personBox);
     var errors = {};
     if (!v.emp_id) errors.emp_id = "入力してください";
-    else if (found === false) errors.emp_id = "見つかりません";
+    else if (found === false) errors.emp_id = idProblem || "見つかりません";
     if (!v.workplace_id) errors.workplace_id = "選んでください";
     if (!v.work_pattern) errors.work_pattern = "選んでください";
     if (Object.keys(errors).length) {
@@ -11450,12 +11669,15 @@ summary { transition: color 0.15s ease; }
     personSaving = api("POST", CFG.api.respondent, { emp_id: v.emp_id, workplace_id: v.workplace_id, work_pattern: v.work_pattern }).then(function (j) {
       personSaving = null;
       if (!j._ok) {
-        if (j.errors && j.errors.emp_id && v.emp_id) { found = false; setIdentity(NOT_FOUND, true); }
+        if (j.errors && j.errors.emp_id && v.emp_id) { found = false; idProblem = j.errors.emp_id; setIdentity(j.errors.emp_id, true); }
         showErrors(personBox, j.errors || {});
         return false;
       }
+      if (normId(empInput.value) !== normId(j.respondent.emp_id)) { api("POST", CFG.api.reset); return false; }
       var changed = !S.respondent || S.respondent.id !== j.respondent.id;
       S.respondent = j.respondent;
+      S.stance = j.stance || null;
+      confirmedId = normId(j.respondent.emp_id);
       if (changed) {
         takeTasks(j);
         if (j.resumed && S.tasks.length) toast("前回の続きから登録できます");
@@ -11465,6 +11687,7 @@ summary { transition: color 0.15s ease; }
     });
     return personSaving;
   }
+  function empNow() { return empInput.value.trim(); }
 
   // ---------- 2. 検討する業務（AI の聞き取り） ----------
   var pickBox = $("rq-pick"), intakeBox = $("rq-intake"), finalBox = $("rq-final"), resultBox = $("rq-result");
@@ -11474,6 +11697,7 @@ summary { transition: color 0.15s ease; }
   function takeTasks(j) {
     S.tasks = j.tasks || [];
     S.suggested = j.suggested || []; S.suggested_wants = j.suggested_wants || [];
+    S.stance = j.stance || null;
     renderRegistered();
     renderSuggest();
   }
@@ -11484,15 +11708,18 @@ summary { transition: color 0.15s ease; }
     S.tasks.forEach(function (t) {
       var row = el("div", "rq-reg");
       row.appendChild(el("span", "rq-reg-name", t.name));
-      row.appendChild(el("span", "rq-reg-meta", "月 " + t.hours + " h・" + (t.wish || "")));
-      var del = el("button", "btn btn-link btn-sm text-danger", "取り消す");
-      del.type = "button";
-      del.addEventListener("click", async function () {
-        if (!confirm("「" + t.name + "」の登録を取り消しますか？")) return;
-        var j = await api("DELETE", CFG.api.tasks + "/" + t.id);
-        if (j._ok) takeTasks(j);
-      });
-      row.appendChild(del);
+      row.appendChild(el("span", "rq-reg-meta", "月 " + t.hours + " h・" + (t.wish || "") + (t.stage ? "・" + t.stage : "")));
+      if (t.can_delete) {
+        var del = el("button", "btn btn-link btn-sm text-danger", "取り消す");
+        del.type = "button";
+        del.addEventListener("click", async function () {
+          if (!confirm("「" + t.name + "」の登録を取り消しますか？")) return;
+          var j = await api("DELETE", CFG.api.tasks + "/" + t.id, { emp_id: empNow() });
+          if (j._ok) takeTasks(j);
+          else if (!respondentLost(j)) toast(j.message || "取り消せませんでした");
+        });
+        row.appendChild(del);
+      }
       box.appendChild(row);
     });
   }
@@ -11649,12 +11876,12 @@ summary { transition: color 0.15s ease; }
     renderChips([]);
     if (userText !== null) { conv.messages.push({ role: "user", text: userText }); addMsg("user", userText); }
     typing(true);
-    var j = await api("POST", CFG.api.intake, { title: conv.title, messages: conv.messages, state: conv.state, image: image || null, shown: conv.shownSteps, origin: conv.origin });
+    var j = await api("POST", CFG.api.intake, { emp_id: empNow(), title: conv.title, messages: conv.messages, state: conv.state, image: image || null, shown: conv.shownSteps, origin: conv.origin });
     typing(false);
     setBusy(false);
     if (!j._ok) {
       if (userText !== null) conv.messages.pop();
-      toast(j.message || "AI と通信できませんでした。もう一度送ってください");
+      if (!respondentLost(j)) toast(j.message || "AI と通信できませんでした。もう一度送ってください");
       return;
     }
     conv.state = j.state || conv.state;
@@ -11745,7 +11972,7 @@ summary { transition: color 0.15s ease; }
     intakeBox.scrollIntoView({ behavior: "smooth", block: "start" });
     await turn(null, null);
   }
-  function backToPick() {
+  function backToPick(quiet) {
     conv = null;
     intakeBox.classList.add("d-none");
     finalBox.classList.add("d-none");
@@ -11753,7 +11980,7 @@ summary { transition: color 0.15s ease; }
     pickBox.classList.remove("d-none");
     $("rq-title").value = "";
     renderSuggest();
-    pickBox.scrollIntoView({ behavior: "smooth", block: "start" });
+    if (!quiet) pickBox.scrollIntoView({ behavior: "smooth", block: "start" });
   }
   $("rq-start").addEventListener("click", function () { startIntake(false); });
   $("rq-title").addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); startIntake(false); } });
@@ -11793,11 +12020,12 @@ summary { transition: color 0.15s ease; }
     var shiftWork = !!(S.respondent && S.respondent.work_pattern === "交代勤務");
     $("rq-shift-field").classList.toggle("d-none", !shiftWork);
     setPill($("rq-shift"), conv.state.shift);
-    var preset = !!(conv.origin === "monthly" && CFG.monthly && CFG.monthly.self_improve);
+    var st = S.stance;
+    var preset = !!(st && st.self_improve);
     $("rq-self").checked = preset;
     $("rq-skills").classList.toggle("d-none", !preset);
     fillSkills();
-    $("rq-self-note").textContent = preset ? "月次アンケートで「" + CFG.monthly.stance + "」と答えたので、チェックを入れています（外せます）" : "";
+    $("rq-self-note").textContent = preset ? "月次アンケート（" + st.period_label + "）で「" + st.value + "」と答えたので、チェックを入れています（外せます）" : "";
     $("rq-self-note").classList.toggle("d-none", !preset);
     finalBox.classList.remove("d-none");
     finalBox.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -11808,6 +12036,15 @@ summary { transition: color 0.15s ease; }
   pills($("rq-shift"), O.shift_options, true);
   pills($("rq-skills-have"), O.skills, false);
   pills($("rq-skills-learn"), O.skills, false);
+  [$("rq-skills-have"), $("rq-skills-learn")].forEach(function (box) {
+    box.addEventListener("click", function (e) {
+      var b = e.target.closest(".rq-pill");
+      if (!b || !b.classList.contains("is-on")) return;
+      box.querySelectorAll(".rq-pill.is-on").forEach(function (p) {
+        if (p !== b && (b.dataset.value === O.skill_none || p.dataset.value === O.skill_none)) p.classList.remove("is-on");
+      });
+    });
+  });
   function fillSkills() {
     var on = function (box, vals) { box.querySelectorAll(".rq-pill").forEach(function (p) { p.classList.toggle("is-on", (vals || []).indexOf(p.dataset.value) >= 0); }); };
     on($("rq-skills-have"), S.respondent && S.respondent.c2_skills);
@@ -11836,19 +12073,19 @@ summary { transition: color 0.15s ease; }
   async function registerTask(body, btn) {
     btn.disabled = true;
     btn.textContent = "登録中…";
-    var j = await api("POST", CFG.api.tasks, body);
+    var j = await api("POST", CFG.api.tasks, Object.assign({}, body, { emp_id: empNow() }));
     btn.disabled = false;
     btn.innerHTML = '<i class="bi bi-plus-lg"></i> この業務を登録';
     $("rq-dup").classList.add("d-none");
     if (!j._ok && j.duplicate) {
       var box = $("rq-dup");
       box.innerHTML = "";
-      box.appendChild(el("div", null, "同じ名前の業務「" + j.duplicate.name + "」を " + j.duplicate.created_at + " に登録済みです（月 " + j.duplicate.hours + " h）。どうしますか？"));
+      box.appendChild(el("div", null, "同じ名前の業務「" + j.duplicate.name + "」を " + j.duplicate.created_at + " に登録済みです（月 " + j.duplicate.hours + " h）。どうしますか？" + (j.duplicate.can_delete ? "" : "（前の登録は改善チームが対応を始めているため取り消せません）")));
       var replace = el("button", "btn btn-sm btn-primary", "前の登録を取り消して、この内容で登録");
       replace.type = "button";
       replace.addEventListener("click", async function () {
-        var d = await api("DELETE", CFG.api.tasks + "/" + j.duplicate.id);
-        if (!d._ok) { toast("取り消せませんでした"); return; }
+        var d = await api("DELETE", CFG.api.tasks + "/" + j.duplicate.id, { emp_id: empNow() });
+        if (!d._ok) { if (!respondentLost(d)) toast(d.message || "取り消せませんでした"); return; }
         S.tasks = d.tasks || S.tasks;
         renderRegistered();
         registerTask(Object.assign({}, body, { force: true }), btn);
@@ -11859,14 +12096,21 @@ summary { transition: color 0.15s ease; }
       var cancel = el("button", "btn btn-sm btn-outline-secondary", "やめる");
       cancel.type = "button";
       cancel.addEventListener("click", function () { box.classList.add("d-none"); });
-      box.appendChild(replace);
+      if (j.duplicate.can_delete) box.appendChild(replace);
       box.appendChild(both);
       box.appendChild(cancel);
       box.classList.remove("d-none");
       box.scrollIntoView({ behavior: "smooth", block: "center" });
       return;
     }
-    if (!j._ok) { Object.keys(j.errors || {}).forEach(function (k) { fieldError(k, j.errors[k]); }); toast(j.message || "登録できませんでした"); return; }
+    if (!j._ok) {
+      if (respondentLost(j)) return;
+      Object.keys(j.errors || {}).forEach(function (k) { fieldError(k, j.errors[k]); });
+      toast(j.message || "登録できませんでした");
+      return;
+    }
+    if (j.respondent) S.respondent = j.respondent;
+    S.stance = j.stance || null;
     S.tasks = j.tasks || S.tasks;
     S.suggested = j.suggested || []; S.suggested_wants = j.suggested_wants || [];
     renderRegistered();
@@ -11887,7 +12131,7 @@ summary { transition: color 0.15s ease; }
       nb.dataset.task = nextTask;
     }
   }
-  $("rq-another").addEventListener("click", backToPick);
+  $("rq-another").addEventListener("click", function () { backToPick(); });
   $("rq-next-monthly").addEventListener("click", function () { $("rq-title").value = this.dataset.task; startIntake(false, "monthly"); });
   $("rq-replay").addEventListener("click", async function () {
     if (!conv || busy || !conv.frames.length) return;
@@ -11913,13 +12157,33 @@ summary { transition: color 0.15s ease; }
       return;
     }
     var total = S.tasks.reduce(function (a, t) { return a + (t.monthly_minutes || 0); }, 0);
-    $("rq-done-sum").textContent = "ありがとうございました。登録した業務 " + S.tasks.length + " 件（月 約 " + (total / 60).toFixed(1) + " 時間）は改善案件として確認し、活動状況に載せます。";
+    var sum = "ありがとうございました。登録した業務 " + S.tasks.length + " 件（月 約 " + (total / 60).toFixed(1) + " 時間）は改善案件として確認し、活動状況に載せます。次の人は上の「あなたのこと」から始められます。";
+    await api("POST", CFG.api.reset);
+    resetPage();
+    $("rq-done-sum").textContent = sum;
     var done = $("rq-done");
     done.classList.remove("d-none");
     done.scrollIntoView({ behavior: "smooth", block: "center" });
     toast("送信しました");
     if (window.uiCelebrate) window.uiCelebrate();
   });
+  function resetPage() {
+    S.respondent = null;
+    takeTasks({});
+    found = null; idProblem = ""; confirmedId = "";
+    empInput.value = "";
+    clearSelects();
+    personBox.querySelectorAll(".rq-field").forEach(clearError);
+    setIdentity("");
+    CFG.monthly = null; CFG.emp = ""; CFG.prefill = "";
+    var from = $("rq-from-monthly");
+    from.innerHTML = "";
+    from.classList.add("d-none");
+    $("rq-dup-note").classList.add("d-none");
+    $("rq-dup").classList.add("d-none");
+    backToPick(true);
+    if (window.history && history.replaceState) history.replaceState(null, "", location.pathname);
+  }
 
   // ---------- 初期表示 ----------
   renderRegistered();
@@ -11927,6 +12191,7 @@ summary { transition: color 0.15s ease; }
   if (CFG.prefill) $("rq-title").value = CFG.prefill;
   if (S.respondent) {
     empInput.value = S.respondent.emp_id || "";
+    confirmedId = normId(S.respondent.emp_id);
     found = { workplace_id: S.respondent.workplace_id };
     fillSelects(S.respondent.workplace_id, S.respondent.work_pattern);
     setIdentity("社員IDを確認しました");
