@@ -311,7 +311,10 @@ def smoke_bizmap_edit():
     check(rev and all(e["label"] == "ラベル修正" for e in rev), f"merged: reversed+label kept ({len(rev)})")
     check(m["meta"]["saved_at"] is not None, "merged: saved_at")
 
-    client.post("/survey/api/respondent", json={"emp_id": "E001", "name": "", "workplace_id": ""})
+    with app.app_context():
+        e001 = Employee.query.filter_by(emp_id="E001").first()
+        wp_e001, pat_e001 = e001.workplace_id, e001.work_pattern or "普通勤務"
+    client.post("/survey/api/respondent", json={"emp_id": "E001", "name": "", "workplace_id": wp_e001, "work_pattern": pat_e001})
     client.post("/survey/api/tasks", json={
         "name": "新規に登録した業務", "frequency": "毎週", "duration": "15分未満", "wish": "減らしたい", "self_improve": False, "messages": [],
         "state": {"title": "新規に登録した業務", "steps": [{"no": 1, "action": "メールで届いた数字を帳票に転記する", "system": "メール", "input": "", "output": "新しい帳票", "to": "上司"}], "sources": ["メール"], "outputs": ["新しい帳票"], "recipients": ["上司"]},
@@ -663,7 +666,9 @@ def smoke_login_monthly():
     check(j["found"] is False, "照会 API は存在しないIDを「見つからない」と返す")
     j = client.get(f"/monthly/api/employee/%EF%BC%A5%EF%BC%90%EF%BC%90%EF%BC%99?period={period}").get_json()
     check(j["found"] and j["emp_id"] == "E009", "全角で入れた社員ID（Ｅ００９）も同じ人として扱う")
-    payload = {"period": period, "emp_id": "E009", "name": "小林 直樹", "workplace_id": "", "work_pattern": "普通勤務", "answers": {"has": "ある", "hours": "45分〜1時間", "task_names": "日報の集計", "trend": "減った", "decreased_reason": "日報の転記を自動化した", "wants": "ある", "wants_tasks": "日報の転記", "stance": "学びながら改善チームと一緒に取り組みたい", "new_tasks": ""}, "comment": "テストのコメント"}
+    with app.app_context():
+        wp009 = str(Employee.query.filter_by(emp_id="E009").first().workplace_id)
+    payload = {"period": period, "emp_id": "E009", "name": "小林 直樹", "workplace_id": wp009, "work_pattern": "普通勤務", "answers": {"has": "ある", "hours": "45分〜1時間", "task_names": "日報の集計", "trend": "減った", "decreased_reason": "日報の転記を自動化した", "wants": "ある", "wants_tasks": "日報の転記", "stance": "学びながら改善チームと一緒に取り組みたい", "new_tasks": ""}, "comment": "テストのコメント"}
     with app.app_context():
         MonthlyResponse.query.filter_by(period=period, emp_id="E009").delete()
         db.session.commit()
@@ -685,7 +690,9 @@ def smoke_login_monthly():
     with app.app_context():
         MonthlyResponse.query.filter_by(period=period, emp_id="E010").delete()
         db.session.commit()
-    form = {"period": period, "emp_id": "E010", "name": "加藤 恵", "workplace_id": ""}
+        e010 = Employee.query.filter_by(emp_id="E010").first()
+        wp010, pat010 = str(e010.workplace_id), e010.work_pattern
+    form = {"period": period, "emp_id": "E010", "name": "加藤 恵", "workplace_id": wp010, "work_pattern": pat010}
     for k, v in payload["answers"].items():
         form["ans-" + k] = v
     form["comment"] = ""
@@ -833,12 +840,15 @@ def smoke_login_monthly():
     check(r.status_code == 400 and "work_pattern" in r.get_json()["errors"], "初めての人は勤務形態（普通勤務／交代勤務）を選ばないと送信できない")
     r = client.post("/monthly/submit", json=dict(full, period=period, emp_id="X998", name="新人 次郎", workplace_id="1", work_pattern="交代勤務"))
     j = client.get(f"/monthly/api/employee/X998?period={period}").get_json()
-    check(r.status_code == 200 and j.get("work_pattern") == "交代勤務", "一度選んだ勤務形態は控えられ、次回から自動で入る")
+    with app.app_context():
+        e = Employee.query.filter_by(emp_id="X998").first()
+        x998_pat = e.work_pattern if e else None
+    check(r.status_code == 200 and "work_pattern" not in j and x998_pat == "交代勤務", "選んだ勤務形態は対象者一覧に控えるが、照会では返さない（次回も本人が選ぶ）")
     with app.app_context():
         row = MonthlyResponse.query.filter_by(period=period, emp_id="X998").first()
         check(row is not None and row.work_pattern == "交代勤務", "回答に勤務形態が保存される")
     code, html, r = get("/monthly/?emp=X998")
-    check('id="work_pattern" class="form-select" required' in html and 'value="交代勤務" selected' in html, "回答フォームに勤務形態の選択があり、控えが選択済みになる")
+    check('id="work_pattern" class="form-select" required' in html and 'value="交代勤務" selected' not in html, "回答フォームに勤務形態の選択があり、控えがあっても選択済みにしない（本人が選ぶ）")
     code, html, r = get("/monthly/?emp=X999")
     check('id="workplace_id" class="form-select" required' in html and "職場を選んでください" in html, "職場の選択は必須の入力欄")
 
@@ -947,17 +957,17 @@ def smoke_login_monthly():
     with app.app_context():
         check(lookup("E999") is None and lookup("E998") is None, "404 や exists:false は「いない」")
         info = lookup("E777")
-        check(info is not None and info["name"] == "" and info["workplace_id"] is None and Employee.query.filter_by(emp_id="E777").first() is None, "exists:true だけでも「いる」と分かる（照会しただけでは対象者一覧に載らない）")
+        check(info is not None and info["name"] == "" and "workplace_id" not in info and Employee.query.filter_by(emp_id="E777").first() is None, "exists:true だけでも「いる」と分かる（照会しただけでは対象者一覧に載らない）")
         info = lookup("E997")
-        check(info is not None and info["name"] == "名前 あり" and info["workplace"] == "製造1課", "氏名・所属が返れば従来どおり")
+        check(info is not None and info["name"] == "名前 あり" and "workplace_id" not in info and "department" not in info, "照会で使うのは氏名だけ（所属が返っても職場は決めない）")
         info = lookup("E996")
-        check(info is not None and info["name"] == "表示名 太郎" and info["workplace_id"] is None, "氏名が display_name で返る API でも氏名が入る（職場は空）")
+        check(info is not None and info["name"] == "表示名 太郎" and "workplace_id" not in info, "氏名が display_name で返る API でも氏名が入る")
     r = client.get(f"/monthly/api/employee/E777?period={period}")
     j = r.get_json()
-    check(j["found"] and j["name"] == "" and not j["workplace_id"], "照会APIで見つかるが氏名・職場は空")
+    check(j["found"] and set(j) == {"found", "answered", "emp_id"}, f"照会 API は見つかったか・回答済みかと社員IDだけを返す（氏名・職場・勤務形態は返さない）: {sorted(j)}")
     r = client.get(f"/monthly/api/employee/E996?period={period}")
     j = r.get_json()
-    check(j["found"] and j["name"] == "表示名 太郎" and not j["workplace_id"], "display_name の人は氏名だけ入り、職場を選ぶ")
+    check(j["found"] and "name" not in j and "workplace_id" not in j and "work_pattern" not in j, "display_name の人も、氏名・職場は画面に返さない")
     r = client.post("/monthly/submit", json=dict(full, period=period, emp_id="E996", name="", workplace_id=""))
     check(r.status_code == 400 and set(r.get_json()["errors"]) == {"workplace_id"}, "初回に足りないのは職場だけ")
     r = client.post("/monthly/submit", json=dict(full, period=period, emp_id="E996", name="", workplace_id="3"))
@@ -969,7 +979,9 @@ def smoke_login_monthly():
         check(r.status_code == 400 and "emp_id" in r.get_json()["errors"], f"LDAP にいない社員ID（{missing}）は送信できない")
     r = client.get(f"/monthly/api/employee/E996?period={prev}")
     j = r.get_json()
-    check(j["found"] and j["name"] == "表示名 太郎" and j["workplace_id"] == 3, "2回目からは職場も自動で入る")
+    check(j["found"] and "workplace_id" not in j and "work_pattern" not in j, "2回目でも職場・勤務形態は自動で入らない（毎回本人が選ぶ）")
+    code, html_e, r = get(f"/monthly/?period={prev}&emp=E996")
+    check(code == 200 and "selected>" not in html_e.split('id="workplace_id"', 1)[-1].split("</select>", 1)[0], "社員ID付きのリンクで開いても、職場は選ばれていない")
     r = client.post("/monthly/submit", json=dict(full, period=period, emp_id="E777", name="", workplace_id=""))
     check(r.status_code == 400 and set(r.get_json()["errors"]) == {"workplace_id"}, "初回に足りないのは職場だけ（氏名は聞かない）")
     r = client.post("/monthly/submit", json=dict(full, period=period, emp_id="E777", name="初回 入力", workplace_id="2"))
@@ -978,11 +990,11 @@ def smoke_login_monthly():
     j = r.get_json()
     with app.app_context():
         emp = Employee.query.filter_by(emp_id="E777").first()
-        check(j["found"] and j["name"] == "" and j["workplace_id"] == 2 and emp.name == "" and emp.workplace_id == 2, "2回目からは職場が自動で入る（対象者一覧に残る）")
+        check(j["found"] and "workplace_id" not in j and emp.name == "" and emp.workplace_id == 2, "職場は自動で入らないが、選んだ職場は対象者一覧に残る")
     client.post("/survey/api/reset")
     r = client.post("/survey/api/respondent", json={"emp_id": "E777", "workplace_id": ""})
     j = r.get_json()
-    check(r.status_code == 200 and j["respondent"]["workplace_id"] == 2, "自動化を検討でも社員IDだけで職場が入る")
+    check(r.status_code == 400 and {"workplace_id", "work_pattern"} <= set(j["errors"]), "自動化を検討でも職場・勤務形態は本人が選ぶ（社員IDだけでは入らない）")
     r = client.post("/survey/api/respondent", json={"emp_id": "E999", "workplace_id": 1, "work_pattern": "普通勤務"})
     check(r.status_code == 400 and "emp_id" in r.get_json()["errors"], "自動化を検討でも LDAP にいない社員IDは進めない")
     ldap_auth.urllib.request.urlopen = _real_urlopen
@@ -1134,6 +1146,7 @@ def smoke_request():
     code, html_m, r = get("/survey/?emp=T001&src=monthly")
     check(code == 200 and '"self_improve": false' in html_m and ('"wants_tasks": ["\\u65e5' in html_m or '"wants_tasks": ["日報の集計"]' in html_m), "アンケートから来ると、なくしたい業務と進め方（依頼したい＝チェックなし）を渡す")
     check('"respondent": null' in html_m, "開いたときは前の回答者を戻さず、空で始める")
+    check('"workplace_id": 1' in html_m, "月次アンケートから来たときは、その回答で選んだ職場を引き継ぐ")
     client.post("/survey/api/respondent", json={"emp_id": "T001", "workplace_id": 1, "work_pattern": "交代勤務"})
 
     calls, script = [], []

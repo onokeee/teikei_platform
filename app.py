@@ -765,55 +765,16 @@ def lookup(emp_id):
     if info is None and emp is None:
         return None
     info = info or {}
-    if emp is not None:
-        changed = False
-        for field in ("name", "department", "email"):
-            value = str(info.get(field) or "").strip()
-            if value and getattr(emp, field) != value:
-                setattr(emp, field, value)
-                changed = True
-        if changed:
-            db.session.commit()
-    name = str(info.get("name") or (emp.name if emp else "") or "").strip()
-    department = str(info.get("department") or (emp.department if emp else "") or "").strip()
-    workplace_id = emp.workplace_id if emp else None
-    if not workplace_id:
-        wp = workplace_for(department)
-        workplace_id = wp.id if wp else None
-    work_pattern = (emp.work_pattern if emp else "") or ""
-    canonical = emp.emp_id if emp else (info.get("emp_id") or emp_id)
-    if not workplace_id or not work_pattern:
-        _name, r_wp, r_pat = remembered_person(canonical)
-        workplace_id, work_pattern = workplace_id or r_wp, work_pattern or r_pat
-    workplace = db.session.get(Workplace, workplace_id) if workplace_id else None
+    name = str(info.get("name") or "").strip()
+    if emp is not None and name and emp.name != name:
+        emp.name = name
+        db.session.commit()
     return {
-        "emp_id": canonical,
-        "name": name,
-        "department": department,
-        "email": str(info.get("email") or (emp.email if emp else "") or ""),
-        "workplace_id": workplace_id,
-        "workplace": workplace.name if workplace else "",
-        "work_pattern": work_pattern,
+        "emp_id": emp.emp_id if emp else (info.get("emp_id") or emp_id),
+        "name": name or (emp.name if emp else "") or "",
         "source": emp.source if emp else "ldap",
         "member": emp is not None,
     }
-
-def remembered_person(emp_id):
-    emp_id = (emp_id or "").strip()
-    name, workplace_id, work_pattern = "", None, ""
-    if not emp_id:
-        return name, workplace_id, work_pattern
-    r = Respondent.query.filter_by(emp_id=emp_id).order_by(Respondent.id.desc()).first()
-    if r is not None:
-        name, workplace_id, work_pattern = r.name or "", r.workplace_id, r.work_pattern or ""
-    if not name or not workplace_id or not work_pattern:
-        for row in MonthlyResponse.query.filter_by(emp_id=emp_id).order_by(MonthlyResponse.created_at.desc(), MonthlyResponse.id.desc()).all():
-            name = name or (row.name or "")
-            workplace_id = workplace_id or row.workplace_id
-            work_pattern = work_pattern or (row.work_pattern or "")
-            if name and workplace_id and work_pattern:
-                break
-    return name, workplace_id, work_pattern
 
 def remember_person(emp_id, name=None, workplace_id=None, work_pattern=None):
     emp = find_employee(emp_id)
@@ -4819,7 +4780,8 @@ def _monthly_context(emp, src):
     if not wants:
         return None
     stance = row.answer("stance")
-    return {"period": row.period, "period_label": period_label(row.period), "wants_tasks": wants, "stance": stance, "self_improve": stance in C.MONTHLY_KPI["self_positive"]}
+    return {"period": row.period, "period_label": period_label(row.period), "wants_tasks": wants, "stance": stance, "self_improve": stance in C.MONTHLY_KPI["self_positive"],
+            "workplace_id": row.workplace_id, "work_pattern": row.work_pattern or ""}
 
 def _options():
     return {
@@ -4861,9 +4823,6 @@ def api_respondent():
     info = lookup(f.get("emp_id"))
     emp_id = info["emp_id"] if info else norm_emp_id(f.get("emp_id"))
     name = info["name"] if info else ""
-    if info:
-        workplace_id = workplace_id or info.get("workplace_id")
-        work_pattern = work_pattern or info.get("work_pattern") or ""
     errors = {}
     if not emp_id:
         errors["emp_id"] = "入力してください"
@@ -6013,9 +5972,6 @@ def submit():
     info = lookup(data.get("emp_id"))
     emp_id = info["emp_id"] if info else norm_emp_id(data.get("emp_id"))
     name = info["name"] if info else ""
-    if info:
-        workplace_id = workplace_id or info.get("workplace_id")
-        work_pattern = work_pattern or info.get("work_pattern") or ""
 
     errors = {}
     if not emp_id:
@@ -6111,7 +6067,7 @@ def api_employee(emp_id):
     if not info:
         return jsonify({"found": False, "emp_id": emp_id, "answered": False})
     answered = MonthlyResponse.query.filter_by(period=period, emp_id=info["emp_id"]).first() is not None
-    return jsonify({"found": True, "answered": answered, **info})
+    return jsonify({"found": True, "answered": answered, "emp_id": info["emp_id"]})
 
 # ----- 集計（要ログイン） -----
 @bp_monthly.route("/results")
@@ -8302,14 +8258,14 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
             <label class="form-label" for="workplace_id">職場</label>
             <select name="workplace_id" id="workplace_id" class="form-select" required>
               <option value="">選択</option>
-              {% for w in workplaces %}<option value="{{ w.id }}" {% if info and info.workplace_id == w.id %}selected{% endif %}>{{ w.name }}</option>{% endfor %}
+              {% for w in workplaces %}<option value="{{ w.id }}">{{ w.name }}</option>{% endfor %}
             </select>
           </div>
           <div class="col-sm-6">
             <label class="form-label" for="work_pattern">勤務形態</label>
             <select name="work_pattern" id="work_pattern" class="form-select" required>
               <option value="">選択</option>
-              {% for w in C.WORK_PATTERNS %}<option value="{{ w }}" {% if info and info.work_pattern == w %}selected{% endif %}>{{ w }}</option>{% endfor %}
+              {% for w in C.WORK_PATTERNS %}<option value="{{ w }}">{{ w }}</option>{% endfor %}
             </select>
           </div>
         </div>
@@ -8411,8 +8367,6 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
     form.classList.remove("d-none");
     empFound = !!j.found;
     if (j.found) {
-      if (j.workplace_id) wpSelect.value = String(j.workplace_id);
-      if (j.work_pattern) patSelect.value = j.work_pattern;
       setMsg("社員IDを確認しました", "ok");
     } else {
       setMsg(NOT_FOUND, "ng");
@@ -11469,9 +11423,9 @@ summary { transition: color 0.15s ease; }
     if (empInput.value.trim() !== id) return;
     if (j.found) {
       found = j;
-      fillSelects(j.workplace_id, j.work_pattern);
       setIdentity("社員IDを確認しました");
-      debounce("person", function () { savePerson(false); }, 200);
+      var v = getValues(personBox);
+      if (v.workplace_id && v.work_pattern) debounce("person", function () { savePerson(false); }, 200);
     } else {
       found = false;
       setIdentity(NOT_FOUND, true);
@@ -11590,6 +11544,7 @@ summary { transition: color 0.15s ease; }
     if (!next) return;
     $("rq-title").value = next;
     if (!S.respondent) {
+      fillSelects(CFG.monthly.workplace_id, CFG.monthly.work_pattern);
       await lookupEmp();
       var ok = await savePerson(false);
       if (!ok) { toast("「あなたのこと」の空欄を選ぶと始められます"); return; }
