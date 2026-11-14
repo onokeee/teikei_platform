@@ -11907,11 +11907,9 @@ main.container { padding-top: 2rem !important; padding-bottom: 4rem !important; 
 .breadcrumb-item + .breadcrumb-item::before { color: var(--ui-text-3); }
 hr { border-color: var(--ui-line); opacity: 1; }
 
-/* ナビ（白・半透明。いまのページは青で示す） */
+/* ナビ（白。下を流れる文字が透けて重ならないよう不透明にする。いまのページは青で示す） */
 .app-nav {
-  background: rgba(255, 255, 255, 0.86);
-  -webkit-backdrop-filter: saturate(180%) blur(20px);
-  backdrop-filter: saturate(180%) blur(20px);
+  background: #fff;
   border-bottom: 1px solid var(--ui-line);
   padding-top: 0.45rem;
   padding-bottom: 0.45rem;
