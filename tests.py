@@ -1336,12 +1336,14 @@ def smoke_login_monthly():
     with app.app_context():
         e = Employee.query.filter_by(emp_id="X998").first()
         x998_pat = e.work_pattern if e else None
-    check(r.status_code == 200 and "work_pattern" not in j and x998_pat == "交代勤務", "選んだ勤務形態は対象者一覧に控えるが、照会では返さない（次回も本人が選ぶ）")
+    check(r.status_code == 200 and "work_pattern" not in j and (j.get("prefill") or {}).get("work_pattern") == "交代勤務" and x998_pat == "交代勤務",
+          f"選んだ勤務形態は対象者一覧に控え、次に社員IDを入れると前回の値（prefill）として返す: {j.get('prefill')}")
     with app.app_context():
         row = MonthlyResponse.query.filter_by(period=period, emp_id="X998").first()
         check(row is not None and row.work_pattern == "交代勤務", "回答に勤務形態が保存される")
     code, html, r = get("/monthly/?emp=X998")
-    check('id="work_pattern" class="form-select" required' in html and 'value="交代勤務" selected' not in html, "回答フォームに勤務形態の選択があり、控えがあっても選択済みにしない（本人が選ぶ）")
+    check('id="work_pattern" class="form-select" required' in html and 'value="交代勤務" selected' not in html and 'id="emp-prefill"' in html and "applyPrefill((j.emp_id || id).toLowerCase(), j.prefill)" in html and "clearPrefill();" in html,
+          "回答フォームはサーバーでは選ばず、社員IDの照会で前回の職場・勤務形態を入れて案内を出す（別の社員IDにしたら消す）")
     code, html, r = get("/monthly/?emp=X999")
     check('id="workplace_id" class="form-select" required' in html and "職場を選んでください" in html, "職場の選択は必須の入力欄")
 
@@ -1479,7 +1481,7 @@ def smoke_login_monthly():
         check(info is not None and info["name"] == "表示名 太郎" and "workplace_id" not in info, "氏名が display_name で返る API でも氏名が入る")
     r = client.get(f"/monthly/api/employee/E777?period={period}")
     j = r.get_json()
-    check(j["found"] and set(j) == {"found", "answered", "emp_id"}, f"照会 API は見つかったか・回答済みかと社員IDだけを返す（氏名・職場・勤務形態は返さない）: {sorted(j)}")
+    check(j["found"] and set(j) == {"found", "answered", "emp_id"}, f"照会 API は氏名を返さず、まだ回答のない人には前回の職場・勤務形態も返さない: {sorted(j)}")
     r = client.get(f"/monthly/api/employee/E996?period={period}")
     j = r.get_json()
     check(j["found"] and "name" not in j and "workplace_id" not in j and "work_pattern" not in j, "display_name の人も、氏名・職場は画面に返さない")
@@ -1494,7 +1496,7 @@ def smoke_login_monthly():
         check(r.status_code == 400 and "emp_id" in r.get_json()["errors"], f"LDAP にいない社員ID（{missing}）は送信できない")
     r = client.get(f"/monthly/api/employee/E996?period={prev}")
     j = r.get_json()
-    check(j["found"] and "workplace_id" not in j and "work_pattern" not in j, "2回目でも職場・勤務形態は自動で入らない（毎回本人が選ぶ）")
+    check(j["found"] and "name" not in j and j.get("prefill") == {"workplace_id": 3, "work_pattern": "普通勤務"}, f"2回目からは前回の回答の職場・勤務形態を返す（画面で入れて案内を出す）: {j.get('prefill')}")
     code, html_e, r = get(f"/monthly/?period={prev}&emp=E996")
     check(code == 200 and "selected>" not in html_e.split('id="workplace_id"', 1)[-1].split("</select>", 1)[0], "社員ID付きのリンクで開いても、職場は選ばれていない")
     r = client.post("/monthly/submit", json=dict(full, period=period, emp_id="E777", name="", workplace_id=""))
@@ -1505,7 +1507,10 @@ def smoke_login_monthly():
     j = r.get_json()
     with app.app_context():
         emp = Employee.query.filter_by(emp_id="E777").first()
-        check(j["found"] and "workplace_id" not in j and emp.name == "" and emp.workplace_id == 2, "職場は自動で入らないが、選んだ職場は対象者一覧に残る")
+        check(j["found"] and (j.get("prefill") or {}).get("workplace_id") == 2 and emp.name == "" and emp.workplace_id == 2, "選んだ職場は対象者一覧に残り、次は前回の値として返す")
+    js_sv = client.get("/static/survey.js").data.decode("utf-8")
+    check("fillSelects(j.prefill.workplace_id, j.prefill.work_pattern)" in js_sv and "prefillNote.textContent = O.prefill_note" in js_sv and "!before.workplace_id && !before.work_pattern" in js_sv,
+          "自動化を検討でも、職場・勤務形態が空なら前回の値を入れて案内を出す（選んである値は上書きしない）")
     client.post("/survey/api/reset")
     r = client.post("/survey/api/respondent", json={"emp_id": "E777", "workplace_id": ""})
     j = r.get_json()

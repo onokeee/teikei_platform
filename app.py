@@ -818,6 +818,7 @@ def init_id_seq():
 ldap_status_text = ldap_auth.status_text
 EMP_NOT_FOUND = "この社員IDは見つかりません。IDを確かめてください"
 EMP_EXCLUDED = "この社員IDは対象外になっています。管理者に連絡してください"
+PREFILL_NOTE = "前回の回答の職場・勤務形態を入れました。変わっていたら、今の所属・勤務形態に合わせてプルダウンで選び直してください。"
 
 
 def workplace_for(department):
@@ -896,6 +897,17 @@ def current_place(emp_id, fallback=None):
         if x is not None and x.workplace_id:
             return x.workplace_id, x.work_pattern or ""
     return None, ""
+
+def previous_choice(emp_id):
+    if not newest_period(emp_id):
+        return None
+    workplace_id, pattern = current_place(emp_id)
+    if workplace_id and db.session.get(Workplace, workplace_id) is None:
+        workplace_id = None
+    pattern = pattern if pattern in C.WORK_PATTERNS else ""
+    if not workplace_id and not pattern:
+        return None
+    return {"workplace_id": workplace_id, "work_pattern": pattern}
 
 # ===== 集計・KPI・分析不足領域の判定・次アクション提案 =====
 # ----- KPI・ダッシュボードのグラフ -----
@@ -5614,6 +5626,7 @@ def _options():
     return {
         "workplaces": [{"id": w.id, "name": w.name} for w in _workplaces()],
         "person": C.PERSON_FIELDS,
+        "prefill_note": C.PREFILL_NOTE,
         "frequencies": C.FREQUENCIES,
         "durations": C.DURATIONS,
         "wishes": C.WISHES,
@@ -7141,7 +7154,11 @@ def api_employee(emp_id):
     answered = _response_for(period, info["emp_id"]) is not None
     if not info["active"]:
         return jsonify({"found": True, "excluded": True, "message": EMP_EXCLUDED, "answered": answered, "emp_id": info["emp_id"]})
-    return jsonify({"found": True, "answered": answered, "emp_id": info["emp_id"]})
+    out = {"found": True, "answered": answered, "emp_id": info["emp_id"]}
+    prefill = previous_choice(info["emp_id"])
+    if prefill:
+        out["prefill"] = prefill
+    return jsonify(out)
 
 # ----- 集計（要ログイン） -----
 @bp_monthly.route("/results")
@@ -9434,6 +9451,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
           </div>
         </div>
         <div id="emp-msg" class="form-text"></div>
+        <div id="emp-prefill" class="form-text mq-prefill-note"></div>
       </div>
 
       {% set ns = namespace(main=0, nos={}, subs={}, labels={}) %}
@@ -9512,7 +9530,23 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
   var wpSelect = document.getElementById("workplace_id");
   var patSelect = document.getElementById("work_pattern");
   var msg = document.getElementById("emp-msg");
-  var lookupTimer = null, empFound = null;
+  var prefillNote = document.getElementById("emp-prefill");
+  var lookupTimer = null, empFound = null, prefilledFor = "";
+  var PREFILL_NOTE = {{ C.PREFILL_NOTE|tojson }};
+  function clearPrefill() {
+    if (prefilledFor) { wpSelect.value = ""; patSelect.value = ""; }
+    prefilledFor = "";
+    prefillNote.textContent = "";
+  }
+  function applyPrefill(key, prefill) {
+    if (prefilledFor && prefilledFor !== key) clearPrefill();
+    if (!prefill || (prefilledFor !== key && (wpSelect.value || patSelect.value))) return;
+    if (prefill.workplace_id) wpSelect.value = String(prefill.workplace_id);
+    if (prefill.work_pattern) patSelect.value = prefill.work_pattern;
+    prefilledFor = key;
+    prefillNote.textContent = PREFILL_NOTE;
+  }
+  [wpSelect, patSelect].forEach(function (s) { s.addEventListener("change", function () { prefilledFor = ""; }); });
   var NOT_FOUND = {{ C.EMP_NOT_FOUND|tojson }}, empProblem = NOT_FOUND;
   function setMsg(text, state) { msg.textContent = text || ""; msg.classList.toggle("mq-emp-ok", state === "ok"); msg.classList.toggle("mq-emp-ng", state === "ng"); }
   async function lookupEmp() {
@@ -9532,9 +9566,11 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
     empFound = !!j.found && !j.excluded;
     if (empFound) {
       setMsg("社員IDを確認しました", "ok");
+      applyPrefill((j.emp_id || id).toLowerCase(), j.prefill);
     } else {
       empProblem = j.excluded ? (j.message || {{ C.EMP_EXCLUDED|tojson }}) : NOT_FOUND;
       setMsg(empProblem, "ng");
+      clearPrefill();
     }
     updateProgress();
   }
@@ -9542,6 +9578,7 @@ document.querySelectorAll(".member-exclude").forEach(function (box) {
     empInput.value = "";
     empFound = null;
     setMsg("");
+    clearPrefill();
     answered.classList.add("d-none");
     form.classList.remove("d-none");
     if (window.history && history.replaceState) history.replaceState(null, "", "{{ url_for('monthly.form', period=period) }}");
@@ -12253,6 +12290,7 @@ summary { transition: color 0.15s ease; }
 .login-sub { color: var(--ui-text-2); font-size: 0.9rem; text-align: center; margin-bottom: 1.25rem; }
 /* ---- 月次アンケート（回答） ---- */
 .mq-wrap { max-width: 1040px; margin: 0 auto; }
+.mq-prefill-note:not(:empty), .rq-prefill-note:not(:empty) { margin-top: 0.4rem; padding: 0.35rem 0.7rem; border-radius: var(--ui-radius-sm, 8px); background: var(--ui-accent-soft); color: var(--ui-accent-text); font-size: 0.82rem; }
 .mq-head { text-align: center; margin: 0.5rem 0 1.25rem; }
 .mq-badge { display: inline-block; padding: 0.2rem 0.8rem; border-radius: 999px; background: var(--ui-accent-soft); color: var(--ui-accent-text); font-weight: 600; font-size: 0.85rem; }
 .mq-title { font-size: 1.9rem; letter-spacing: -0.03em; margin: 0.5rem 0 0.35rem; }
@@ -12618,6 +12656,8 @@ summary { transition: color 0.15s ease; }
   var identity = el("div", "rq-identity");
   idRow.appendChild(identity);
   personBox.appendChild(idRow);
+  var prefillNote = el("div", "rq-prefill-note");
+  personBox.appendChild(prefillNote);
   var empInput = idWrap.querySelector("input");
   var found = null, idProblem = "", confirmedId = "";
   var ID_OK = "社員IDを確認しました";
@@ -12634,6 +12674,7 @@ summary { transition: color 0.15s ease; }
   function forgetPerson() {
     confirmedId = "";
     clearSelects();
+    prefillNote.textContent = "";
     if (!S.respondent) return;
     S.respondent = null;
     takeTasks({});
@@ -12660,6 +12701,11 @@ summary { transition: color 0.15s ease; }
       confirmedId = key;
       found = j;
       setIdentity(ID_OK);
+      var before = getValues(personBox);
+      if (j.prefill && !before.workplace_id && !before.work_pattern) {
+        fillSelects(j.prefill.workplace_id, j.prefill.work_pattern);
+        prefillNote.textContent = O.prefill_note;
+      }
       var v = getValues(personBox);
       if (v.workplace_id && v.work_pattern) debounce("person", function () { savePerson(false); }, 200);
     } else {
