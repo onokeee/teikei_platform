@@ -1842,7 +1842,7 @@ def smoke_login_monthly():
         e009 = Employee.query.filter_by(emp_id="DEMO-009").first().id
     client.post("/login", data={"emp_id": "admin", "password": "adminpass"})
     code, html, r = get("/admin/employees")
-    check(code == 200 and "人財一覧" in html and "対象外" in html and ">自動化アイテム</button>" in html and "自動化を検討" not in html and "member-yes" in html and "回答 ／ 対象（回答率）" in html and "E996" in html and "NOPE01" not in html,
+    check(code == 200 and "人財一覧" in html and "対象外" in html and ">自動化アイテム（件）</button>" in html and "自動化を検討" not in html and "member-yes" in html and "回答 ／ 対象（回答率）" in html and "E996" in html and "NOPE01" not in html,
           "人財一覧: ユーザーID・氏名・自動化アイテムの件数 × 月ごとの回答チェック")
     import app as app_module
     with app.app_context():
@@ -1865,8 +1865,9 @@ def smoke_login_monthly():
     check(f"回答した人 {answered_n} 人／業務" in html and "一度でも回答した人）" not in html + html_e and 'kpi-label">回答した人' not in html_e,
           f"P9: 管理の人数は「回答した人」（対象外とまだ回答のない人を除く）: {answered_n} 人。人財一覧には人数のカードを置かない")
     html_mr2 = client.get("/monthly/results").data.decode("utf-8")
-    check("交代勤務（2班）" in html_e and 'value="交代勤務|1班"' in html_e and "交代勤務 2班" in html_mr2,
-          "人財一覧の勤務形態に班を添え（交代勤務（2班））、班でも絞り込める。月次集計の勤務形態別の推移に班ごとの行を出す")
+    team_rows = [x for x in html_e.split("<tr") if 'data-sort="交代勤務">交代勤務</td>' in x and 'data-sort="2班">2班</td>' in x]
+    check(team_rows and "交代勤務（2班）" not in html_e and 'value="交代勤務|1班"' not in html_e and 'data-filter="team"' in html_e and '<option value="2班">2班</option>' in html_e and "交代勤務 2班" in html_mr2,
+          "人財一覧は勤務形態と班を別の列に出し（交代勤務／2班）、班の列でも絞り込める。月次集計の勤務形態別の推移に班ごとの行を出す")
     check("LDAP は未設定です。人財一覧に載っている人だけが回答できます" in html and "LDAP_API_URL" in html and 'name="catchphrase"' not in html and 'name="sub_message"' not in html,
           "管理: LDAP の設定の有無と、未設定なら新しい人は回答できないことを出す。どこにも出ないキャッチコピー・サブメッセージの設定はない")
     with app.app_context():
@@ -1937,8 +1938,10 @@ def smoke_login_monthly():
     client.post("/login", data={"emp_id": "admin", "password": "adminpass"})
     code, html, r = get("/admin/employees")
     check(code == 200 and "DX人財情報" not in html and "人材育成" not in html and "田中 一郎" in html and "E777" in html, "人財一覧（DX人財情報をまとめた）: 自動化を検討の回答者と、月次だけ答えた人が並ぶ")
-    check("kpi-card" not in html and "直近の月次で「自分で・一緒に取り組みたい」" not in html and all(f">{h}</button>" in html for h in ("Gr・役割", "勤務形態", "意欲（自動化アイテム登録）", "月次：改善の進め方", "使える技術", "学びたい技術")),
-          "人財一覧: 上の人数のカードは置かず、Gr・役割・勤務形態・意欲・進め方・技術の列を並べる")
+    labels = [label for _k, label, _n in app_module.MEMBER_COLUMNS]
+    check("kpi-card" not in html and "直近の月次で「自分で・一緒に取り組みたい」" not in html and len(labels) == 18 and all(f">{h}</button>" in html for h in labels)
+          and "意欲（自動化アイテム登録）</button>" not in html and "自分で改善したい人" not in html and "data-positive" not in html and "data-wish" not in html,
+          "人財一覧: 上の人数のカードは置かず、1列に1つの情報だけを並べる（勤務形態と班、進め方と答えた月と回数、自動化アイテムの件数と名前などを分け、「自分で改善したい人」などの判定は出さない）")
     legend_tip = html.split('data-tip="月の欄の印', 1)[1][:400] if 'data-tip="月の欄の印' in html else ""
     check(html.count('class="tip"') >= 4 and 'data-tip="月次アンケートか「自動化アイテム登録」に一度でも回答した人が' in html and "列名を押すと並べ替え" in legend_tip
           and 'data-tip="この行の「回答 ／ 対象」は' in html and "下の行の「回答 ／ 対象」" not in html and '<span class="text-muted">列名を押すと' not in html,
@@ -1946,13 +1949,15 @@ def smoke_login_monthly():
     check('id="member-table"' in html and 'data-filter="wp"' in html and 'id="member-month"' not in html and 'id="member-month-st"' not in html and "月の回答で絞り込む" not in html and 'data-filter="m0"' not in html
           and "function applySort()" in html and "function applyFilter()" in html and 'aria-sort="none"' in html and "monthOk" not in html,
           "人財一覧: 列名を押して並べ替え、見出しの下の欄で列ごとに絞り込める（「月の回答で絞り込む」は置かない）")
-    check('id="member-cols"' in html and all(f'value="{k}" checked' in html for k in ("excluded", "name", "wp", "pat", "wish", "stance", "skills", "learn", "tasks", "answers", "months"))
-          and 'value="id"' not in html and 'HIDE_KEY = "member-hidden-cols"' in html and "localStorage.setItem(HIDE_KEY" in html and "FIXED = 11" in html,
+    keys = [k for k, _l, _n in app_module.MEMBER_COLUMNS]
+    check('id="member-cols"' in html and all(f'value="{k}" checked' in html for k in keys if k != "id") and 'value="months" checked' in html
+          and 'value="id"' not in html and 'HIDE_KEY = "member-hidden-cols"' in html and "localStorage.setItem(HIDE_KEY" in html
+          and "var KEYS = " + json.dumps(keys) + ";" in html and "var FIXED = KEYS.length;" in html,
           "人財一覧: 表示する列を選べる（ユーザーIDはいつも出す。選んだ列は見る人のブラウザに覚える。月ごとの回答もまとめて隠せる）")
     with app.app_context():
         n777 = MonthlyResponse.query.filter(db.func.lower(MonthlyResponse.emp_id) == "e777").count()
     row_p = next((x for x in html.split("<tr") if 'data-sort="E777"' in x), "")
-    check('data-col="answers"' in html and 'data-filter="answers"' in html and f'<td class="small text-end text-nowrap" data-sort="{n777}">{n777} 回</td>' in row_p and n777 >= 1 and 'colspan="11"' in html,
+    check('data-col="answers"' in html and 'data-filter="answers"' in html and f'<td class="small text-end text-nowrap" data-sort="{n777}">{n777} 回</td>' in row_p and n777 >= 1 and f'colspan="{len(app_module.MEMBER_COLUMNS)}"' in html,
           "人財一覧に月次アンケートの回答数（合計）の列があり、並べ替え・絞り込みもできる")
     check("ユーザーIDの照会（LDAP）" not in html and "回答前に対象者へ入れる" not in html and "test-btn" not in html and "/admin/employees/import" not in html and "/admin/employees/add" not in html
           and client.post("/admin/employees/add", data={"emp_id": "Z001", "name": "x"}).status_code == 404 and client.post("/admin/employees/import").status_code == 404,
@@ -1963,15 +1968,19 @@ def smoke_login_monthly():
     r = client.get("/people/", query_string={"wish": "positive"})
     check(r.status_code == 302 and "/admin/employees" in r.headers["Location"] and "wish=positive" in r.headers["Location"], "前の DX人財情報のアドレスは人財一覧へ送る（絞り込みを引き継ぐ）")
     html = client.get(r.headers["Location"]).data.decode("utf-8")
+    checked_box = lambda h: h.split('data-filter="checked"', 1)[1].split("</select>", 1)[0] if 'data-filter="checked"' in h else ""
+    check(checked_box(html) and " selected" not in checked_box(html) and 'value="positive"' not in html,
+          "人財一覧に「自分で改善したい人」の絞り込みはない（前のアドレスの wish=positive では何も絞り込まない）")
+    html = client.get("/people/", query_string={"wish": "スキルを身につけながら、一緒にやってみたい"}, follow_redirects=True).data.decode("utf-8")
     with app.app_context():
         import app as app_module
         yes = [p["emp_id"] for p in app_module.dx_people(wish="スキルを身につけながら、一緒にやってみたい")]
         others = [p["emp_id"] for p in app_module.dx_people() if p["emp_id"] not in yes]
-        positive = [p["emp_id"] for p in app_module.dx_people() if p["positive"]]
-    row_id = lambda e: next((x for x in html.split("<tr") if f'data-sort="{e}"' in x), "")
-    check('<option value="positive" selected>' in html and positive and all('data-positive="1"' in row_id(e) for e in positive), "自分で改善したい人の絞り込みを選んだ状態で開き、その人の行に印が付く")
-    wish_yes = 'data-wish="スキルを身につけながら、一緒にやってみたい"'
-    check(yes and others and all(wish_yes in row_id(e) for e in yes) and not any(wish_yes in row_id(e) for e in others), f"意欲（依頼で選んだもの）の列で絞り込める（一緒に {len(yes)} 人／それ以外 {len(others)} 人）")
+        checked_n = {p["emp_id"]: p["checked_count"] for p in app_module.dx_people()}
+    cells_of = lambda e: dict(zip([k for k, _l, _n in app_module.MEMBER_COLUMNS], [re.sub(r"<[^>]+>", "", c).strip() for c in re.findall(r"<td[^>]*>(.*?)</td>", next((x for x in html.split("<tr") if f'data-sort="{e}"' in x), ""), re.S)]))
+    check('<option value="1" selected>1 件以上</option>' in checked_box(html) and yes and others
+          and all(cells_of(e).get("checked") == f"{checked_n[e]} 件" and checked_n[e] >= 1 for e in yes) and all(checked_n[e] == 0 and cells_of(e).get("checked") == "0 件" for e in others),
+          f"「一緒にやってみたい（件）」の列に、チェックした自動化アイテムの数を出す。前のアドレスの wish=一緒にやってみたい は「1 件以上」で開く（チェックあり {len(yes)} 人／なし {len(others)} 人）")
     with app.app_context():
         used = next(x["workplace"] for x in app_module.member_rows() if x["workplace"])
         used_id = app_module.Workplace.query.filter_by(name=used).first().id
@@ -2079,9 +2088,13 @@ def _people_checks(check):
     check([x["label"] for x in p7["target_tasks"]] == ["伴走"] and [x["label"] for x in p1["target_tasks"]] == ["希望"], "P23: 担当区分が「自主改善」の案件は業務欄に「伴走」と出す")
     check(p4["monthly_wants"] == ["検査記録の転記", "日報の集計"] and p4["monthly_wants_id"] == want_id, "P24: 業務0件の人は、直近の月次で挙げたなくしたい業務を出す")
     html = client.get("/admin/employees").data.decode("utf-8")
-    check("チェックなし" in html and "改善チームに任せたい" not in html and ">伴走<" in html and f"/survey/start?emp=P004&amp;src=monthly&amp;m={want_id}" in html and "検査記録の転記・日報の集計" in html
-          and "自分で／一緒に 1回（回答 2 回中）" in html and "自分で／一緒に 0回（回答 1 回中）" in html and period_label(prev) in html and ">特になし<" in html,
-          "P16・P20・P21・P23・P24: 人財一覧の意欲・進め方・技術・業務の列（チェックなし・伴走・月次の進め方と回数・特になし・業務0件の人の自動化を検討へのリンク）")
+    cells_of = lambda e: dict(zip([k for k, _l, _n in app_module.MEMBER_COLUMNS], [re.sub(r"<[^>]+>", "", c).strip() for c in re.findall(r"<td[^>]*>(.*?)</td>", next((x for x in html.split("<tr") if f'data-sort="{e}"' in x), ""), re.S)]))
+    c1, c4, c7 = cells_of("P001"), cells_of("P004"), cells_of("P007")
+    check((c4.get("stance"), c4.get("stance_month"), c4.get("self_count"), c4.get("answers"), c4.get("tasks"), c4.get("task_names"), c4.get("wants"), c4.get("wants_month"))
+          == ("自分で取り組みたい", period_label(prev), "1 回", "2 回", "0 件", "－", "検査記録の転記・日報の集計", period_label(prev))
+          and (c1.get("checked"), c1.get("accompanied"), c1.get("self_count"), c1.get("skills"), c1.get("stance"), c1.get("task_names"), c1.get("wants")) == ("1 件", "0 件", "0 回", "特になし", "改善チームに依頼したい", "一の業務", "一の業務")
+          and (c7.get("checked"), c7.get("accompanied")) == ("0 件", "1 件") and "改善チームに任せたい" not in html and "/survey/start?emp=P004" not in html and ">伴走<" not in html,
+          f"P16・P20・P21・P23・P24: 人財一覧は進め方・答えた月・自分で／一緒にの回数・技術（特になし）・一緒にやってみたい・伴走・月次で挙げたなくしたい業務を1列に1つずつ出す: {c4} {c1} {c7}")
     rows = list(csv.reader(io.StringIO(client.get("/export/respondents.csv").data.decode("utf-8-sig"))))
     by_id = {x[0]: x for x in rows[1:]}
     check(set(by_id) == set(people) and "P004" in by_id and "自分で取り組みたい" in by_id["P004"] and period_label(prev) in by_id["P004"] and by_id["P003"][6] == "チェックなし",
@@ -2162,7 +2175,10 @@ def _people_round2_checks(check):
           f"R2-4: 職場別の回答した人・自主改善は1人1回、いまの職場で数える（業務は登録した職場）: {got}")
     check(quiet is not None and all(names[w] not in quiet["title"] for w in (w1, w2, w3)), f"R2-4: 「まだ回答のない職場」には前に回答があった職場を出さない: {quiet and quiet['title']}")
     html = client.get("/admin/employees").data.decode("utf-8")
-    check(later in html and 'text-bg-secondary">スキルを身につけながら、一緒にやってみたい' in html and "直近6か月" in html, "R2-5・R2-6: 人財一覧の意欲に灰色のバッジと「その後の月次で依頼したい」、判断の説明（意欲の列の ⓘ）")
+    cells_of = lambda e: dict(zip([k for k, _l, _n in app_module.MEMBER_COLUMNS], [re.sub(r"<[^>]+>", "", c).strip() for c in re.findall(r"<td[^>]*>(.*?)</td>", next((x for x in html.split("<tr") if f'data-sort="{e}"' in x), ""), re.S)]))
+    c_a1 = cells_of("A001")
+    check(later not in html and "badge" not in html.split("<tbody>", 1)[1].split("</tbody>", 1)[0] and (c_a1.get("checked"), c_a1.get("stance"), c_a1.get("stance_month")) == ("1 件", "改善チームに依頼したい", period_label(prev)),
+          f"R2-5・R2-6: 人財一覧には「その後の月次で依頼したい」などの注記やバッジを出さず、チェックの数・進め方・答えた月をそのまま出す: {c_a1}")
     html = client.get("/").data.decode("utf-8")
     check("いまのGr・役割" in html and "1人1回" in html, "R2-4: ダッシュボードのGr・役割別の注記")
     rows = list(csv.reader(io.StringIO(client.get("/export/respondents.csv").data.decode("utf-8-sig"))))
@@ -2171,10 +2187,10 @@ def _people_round2_checks(check):
     check(a5["stance_old"] and not a6["stance_old"] and a2["wish_hint"] == review and a2["positive"] and a1["wish_hint"] == "" and a3["wish_hint"] == "",
           "R3-1・R3-2: 6か月より前の進め方には印を付け、伴走している自主改善の案件がある人がその後の月次で依頼したいと答えたら、伴走・自分で改善したいのまま「担当区分の見直しを」")
     html = client.get("/admin/employees").data.decode("utf-8")
-    row_of = lambda e: next((x for x in html.split("<tr") if f">{e}<" in x), "")
-    check('text-bg-secondary">自分で取り組みたい</span>' in row_of("A005") and f"{period_label(stale)}（6か月より前）" in row_of("A005") and "6か月より前" not in row_of("A006")
-          and 'text-bg-success">自分で取り組みたい</span>' in row_of("A006") and f"{later} <span" in row_of("A002") and review in row_of("A002") and review not in row_of("A001") and ">伴走<" in row_of("A002"),
-          "R3-1・R3-2: 人財一覧の進め方の列は、6か月より前の答えを灰色にして「6か月より前」。意欲の列は「その後の月次で依頼したい」の横に「担当区分の見直しを」")
+    c5, c6, c2, c1x = cells_of("A005"), cells_of("A006"), cells_of("A002"), cells_of("A001")
+    check((c5.get("stance"), c5.get("stance_month")) == ("自分で取り組みたい", period_label(stale)) and (c6.get("stance"), c6.get("stance_month")) == ("自分で取り組みたい", period_label(prev))
+          and "6か月より前" not in html and review not in html and later not in html and (c2.get("accompanied"), c1x.get("accompanied")) == ("1 件", "0 件"),
+          f"R3-1・R3-2: 人財一覧の進め方は古い答えでも灰色や「6か月より前」を付けず、答えた月をそのまま出す。「担当区分の見直しを」も出さず、伴走は件数の列で出す: {c5} {c2}")
     by_id = {x[0]: x for x in rows[1:]}
     check(by_id["A002"][6] == f"スキルを身につけながら、一緒にやってみたい（{later}・{review}）" and by_id["A001"][6] == f"スキルを身につけながら、一緒にやってみたい（{later}）"
           and by_id["A003"][6] == "スキルを身につけながら、一緒にやってみたい" and by_id["A005"][8] == f"{period_label(stale)}（6か月より前）" and by_id["A006"][8] == period_label(prev),
@@ -2323,11 +2339,10 @@ def _people_round4_checks(check):
         people = {p["emp_id"]: p for p in app_module.dx_people()}
     c1, c2 = people["C001"], people["C002"]
     html = client.get("/admin/employees").data.decode("utf-8")
-    row_of = lambda e: next((x for x in html.split("<tr") if f">{e}<" in x), "")
     rows = list(csv.reader(io.StringIO(client.get("/export/respondents.csv").data.decode("utf-8-sig"))))
     by_id = {x[0]: x for x in rows[1:]}
     check(c1["wish"] == yes and (c1["wish_note"], c1["wish_hint"]) == ("", "") and c1["wish_positive"] and c1["positive"] and (c2["wish_note"], c2["wish_hint"]) == (later, review)
-          and later not in row_of("C001") and review not in row_of("C001") and f'text-bg-success">{yes}' in row_of("C001") and review in row_of("C002")
+          and later not in html and review not in html
           and by_id["C001"][6] == yes and by_id["C002"][6] == f"チェックなし（{later}・{review}）",
           f"R4-1: 依頼したいと答えたあとに「一緒にやってみたい」にチェックした業務を登録したら、いちばん新しいのはチェックなので「{later}」「{review}」を出さない（回答者CSVも同じ）: {by_id['C001'][6]} / {by_id['C002'][6]}")
 

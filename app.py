@@ -1247,7 +1247,7 @@ def dx_people(workplace_id=None, wish=None, include_excluded=False):
         later_ask = newest_ask and last_check is not None
         review = newest_ask and any(asked_at > (t.created_at or datetime.min) for t in accompanied)
         raw_skills, raw_learn = (r.skills, r.learn) if r is not None else ([], [])
-        want_row = next((m for m in monthly if m.answer("wants") == "ある" and task_names(m.answer("wants_tasks"))), None) if not tasks else None
+        want_row = next((m for m in monthly if m.answer("wants") == "ある" and task_names(m.answer("wants_tasks"))), None)
         p.update(
             name=(r.name if r is not None else "") or (latest.name if latest else "") or p["name"] or names.get(p["key"][1], ""),
             workplace=places.get(p["workplace_id"]) or (r.workplace if r is not None else None),
@@ -1258,15 +1258,16 @@ def dx_people(workplace_id=None, wish=None, include_excluded=False):
             wish_hint=C.ASSIGNMENT_REVIEW if review else "",
             skills=[s for s in raw_skills if s != C.SKILL_NONE], learn=[s for s in raw_learn if s != C.SKILL_NONE],
             skills_none=C.SKILL_NONE in raw_skills, learn_none=C.SKILL_NONE in raw_learn,
-            task_count=len(tasks), checked_count=len(checked), minutes=sum(t.monthly_minutes or 0 for t in tasks),
+            task_count=len(tasks), checked_count=len(checked), accompanied_count=len(accompanied), minutes=sum(t.monthly_minutes or 0 for t in tasks),
             target_tasks=[{"task": t, "label": C.BUILD_STAGE_SELF if t in accompanied else "希望"} for t in tasks if t in checked or t.assignment == "自主改善"],
             latest_period=latest.period if latest else "",
-            stance_latest=stance, stance_label=period_label(stance_row.period) if stance_row else "",
+            stance_latest=stance, stance_period=stance_row.period if stance_row else "", stance_label=period_label(stance_row.period) if stance_row else "",
             stance_old=stance_row is not None and stance_row.period < since,
             self_positive_count=sum(1 for m in monthly if m.answer("stance") in C.MONTHLY_KPI["self_positive"]),
             positive=_positive(last_check, recent, recent_row) or bool(accompanied),
             monthly_wants=monthly_task_names(want_row.answer("wants_tasks")) if want_row else [],
-            monthly_wants_id=want_row.id if want_row else None, monthly_wants_label=period_label(want_row.period) if want_row else "",
+            monthly_wants_id=want_row.id if want_row else None, monthly_wants_period=want_row.period if want_row else "",
+            monthly_wants_label=period_label(want_row.period) if want_row else "",
         )
         p["workplace_id"] = p["workplace"].id if p["workplace"] is not None else None
         p["wish_positive"] = p["wish"] in C.SELF_IMPROVE_POSITIVE and not later_ask
@@ -6925,6 +6926,29 @@ def delete_domain(domain_id):
     return redirect(url_for("admin.index"))
 
 # ----- 人財一覧（employees テーブル） -----
+MEMBER_COLUMNS = [
+    ("excluded", "対象外", ""),
+    ("id", "ユーザーID", ""),
+    ("name", "氏名", ""),
+    ("wp", "Gr・役割", ""),
+    ("pat", "勤務形態", ""),
+    ("team", "班", ""),
+    ("skills", "使える技術", ""),
+    ("learn", "学びたい技術", ""),
+    ("tasks", "自動化アイテム（件）", ""),
+    ("task_names", "自動化アイテム名", "登録した自動化アイテムすべて（登録した順）。名前を押すと案件詳細を開きます。"),
+    ("checked", "一緒にやってみたい（件）", f"「自動化アイテム登録」で「{SELF_IMPROVE_YES}」にチェックした自動化アイテムの数"),
+    ("accompanied", "伴走（件）", "担当区分が「自主改善」の自動化アイテムのうち、開始より先に進んだか、改善チームが手を付けたものの数"),
+    ("answers", "月次の回答数", ""),
+    ("stance", "月次：改善の進め方（最新）", "月次アンケートの「" + next(q["text"] for q in MONTHLY_CORE_QUESTIONS if q["key"] == "stance") + "」の、空でない直近の答え"),
+    ("stance_month", "月次：進め方を答えた月", ""),
+    ("self_count", "月次：自分で／一緒にの回数", f"月次アンケートで「{STANCE_SELF}」か「{STANCE_TOGETHER}」と答えた回数（すべての月度の合計）"),
+    ("wants", "月次：なくしたい業務（最新）", "月次アンケートで挙げた、なくしたい・自動化したい業務の名前（業務名を書いた、いちばん新しい回答のもの）"),
+    ("wants_month", "月次：なくしたい業務を挙げた月", ""),
+]
+MEMBER_NUMERIC = {"tasks", "checked", "accompanied", "answers", "self_count"}
+
+
 def _member_payload():
     rows = member_rows()
     periods = member_periods()
@@ -6942,6 +6966,7 @@ def employees():
     for r in rows:
         r["dx"] = by_key.get(emp_key(r["emp"].emp_id))
     _summary, wish_counts, have, learn, stance_options = people_summary(everyone)
+    months = lambda key: [(x, period_label(x)) for x in sorted({r["dx"][key] for r in rows if r["dx"] and r["dx"][key]}, reverse=True)]
     names = [w.name for w in _workplaces()]
     used = {r["workplace"] for r in rows if r["workplace"]}
     wp = db.session.get(Workplace, request.args.get("workplace_id", type=int) or 0)
@@ -6956,10 +6981,12 @@ def employees():
         learn=learn.most_common(),
         stance_options=stance_options,
         stance_rank={opt: i for i, opt in enumerate(stance_options)},
+        stance_months=months("stance_period"),
+        wants_months=months("monthly_wants_period"),
         member_workplaces=[n for n in names if n in used] + sorted(used - set(names)),
         skill_options=sorted({x for p in dx_all for x in p["skills"]}),
         learn_options=sorted({x for p in dx_all for x in p["learn"]}),
-        initial={"wish": (request.args.get("wish") or "").strip(), "wp": wp.name if wp is not None else "", "learn": (request.args.get("learn") or "").strip()},
+        initial={"checked": "1" if (request.args.get("wish") or "").strip() == C.SELF_IMPROVE_YES else "", "wp": wp.name if wp is not None else "", "learn": (request.args.get("learn") or "").strip()},
         demo_real=demo_ids_with_real_data(),
     )
 
@@ -7680,9 +7707,10 @@ TEMPLATES = {
 {% block title %}人財一覧{% endblock %}
 {% block content %}
 {% macro member_mark(st, ans) %}{% if st == 'yes' %}<i class="bi bi-check-lg member-yes" title="回答あり"></i>{% elif st == 'out' %}<span class="member-out" title="月末時点で対象外{{ '（回答はありますが数えません）' if ans else '' }}">対象外</span>{% elif st == 'before' %}<span class="member-before" title="対象者になる前の月">－</span>{% endif %}{% endmacro %}
+{% macro count_filter(key, label, unit, selected='') %}<th><select class="form-select form-select-sm" data-filter="{{ key }}" aria-label="{{ label }}で絞り込む"><option value="">すべて</option><option value="0">0 {{ unit }}</option><option value="1"{% if selected == '1' %} selected{% endif %}>1 {{ unit }}以上</option></select></th>{% endmacro %}
 <div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">
   <div>
-    <h2 class="mb-1">人財一覧{{ C.tip("月次アンケートか「自動化アイテム登録」に一度でも回答した人が、ユーザーIDごとに1行で自動で載ります。月ごとの回答と、一人ひとりの意欲（「自動化アイテム登録」の「スキルを身につけながら、一緒にやってみたい」・使える技術・学びたい技術、月次アンケートの改善の進め方）をまとめて見られます。退職や他部門への異動で回答率の分母から外す人は「対象外」にチェックします。") }}</h2>
+    <h2 class="mb-1">人財一覧{{ C.tip("月次アンケートか「自動化アイテム登録」に一度でも回答した人が、ユーザーIDごとに1行で自動で載ります。一人ひとりの回答の中身を1列に1つずつ出しているので、列名で並べ替え、見出しの下の欄で絞り込んで、目的に合わせて人を探してください（出す列は「表示する列」で選べます）。退職や他部門への異動で回答率の分母から外す人は「対象外」にチェックします。") }}</h2>
   </div>
 </div>
 
@@ -7696,17 +7724,10 @@ TEMPLATES = {
     <div class="dropdown member-cols">
       <button type="button" class="btn btn-link btn-sm p-0 dropdown-toggle" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false"><i class="bi bi-layout-three-columns"></i> 表示する列</button>
       <div class="dropdown-menu p-2" id="member-cols">
-        <label class="form-check mb-1"><input class="form-check-input" type="checkbox" value="excluded" checked><span class="form-check-label">対象外</span></label>
-        <label class="form-check mb-1"><input class="form-check-input" type="checkbox" value="name" checked><span class="form-check-label">氏名</span></label>
-        <label class="form-check mb-1"><input class="form-check-input" type="checkbox" value="wp" checked><span class="form-check-label">Gr・役割</span></label>
-        <label class="form-check mb-1"><input class="form-check-input" type="checkbox" value="pat" checked><span class="form-check-label">勤務形態</span></label>
-        <label class="form-check mb-1"><input class="form-check-input" type="checkbox" value="wish" checked><span class="form-check-label">意欲（自動化アイテム登録）</span></label>
-        <label class="form-check mb-1"><input class="form-check-input" type="checkbox" value="stance" checked><span class="form-check-label">月次：改善の進め方</span></label>
-        <label class="form-check mb-1"><input class="form-check-input" type="checkbox" value="skills" checked><span class="form-check-label">使える技術</span></label>
-        <label class="form-check mb-1"><input class="form-check-input" type="checkbox" value="learn" checked><span class="form-check-label">学びたい技術</span></label>
-        <label class="form-check mb-1"><input class="form-check-input" type="checkbox" value="tasks" checked><span class="form-check-label">自動化アイテム</span></label>
-        <label class="form-check mb-1"><input class="form-check-input" type="checkbox" value="answers" checked><span class="form-check-label">月次の回答数</span></label>
-        <label class="form-check mb-1"><input class="form-check-input" type="checkbox" value="months" checked><span class="form-check-label">月ごとの回答</span></label>
+        <div class="member-cols-list">
+        {% for key, label, note in C.MEMBER_COLUMNS if key != 'id' %}<label class="form-check mb-1"><input class="form-check-input" type="checkbox" value="{{ key }}" checked><span class="form-check-label">{{ label }}</span></label>
+        {% endfor %}<label class="form-check mb-1"><input class="form-check-input" type="checkbox" value="months" checked><span class="form-check-label">月ごとの回答</span></label>
+        </div>
         <button type="button" class="btn btn-link btn-sm p-0 mt-1" id="member-cols-all">すべて表示</button>
       </div>
     </div>
@@ -7718,31 +7739,28 @@ TEMPLATES = {
   <table class="table table-sm align-middle mb-0 member-table" id="member-table">
     <thead>
     <tr>
-      <th class="text-center" data-col="excluded" aria-sort="none"><button type="button" class="member-sort">対象外</button></th>
-      <th data-col="id" aria-sort="none"><button type="button" class="member-sort">ユーザーID</button></th>
-      <th data-col="name" aria-sort="none"><button type="button" class="member-sort">氏名</button></th>
-      <th data-col="wp" aria-sort="none"><button type="button" class="member-sort">Gr・役割</button></th>
-      <th data-col="pat" aria-sort="none"><button type="button" class="member-sort">勤務形態</button></th>
-      <th data-col="wish" aria-sort="none"><button type="button" class="member-sort">意欲（自動化アイテム登録）</button>{{ C.tip("「自動化アイテム登録」の「スキルを身につけながら、一緒にやってみたい」のチェック。絞り込みの「自分で改善したい人」は、このチェックと直近" ~ C.STANCE_MONTHS ~ "か月の月次の進め方（「自分で取り組みたい」「学びながら改善チームと一緒に取り組みたい」）のうち、新しいほうで判断します（チェックなしは意思表示なしとして扱う）。伴走している「自主改善」の案件がある人も含みます。") }}</th>
-      <th data-col="stance" aria-sort="none"><button type="button" class="member-sort">月次：改善の進め方</button></th>
-      <th data-col="skills" aria-sort="none"><button type="button" class="member-sort">使える技術</button></th>
-      <th data-col="learn" aria-sort="none"><button type="button" class="member-sort">学びたい技術</button></th>
-      <th data-col="tasks" aria-sort="none"><button type="button" class="member-sort">自動化アイテム</button></th>
-      <th class="text-end" data-col="answers" aria-sort="none"><button type="button" class="member-sort">月次の回答数</button></th>
-      {% for p in periods %}<th class="text-center member-month member-mcol{% if loop.index0 < old_n %} member-old{% endif %}" data-col="m{{ loop.index0 }}" aria-sort="none"><button type="button" class="member-sort">{{ p[:4] }}<br>{{ p[5:]|int }}月</button></th>{% endfor %}
+      {% for key, label, note in C.MEMBER_COLUMNS %}<th{% if key == 'excluded' %} class="text-center"{% elif key in C.MEMBER_NUMERIC %} class="text-end"{% endif %} data-col="{{ key }}" aria-sort="none"><button type="button" class="member-sort">{{ label }}</button>{% if note %}{{ C.tip(note) }}{% endif %}</th>
+      {% endfor %}{% for p in periods %}<th class="text-center member-month member-mcol{% if loop.index0 < old_n %} member-old{% endif %}" data-col="m{{ loop.index0 }}" aria-sort="none"><button type="button" class="member-sort">{{ p[:4] }}<br>{{ p[5:]|int }}月</button></th>{% endfor %}
     </tr>
     <tr class="member-filters">
       <th><select class="form-select form-select-sm" data-filter="excluded" aria-label="対象外で絞り込む"><option value="">すべて</option><option value="1">対象外</option><option value="0">対象</option></select></th>
       <th><input type="search" class="form-control form-control-sm" data-filter="id" placeholder="含む" aria-label="ユーザーIDで絞り込む"></th>
       <th><input type="search" class="form-control form-control-sm" data-filter="name" placeholder="含む" aria-label="氏名で絞り込む"></th>
       <th><select class="form-select form-select-sm" data-filter="wp" aria-label="Gr・役割で絞り込む"><option value="">すべて</option>{% for w in member_workplaces %}<option value="{{ w }}" {% if initial.wp == w %}selected{% endif %}>{{ w }}</option>{% endfor %}<option value="-">（未設定）</option></select></th>
-      <th><select class="form-select form-select-sm" data-filter="pat" aria-label="勤務形態で絞り込む"><option value="">すべて</option>{% for w in C.WORK_PATTERNS %}<option value="{{ w }}">{{ w }}</option>{% endfor %}{% for t in C.SHIFT_TEAMS %}<option value="{{ C.SHIFT_PATTERN }}|{{ t }}">{{ C.SHIFT_PATTERN }}（{{ t }}）</option>{% endfor %}<option value="-">（未設定）</option></select></th>
-      <th><select class="form-select form-select-sm" data-filter="wish" aria-label="意欲で絞り込む"><option value="">すべて</option><option value="positive" {% if initial.wish == 'positive' %}selected{% endif %}>自分で改善したい人</option>{% for opt in C.DX_WISH_OPTIONS %}<option value="{{ opt }}" {% if initial.wish == opt %}selected{% endif %}>{{ opt }}</option>{% endfor %}<option value="-">（なし）</option></select></th>
-      <th><select class="form-select form-select-sm" data-filter="stance" aria-label="改善の進め方で絞り込む"><option value="">すべて</option>{% for opt in stance_options %}<option value="{{ opt }}">{{ opt }}</option>{% endfor %}<option value="old">{{ C.STANCE_MONTHS }}か月より前</option><option value="-">（回答なし）</option></select></th>
+      <th><select class="form-select form-select-sm" data-filter="pat" aria-label="勤務形態で絞り込む"><option value="">すべて</option>{% for w in C.WORK_PATTERNS %}<option value="{{ w }}">{{ w }}</option>{% endfor %}<option value="-">（未設定）</option></select></th>
+      <th><select class="form-select form-select-sm" data-filter="team" aria-label="班で絞り込む"><option value="">すべて</option>{% for t in C.SHIFT_TEAMS %}<option value="{{ t }}">{{ t }}</option>{% endfor %}<option value="-">（なし）</option></select></th>
       <th><select class="form-select form-select-sm" data-filter="skills" aria-label="使える技術で絞り込む"><option value="">すべて</option>{% for s in skill_options %}<option value="{{ s }}">{{ s }}</option>{% endfor %}<option value="-">（なし）</option></select></th>
       <th><select class="form-select form-select-sm" data-filter="learn" aria-label="学びたい技術で絞り込む"><option value="">すべて</option>{% for s in learn_options %}<option value="{{ s }}" {% if initial.learn == s %}selected{% endif %}>{{ s }}</option>{% endfor %}<option value="-">（なし）</option></select></th>
-      <th><select class="form-select form-select-sm" data-filter="tasks" aria-label="自動化アイテムで絞り込む"><option value="">すべて</option><option value="0">0 件</option><option value="1">1 件以上</option><option value="{{ C.BUILD_STAGE_SELF }}">{{ C.BUILD_STAGE_SELF }}あり</option><option value="希望">希望あり</option></select></th>
-      <th><select class="form-select form-select-sm" data-filter="answers" aria-label="月次の回答数で絞り込む"><option value="">すべて</option><option value="0">0 回</option><option value="1">1 回以上</option></select></th>
+      {{ count_filter("tasks", "自動化アイテムの件数", "件") }}
+      <th><input type="search" class="form-control form-control-sm" data-filter="task_names" placeholder="含む" aria-label="自動化アイテム名で絞り込む"></th>
+      {{ count_filter("checked", "「一緒にやってみたい」の件数", "件", initial.checked) }}
+      {{ count_filter("accompanied", "伴走の件数", "件") }}
+      {{ count_filter("answers", "月次の回答数", "回") }}
+      <th><select class="form-select form-select-sm" data-filter="stance" aria-label="改善の進め方で絞り込む"><option value="">すべて</option>{% for opt in stance_options %}<option value="{{ opt }}">{{ opt }}</option>{% endfor %}<option value="-">（回答なし）</option></select></th>
+      <th><select class="form-select form-select-sm" data-filter="stance_month" aria-label="進め方を答えた月で絞り込む"><option value="">すべて</option>{% for p, label in stance_months %}<option value="{{ p }}">{{ label }}</option>{% endfor %}<option value="-">（回答なし）</option></select></th>
+      {{ count_filter("self_count", "自分で／一緒にの回数", "回") }}
+      <th><input type="search" class="form-control form-control-sm" data-filter="wants" placeholder="含む" aria-label="なくしたい業務で絞り込む"></th>
+      <th><select class="form-select form-select-sm" data-filter="wants_month" aria-label="なくしたい業務を挙げた月で絞り込む"><option value="">すべて</option>{% for p, label in wants_months %}<option value="{{ p }}">{{ label }}</option>{% endfor %}<option value="-">（なし）</option></select></th>
       {% for p in periods %}<th class="member-mcol{% if loop.index0 < old_n %} member-old{% endif %}"></th>{% endfor %}
     </tr>
     </thead>
@@ -7754,38 +7772,28 @@ TEMPLATES = {
       <td data-sort="{{ r.emp.name or '' }}">{{ r.emp.name or '' }}{% if r.deletable %}
         <form method="post" action="{{ url_for('admin.delete_employee', employee_id=r.emp.id) }}" class="d-inline" data-confirm="{{ r.emp.emp_id }} を人財一覧から削除しますか？（まだ回答のない人だけ削除できます）"><button class="btn btn-link btn-sm text-danger p-0 ms-1">削除</button></form>{% endif %}</td>
       <td class="small" data-sort="{{ r.workplace }}">{{ r.workplace or '－' }}</td>
-      <td class="small" data-sort="{{ r.work_pattern }}" data-team="{{ r.shift_team }}">{{ r.work_pattern or '－' }}{% if r.shift_team %}（{{ r.shift_team }}）{% endif %}</td>
-      {% set wr = (0 if d.wish_positive else (1 if d.wish == C.SELF_IMPROVE_YES else (2 if d.wish else 9))) if d else 9 %}
-      <td class="small" data-sort="{{ wr }}" data-wish="{{ d.wish if d else '' }}" data-positive="{{ '1' if d and d.positive else '0' }}">
-        {% if d and d.wish %}<span class="badge {{ 'text-bg-success' if d.wish_positive else ('text-bg-secondary' if d.wish_note else 'text-bg-light border') }}">{{ d.wish }}</span>{% if d.wish_note %}<div class="text-muted">{{ d.wish_note }}{% if d.wish_hint %} <span class="badge bg-warning-subtle text-warning-emphasis">{{ d.wish_hint }}</span>{% endif %}</div>{% endif %}{% else %}<span class="text-muted">－</span>{% endif %}
-      </td>
-      {% set sr = (stance_rank.get(d.stance_latest, 3) + (5 if d.stance_old else 0)) if d and d.stance_latest else 9 %}
-      <td class="small" data-sort="{{ sr }}" data-stance="{{ d.stance_latest if d else '' }}" data-old="{{ '1' if d and d.stance_old else '0' }}">
-        {% if d and d.stance_latest %}
-        <span class="badge {{ 'text-bg-secondary' if d.stance_old else ('text-bg-success' if d.stance_latest in C.MONTHLY_KPI['self_positive'] else ('text-bg-primary' if d.stance_latest in C.MONTHLY_KPI['ask_positive'] else 'text-bg-light border')) }}">{{ d.stance_latest }}</span>
-        <div class="text-muted">{{ d.stance_label }}{% if d.stance_old %}（{{ C.STANCE_MONTHS }}か月より前）{% endif %}</div>
-        {% elif d and d.monthly %}<span class="text-muted">進め方の回答なし</span>
-        {% else %}<span class="text-muted">－</span>{% endif %}
-        {% if d and d.monthly %}<div class="text-muted">自分で／一緒に {{ d.self_positive_count }}回（回答 {{ d.monthly|length }} 回中）</div>{% endif %}
-      </td>
+      <td class="small" data-sort="{{ r.work_pattern }}">{{ r.work_pattern or '－' }}</td>
+      <td class="small text-nowrap" data-sort="{{ r.shift_team }}">{{ r.shift_team or '－' }}</td>
       <td class="small member-wide" data-sort="{{ d.skills|join('・') if d else '' }}" data-list="{{ d.skills|join('|') if d else '' }}">{{ (d.skills|join('・') or (C.SKILL_NONE if d.skills_none else '－')) if d else '－' }}</td>
       <td class="small member-wide" data-sort="{{ d.learn|join('・') if d else '' }}" data-list="{{ d.learn|join('|') if d else '' }}">{{ (d.learn|join('・') or (C.SKILL_NONE if d.learn_none else '－')) if d else '－' }}</td>
-      <td class="small member-tasks" data-sort="{{ r.considered }}" data-targets="{{ d.target_tasks|map(attribute='label')|join('|') if d else '' }}">
-        <div>{{ r.considered }} 件</div>
-        {% if d %}{% for x in d.target_tasks %}<div><a href="{{ url_for('cases.detail', task_id=x.task.id) }}">{{ x.task.name }}</a> <span class="badge {{ 'text-bg-primary' if x.label == C.BUILD_STAGE_SELF else 'text-bg-light border' }}">{{ x.label }}</span></div>{% endfor %}
-        {% if not d.task_count and d.monthly_wants %}
-        <div class="text-muted">業務の登録なし。{{ d.monthly_wants_label }}の月次で挙げたなくしたい業務:</div>
-        <div>{{ d.monthly_wants|join('・') }}</div>
-        <a href="{{ url_for('survey.start', emp=d.emp_id, src='monthly', m=d.monthly_wants_id) }}">自動化アイテム登録で流れを整理する</a>
-        {% endif %}{% endif %}
-      </td>
+      {% set tasks = d.tasks if d else [] %}
+      <td class="small text-end text-nowrap" data-sort="{{ r.considered }}">{{ r.considered }} 件</td>
+      <td class="small member-tasks" data-sort="{{ tasks|map(attribute='name')|join('・') }}">{% for t in tasks %}<div><a href="{{ url_for('cases.detail', task_id=t.id) }}">{{ t.name }}</a></div>{% else %}－{% endfor %}</td>
+      <td class="small text-end text-nowrap" data-sort="{{ d.checked_count if d else 0 }}">{{ d.checked_count if d else 0 }} 件</td>
+      <td class="small text-end text-nowrap" data-sort="{{ d.accompanied_count if d else 0 }}">{{ d.accompanied_count if d else 0 }} 件</td>
       <td class="small text-end text-nowrap" data-sort="{{ r.answered|length }}">{{ r.answered|length }} 回</td>
+      <td class="small" data-sort="{{ stance_rank.get(d.stance_latest, 8) if d and d.stance_latest else 9 }}" data-val="{{ d.stance_latest if d else '' }}">{{ (d.stance_latest if d else '') or '－' }}</td>
+      <td class="small text-nowrap" data-sort="{{ d.stance_period if d else '' }}">{{ (d.stance_label if d else '') or '－' }}</td>
+      <td class="small text-end text-nowrap" data-sort="{{ d.self_positive_count if d else 0 }}">{{ d.self_positive_count if d else 0 }} 回</td>
+      {% set wants = (d.monthly_wants if d else [])|join('・') %}
+      <td class="small member-wide" data-sort="{{ wants }}">{{ wants or '－' }}</td>
+      <td class="small text-nowrap" data-sort="{{ d.monthly_wants_period if d else '' }}">{{ (d.monthly_wants_label if d else '') or '－' }}</td>
       {% for p, st in r.cells %}<td class="text-center member-cell member-mcol{% if loop.index0 < old_n %} member-old{% endif %}" data-st="{{ st }}"{% if p in r.answered %} data-ans="1"{% endif %}>{{ member_mark(st, p in r.answered) }}</td>{% endfor %}
     </tr>
     {% endfor %}
     </tbody>
     <tfoot><tr>
-      <th colspan="11" class="text-end">回答 ／ 対象（回答率）{{ C.tip("この行の「回答 ／ 対象」は、その月に回答した対象者の数と対象者の数で、月次集計・ダッシュボードの回答率と同じ数え方です（絞り込んだときは、表示している人だけで数えます）。月末時点で「対象外」にチェックしている人は、その月の分母にも分子にも入りません（今月は今のチェックで数えます）。チェックを外すと外した月から分母に戻り、それより前の月は月末時点の状態のまま残ります。対象外の人は回答できません。削除できるのは、まだ回答も自動化アイテムの登録もない人だけです。") }}<span class="d-block fw-normal text-muted" id="member-stat-note"></span></th>
+      <th colspan="{{ C.MEMBER_COLUMNS|length }}" class="text-end">回答 ／ 対象（回答率）{{ C.tip("この行の「回答 ／ 対象」は、その月に回答した対象者の数と対象者の数で、月次集計・ダッシュボードの回答率と同じ数え方です（絞り込んだときは、表示している人だけで数えます）。月末時点で「対象外」にチェックしている人は、その月の分母にも分子にも入りません（今月は今のチェックで数えます）。チェックを外すと外した月から分母に戻り、それより前の月は月末時点の状態のまま残ります。対象外の人は回答できません。削除できるのは、まだ回答も自動化アイテムの登録もない人だけです。") }}<span class="d-block fw-normal text-muted" id="member-stat-note"></span></th>
       {% for p in periods %}{% set st = stats[p] %}<td class="text-center member-stat member-mcol{% if loop.index0 < old_n %} member-old{% endif %}" data-period="{{ p }}" data-m="{{ loop.index0 }}">{{ st.answered }}／{{ st.members }}{% if st.rate is not none %}<br>{{ '%.0f'|format(st.rate) }}%{% endif %}</td>{% endfor %}
     </tr></tfoot>
   </table>
@@ -7849,9 +7857,13 @@ TEMPLATES = {
   if (!table) return;
   var tbody = table.tBodies[0];
   var rows = Array.prototype.slice.call(tbody.rows);
-  var FIXED = 11;
-  var COL = { excluded: 0, id: 1, name: 2, wp: 3, pat: 4, wish: 5, stance: 6, skills: 7, learn: 8, tasks: 9, answers: 10 };
-  var NUM = { excluded: true, wish: true, stance: true, tasks: true, answers: true };
+  var KEYS = {{ C.MEMBER_COLUMNS|map("first")|list|tojson }};
+  var COL = {};
+  KEYS.forEach(function (k, i) { COL[k] = i; });
+  var FIXED = KEYS.length;
+  var NUM = { excluded: true, tasks: true, checked: true, accompanied: true, answers: true, stance: true, self_count: true };
+  var KIND = { excluded: "flag", id: "text", name: "text", task_names: "text", wants: "text", skills: "list", learn: "list",
+               tasks: "count", checked: "count", accompanied: "count", answers: "count", self_count: "count" };
   var ORDER = { yes: 0, no: 1, out: 2, before: 3 };
   var sortCol = "", sortDir = 1;
   var shown = document.getElementById("member-shown"), clearBtn = document.getElementById("member-clear"), statNote = document.getElementById("member-stat-note");
@@ -7894,19 +7906,14 @@ TEMPLATES = {
   });
   function hasToken(list, v) { return ("|" + (list || "") + "|").indexOf("|" + v + "|") >= 0; }
   function matches(tr, f) {
-    var v = f.value.trim(), col = f.dataset.filter, td = cellOf(tr, col);
+    var v = f.value.trim(), col = f.dataset.filter, td = cellOf(tr, col), kind = KIND[col] || "eq";
     if (!v || !td) return true;
-    if (col.charAt(0) === "m") return td.dataset.st === v;
-    if (col === "excluded") return tr.dataset.excluded === v;
-    if (col === "id" || col === "name") return (td.dataset.sort || "").toLowerCase().indexOf(v.toLowerCase()) >= 0;
-    if (col === "pat" && v.indexOf("|") > 0) { var pt = v.split("|"); return td.dataset.sort === pt[0] && td.dataset.team === pt[1]; }
-    if (col === "wp" || col === "pat") return v === "-" ? !td.dataset.sort : td.dataset.sort === v;
-    if (col === "wish") return v === "positive" ? td.dataset.positive === "1" : (v === "-" ? !td.dataset.wish : td.dataset.wish === v);
-    if (col === "stance") return v === "old" ? td.dataset.old === "1" : (v === "-" ? !td.dataset.stance : td.dataset.stance === v);
-    if (col === "skills" || col === "learn") return v === "-" ? !td.dataset.list : hasToken(td.dataset.list, v);
-    if (col === "tasks") return v === "0" ? Number(td.dataset.sort) === 0 : (v === "1" ? Number(td.dataset.sort) > 0 : hasToken(td.dataset.targets, v));
-    if (col === "answers") return v === "0" ? Number(td.dataset.sort) === 0 : Number(td.dataset.sort) > 0;
-    return true;
+    if (kind === "flag") return tr.dataset.excluded === v;
+    if (kind === "text") return (td.dataset.sort || "").toLowerCase().indexOf(v.toLowerCase()) >= 0;
+    if (kind === "list") return v === "-" ? !td.dataset.list : hasToken(td.dataset.list, v);
+    if (kind === "count") return v === "0" ? Number(td.dataset.sort) === 0 : Number(td.dataset.sort) > 0;
+    var val = "val" in td.dataset ? td.dataset.val : (td.dataset.sort || "");
+    return v === "-" ? !val : val === v;
   }
   var oldToggle = document.getElementById("member-old-toggle");
   function filtering() { return filters.some(function (f) { return f.value.trim() !== ""; }); }
@@ -10411,7 +10418,6 @@ TEMPLATES = {
     <h2 class="mb-0">月次アンケート 集計{{ C.tip("毎月同じ基本設問で、変化を追います。") }}</h2>
   </div>
   <div class="d-flex gap-2 flex-wrap">
-    <a class="btn btn-outline-primary btn-sm" href="{{ url_for('admin.employees') }}">人財一覧</a>
     <a class="btn btn-outline-primary btn-sm" href="{{ url_for('monthly.survey_admin', period=selected) }}">設問を編集</a>
   </div>
 </div>
@@ -12382,7 +12388,10 @@ body.flow-max-open { overflow: hidden; }
 .member-table thead th { background: #fff; vertical-align: bottom; }
 .member-month { font-size: 0.78rem; line-height: 1.15; }
 .member-table .member-off, .member-table.hide-months .member-mcol, .member-table.hide-months tfoot { display: none; }
-.member-cols .dropdown-menu { min-width: 15rem; font-size: 0.85rem; }
+.member-cols .dropdown-menu { min-width: 26rem; font-size: 0.85rem; }
+.member-cols-list { column-count: 2; column-gap: 1rem; }
+.member-cols-list .form-check { break-inside: avoid; }
+@media (max-width: 575.98px) { .member-cols .dropdown-menu { min-width: 0; } .member-cols-list { column-count: 1; } }
 .member-cell { min-width: 2.4rem; }
 .member-yes { color: var(--ui-green-text); font-size: 1.05rem; }
 .member-before { color: #ced4da; }
