@@ -1945,6 +1945,14 @@ def smoke_login_monthly():
     check('id="member-table"' in html and 'data-filter="wp"' in html and 'id="member-month"' not in html and 'id="member-month-st"' not in html and "月の回答で絞り込む" not in html and 'data-filter="m0"' not in html
           and "function applySort()" in html and "function applyFilter()" in html and 'aria-sort="none"' in html and "monthOk" not in html,
           "人財一覧: 列名を押して並べ替え、見出しの下の欄で列ごとに絞り込める（「月の回答で絞り込む」は置かない）")
+    check('id="member-cols"' in html and all(f'value="{k}" checked' in html for k in ("excluded", "name", "wp", "pat", "wish", "stance", "skills", "learn", "tasks", "answers", "months"))
+          and 'value="id"' not in html and 'HIDE_KEY = "member-hidden-cols"' in html and "localStorage.setItem(HIDE_KEY" in html and "FIXED = 11" in html,
+          "人財一覧: 表示する列を選べる（ユーザーIDはいつも出す。選んだ列は見る人のブラウザに覚える。月ごとの回答もまとめて隠せる）")
+    with app.app_context():
+        n777 = MonthlyResponse.query.filter(db.func.lower(MonthlyResponse.emp_id) == "e777").count()
+    row_p = next((x for x in html.split("<tr") if 'data-sort="E777"' in x), "")
+    check('data-col="answers"' in html and 'data-filter="answers"' in html and f'<td class="small text-end text-nowrap" data-sort="{n777}">{n777} 回</td>' in row_p and n777 >= 1 and 'colspan="11"' in html,
+          "人財一覧に月次アンケートの回答数（合計）の列があり、並べ替え・絞り込みもできる")
     check("ユーザーIDの照会（LDAP）" not in html and "回答前に対象者へ入れる" not in html and "test-btn" not in html and "/admin/employees/import" not in html and "/admin/employees/add" not in html
           and client.post("/admin/employees/add", data={"emp_id": "Z001", "name": "x"}).status_code == 404 and client.post("/admin/employees/import").status_code == 404,
           "人財一覧に LDAP の照会テスト・手での追加・CSV取込はない")

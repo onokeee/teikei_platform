@@ -7528,13 +7528,13 @@ MEMBER_STATUS_TEXT = {"yes": "回答", "no": "未回答", "out": "対象外", "b
 
 def export_members():
     rows_m, periods, _stats, _active = _member_payload()
-    header = ["ユーザーID", "氏名", "Gr・役割", "勤務形態", "班", "対象", "対象外にした日", "人財一覧に載った日", "自動化アイテム（件）"] + [f"{p[:4]}年{int(p[5:])}月" for p in periods]
+    header = ["ユーザーID", "氏名", "Gr・役割", "勤務形態", "班", "対象", "対象外にした日", "人財一覧に載った日", "自動化アイテム（件）", "月次の回答数（回）"] + [f"{p[:4]}年{int(p[5:])}月" for p in periods]
     rows = []
     for r in rows_m:
         e = r["emp"]
         rows.append([e.emp_id, e.name or "", r["workplace"], r["work_pattern"], r["shift_team"], "対象外" if e.active is False else "対象",
                      e.excluded_at.strftime("%Y-%m-%d") if e.active is False and e.excluded_at else "", e.created_at.strftime("%Y-%m-%d") if e.created_at else "",
-                     r["considered"]] + [MEMBER_STATUS_TEXT.get(st, "") for _p, st in r["cells"]])
+                     r["considered"], len(r["answered"])] + [MEMBER_STATUS_TEXT.get(st, "") for _p, st in r["cells"]])
     return header, rows
 
 
@@ -7693,6 +7693,23 @@ TEMPLATES = {
   {% if rows %}
   {% set old_n = [periods|length - 12, 0]|max %}
   <div class="d-flex flex-wrap align-items-center gap-3 mb-2 small">
+    <div class="dropdown member-cols">
+      <button type="button" class="btn btn-link btn-sm p-0 dropdown-toggle" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false"><i class="bi bi-layout-three-columns"></i> 表示する列</button>
+      <div class="dropdown-menu p-2" id="member-cols">
+        <label class="form-check mb-1"><input class="form-check-input" type="checkbox" value="excluded" checked><span class="form-check-label">対象外</span></label>
+        <label class="form-check mb-1"><input class="form-check-input" type="checkbox" value="name" checked><span class="form-check-label">氏名</span></label>
+        <label class="form-check mb-1"><input class="form-check-input" type="checkbox" value="wp" checked><span class="form-check-label">Gr・役割</span></label>
+        <label class="form-check mb-1"><input class="form-check-input" type="checkbox" value="pat" checked><span class="form-check-label">勤務形態</span></label>
+        <label class="form-check mb-1"><input class="form-check-input" type="checkbox" value="wish" checked><span class="form-check-label">意欲（自動化アイテム登録）</span></label>
+        <label class="form-check mb-1"><input class="form-check-input" type="checkbox" value="stance" checked><span class="form-check-label">月次：改善の進め方</span></label>
+        <label class="form-check mb-1"><input class="form-check-input" type="checkbox" value="skills" checked><span class="form-check-label">使える技術</span></label>
+        <label class="form-check mb-1"><input class="form-check-input" type="checkbox" value="learn" checked><span class="form-check-label">学びたい技術</span></label>
+        <label class="form-check mb-1"><input class="form-check-input" type="checkbox" value="tasks" checked><span class="form-check-label">自動化アイテム</span></label>
+        <label class="form-check mb-1"><input class="form-check-input" type="checkbox" value="answers" checked><span class="form-check-label">月次の回答数</span></label>
+        <label class="form-check mb-1"><input class="form-check-input" type="checkbox" value="months" checked><span class="form-check-label">月ごとの回答</span></label>
+        <button type="button" class="btn btn-link btn-sm p-0 mt-1" id="member-cols-all">すべて表示</button>
+      </div>
+    </div>
     {% if old_n %}<button type="button" class="btn btn-link btn-sm p-0" id="member-old-toggle" data-label="前の月も表示（{{ old_n }} か月）">前の月も表示（{{ old_n }} か月）</button>{% endif %}
     <span id="member-shown" class="fw-semibold"></span>
     <button type="button" class="btn btn-link btn-sm p-0 d-none" id="member-clear">絞り込みを解除</button>
@@ -7711,7 +7728,8 @@ TEMPLATES = {
       <th data-col="skills" aria-sort="none"><button type="button" class="member-sort">使える技術</button></th>
       <th data-col="learn" aria-sort="none"><button type="button" class="member-sort">学びたい技術</button></th>
       <th data-col="tasks" aria-sort="none"><button type="button" class="member-sort">自動化アイテム</button></th>
-      {% for p in periods %}<th class="text-center member-month{% if loop.index0 < old_n %} member-old{% endif %}" data-col="m{{ loop.index0 }}" aria-sort="none"><button type="button" class="member-sort">{{ p[:4] }}<br>{{ p[5:]|int }}月</button></th>{% endfor %}
+      <th class="text-end" data-col="answers" aria-sort="none"><button type="button" class="member-sort">月次の回答数</button></th>
+      {% for p in periods %}<th class="text-center member-month member-mcol{% if loop.index0 < old_n %} member-old{% endif %}" data-col="m{{ loop.index0 }}" aria-sort="none"><button type="button" class="member-sort">{{ p[:4] }}<br>{{ p[5:]|int }}月</button></th>{% endfor %}
     </tr>
     <tr class="member-filters">
       <th><select class="form-select form-select-sm" data-filter="excluded" aria-label="対象外で絞り込む"><option value="">すべて</option><option value="1">対象外</option><option value="0">対象</option></select></th>
@@ -7724,7 +7742,8 @@ TEMPLATES = {
       <th><select class="form-select form-select-sm" data-filter="skills" aria-label="使える技術で絞り込む"><option value="">すべて</option>{% for s in skill_options %}<option value="{{ s }}">{{ s }}</option>{% endfor %}<option value="-">（なし）</option></select></th>
       <th><select class="form-select form-select-sm" data-filter="learn" aria-label="学びたい技術で絞り込む"><option value="">すべて</option>{% for s in learn_options %}<option value="{{ s }}" {% if initial.learn == s %}selected{% endif %}>{{ s }}</option>{% endfor %}<option value="-">（なし）</option></select></th>
       <th><select class="form-select form-select-sm" data-filter="tasks" aria-label="自動化アイテムで絞り込む"><option value="">すべて</option><option value="0">0 件</option><option value="1">1 件以上</option><option value="{{ C.BUILD_STAGE_SELF }}">{{ C.BUILD_STAGE_SELF }}あり</option><option value="希望">希望あり</option></select></th>
-      {% for p in periods %}<th{% if loop.index0 < old_n %} class="member-old"{% endif %}></th>{% endfor %}
+      <th><select class="form-select form-select-sm" data-filter="answers" aria-label="月次の回答数で絞り込む"><option value="">すべて</option><option value="0">0 回</option><option value="1">1 回以上</option></select></th>
+      {% for p in periods %}<th class="member-mcol{% if loop.index0 < old_n %} member-old{% endif %}"></th>{% endfor %}
     </tr>
     </thead>
     <tbody>
@@ -7760,13 +7779,14 @@ TEMPLATES = {
         <a href="{{ url_for('survey.start', emp=d.emp_id, src='monthly', m=d.monthly_wants_id) }}">自動化アイテム登録で流れを整理する</a>
         {% endif %}{% endif %}
       </td>
-      {% for p, st in r.cells %}<td class="text-center member-cell{% if loop.index0 < old_n %} member-old{% endif %}" data-st="{{ st }}"{% if p in r.answered %} data-ans="1"{% endif %}>{{ member_mark(st, p in r.answered) }}</td>{% endfor %}
+      <td class="small text-end text-nowrap" data-sort="{{ r.answered|length }}">{{ r.answered|length }} 回</td>
+      {% for p, st in r.cells %}<td class="text-center member-cell member-mcol{% if loop.index0 < old_n %} member-old{% endif %}" data-st="{{ st }}"{% if p in r.answered %} data-ans="1"{% endif %}>{{ member_mark(st, p in r.answered) }}</td>{% endfor %}
     </tr>
     {% endfor %}
     </tbody>
     <tfoot><tr>
-      <th colspan="10" class="text-end">回答 ／ 対象（回答率）{{ C.tip("この行の「回答 ／ 対象」は、その月に回答した対象者の数と対象者の数で、月次集計・ダッシュボードの回答率と同じ数え方です（絞り込んだときは、表示している人だけで数えます）。月末時点で「対象外」にチェックしている人は、その月の分母にも分子にも入りません（今月は今のチェックで数えます）。チェックを外すと外した月から分母に戻り、それより前の月は月末時点の状態のまま残ります。対象外の人は回答できません。削除できるのは、まだ回答も自動化アイテムの登録もない人だけです。") }}<span class="d-block fw-normal text-muted" id="member-stat-note"></span></th>
-      {% for p in periods %}{% set st = stats[p] %}<td class="text-center member-stat{% if loop.index0 < old_n %} member-old{% endif %}" data-period="{{ p }}" data-m="{{ loop.index0 }}">{{ st.answered }}／{{ st.members }}{% if st.rate is not none %}<br>{{ '%.0f'|format(st.rate) }}%{% endif %}</td>{% endfor %}
+      <th colspan="11" class="text-end">回答 ／ 対象（回答率）{{ C.tip("この行の「回答 ／ 対象」は、その月に回答した対象者の数と対象者の数で、月次集計・ダッシュボードの回答率と同じ数え方です（絞り込んだときは、表示している人だけで数えます）。月末時点で「対象外」にチェックしている人は、その月の分母にも分子にも入りません（今月は今のチェックで数えます）。チェックを外すと外した月から分母に戻り、それより前の月は月末時点の状態のまま残ります。対象外の人は回答できません。削除できるのは、まだ回答も自動化アイテムの登録もない人だけです。") }}<span class="d-block fw-normal text-muted" id="member-stat-note"></span></th>
+      {% for p in periods %}{% set st = stats[p] %}<td class="text-center member-stat member-mcol{% if loop.index0 < old_n %} member-old{% endif %}" data-period="{{ p }}" data-m="{{ loop.index0 }}">{{ st.answered }}／{{ st.members }}{% if st.rate is not none %}<br>{{ '%.0f'|format(st.rate) }}%{% endif %}</td>{% endfor %}
     </tr></tfoot>
   </table>
   </div>
@@ -7829,9 +7849,9 @@ TEMPLATES = {
   if (!table) return;
   var tbody = table.tBodies[0];
   var rows = Array.prototype.slice.call(tbody.rows);
-  var FIXED = 10;
-  var COL = { excluded: 0, id: 1, name: 2, wp: 3, pat: 4, wish: 5, stance: 6, skills: 7, learn: 8, tasks: 9 };
-  var NUM = { excluded: true, wish: true, stance: true, tasks: true };
+  var FIXED = 11;
+  var COL = { excluded: 0, id: 1, name: 2, wp: 3, pat: 4, wish: 5, stance: 6, skills: 7, learn: 8, tasks: 9, answers: 10 };
+  var NUM = { excluded: true, wish: true, stance: true, tasks: true, answers: true };
   var ORDER = { yes: 0, no: 1, out: 2, before: 3 };
   var sortCol = "", sortDir = 1;
   var shown = document.getElementById("member-shown"), clearBtn = document.getElementById("member-clear"), statNote = document.getElementById("member-stat-note");
@@ -7885,6 +7905,7 @@ TEMPLATES = {
     if (col === "stance") return v === "old" ? td.dataset.old === "1" : (v === "-" ? !td.dataset.stance : td.dataset.stance === v);
     if (col === "skills" || col === "learn") return v === "-" ? !td.dataset.list : hasToken(td.dataset.list, v);
     if (col === "tasks") return v === "0" ? Number(td.dataset.sort) === 0 : (v === "1" ? Number(td.dataset.sort) > 0 : hasToken(td.dataset.targets, v));
+    if (col === "answers") return v === "0" ? Number(td.dataset.sort) === 0 : Number(td.dataset.sort) > 0;
     return true;
   }
   var oldToggle = document.getElementById("member-old-toggle");
@@ -7916,6 +7937,27 @@ TEMPLATES = {
   }
   filters.forEach(function (f) { f.addEventListener(f.tagName === "SELECT" ? "change" : "input", applyFilter); });
   clearBtn.addEventListener("click", function () { filters.forEach(function (f) { f.value = ""; }); applyFilter(); });
+  var colBox = document.getElementById("member-cols"), HIDE_KEY = "member-hidden-cols";
+  function applyColumns() {
+    var hidden = Array.prototype.filter.call(colBox.querySelectorAll("input"), function (c) { return !c.checked; }).map(function (c) { return c.value; });
+    var idx = hidden.filter(function (k) { return k in COL; }).map(function (k) { return COL[k]; });
+    Array.prototype.slice.call(table.tHead.rows).concat(rows).forEach(function (tr) {
+      for (var i = 0; i < FIXED; i++) { if (tr.cells[i]) tr.cells[i].classList.toggle("member-off", idx.indexOf(i) >= 0); }
+    });
+    var noMonths = hidden.indexOf("months") >= 0;
+    table.classList.toggle("hide-months", noMonths);
+    if (oldToggle) oldToggle.classList.toggle("d-none", noMonths);
+    var foot = table.tFoot && table.tFoot.rows[0];
+    if (foot) foot.cells[0].colSpan = Math.max(FIXED - idx.length, 1);
+    try { localStorage.setItem(HIDE_KEY, JSON.stringify(hidden)); } catch (e) {}
+  }
+  if (colBox) {
+    var savedHidden = [];
+    try { savedHidden = JSON.parse(localStorage.getItem(HIDE_KEY) || "[]") || []; } catch (e) { savedHidden = []; }
+    colBox.querySelectorAll("input").forEach(function (c) { c.checked = savedHidden.indexOf(c.value) < 0; c.addEventListener("change", applyColumns); });
+    document.getElementById("member-cols-all").addEventListener("click", function () { colBox.querySelectorAll("input").forEach(function (c) { c.checked = true; }); applyColumns(); });
+    applyColumns();
+  }
   if (oldToggle) oldToggle.addEventListener("click", function () {
     var on = table.classList.toggle("show-old");
     oldToggle.textContent = on ? "前の月を隠す" : oldToggle.dataset.label;
@@ -12339,6 +12381,8 @@ body.flow-max-open { overflow: hidden; }
 .member-table thead { position: sticky; top: 0; z-index: 2; }
 .member-table thead th { background: #fff; vertical-align: bottom; }
 .member-month { font-size: 0.78rem; line-height: 1.15; }
+.member-table .member-off, .member-table.hide-months .member-mcol, .member-table.hide-months tfoot { display: none; }
+.member-cols .dropdown-menu { min-width: 15rem; font-size: 0.85rem; }
 .member-cell { min-width: 2.4rem; }
 .member-yes { color: var(--ui-green-text); font-size: 1.05rem; }
 .member-before { color: #ced4da; }
