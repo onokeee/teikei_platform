@@ -91,9 +91,25 @@ def smoke_bizmap_edit():
               "Mermaid: 作業は四角（だれを太字で）、情報は媒体の形とアイコン、仕事の流れは太い灰の矢印に引き継ぎ方、媒体から分かる方法は書かない")
         legend = app_module.map_legend_html(dg)
         check("箱と線" in legend and "仕事の流れ" in legend and "情報の流れ" in legend and "Excel" in legend and "PowerPoint" not in legend and "上司・役職" in legend, "凡例は箱と線の2種類と、図に出てくる色・媒体・だれだけ")
-        check('"how"' in app_module.INTAKE_PROMPT and '"use"' in app_module.INTAKE_PROMPT and '"how_from"' in app_module.INTAKE_PROMPT and "誰にどうやって渡し" in app_module.INTAKE_PROMPT
+        check('"how"' in app_module.INTAKE_PROMPT and '"use"' in app_module.INTAKE_PROMPT and '"receive"' in app_module.INTAKE_PROMPT and "誰にどうやって渡し" in app_module.INTAKE_PROMPT
               and "氏名・〇〇さん" in app_module.INTAKE_PROMPT and "{methods}" not in app_module._intake_prompt() and "state.purpose" in app_module.FINALIZE_PROMPT,
               "聞き取り: 渡す相手・渡し方・使いみちを1問で聞き、受け取り方も集め、氏名は書かない")
+        prompt = app_module.INTAKE_PROMPT
+        check("流れ図の必須要素" in prompt and "だれが" in prompt and "なにを・どこから" in prompt and "どのように" in prompt and "どこへ・だれに" in prompt
+              and "並べ方の決まりに頼らず、文の意味で対応づける" in prompt and "必須要素を確かめる質問は回数に数えない" in prompt and "同じ順に「、」で並べる" not in prompt and '"who"' in prompt,
+              "聞き取り: 手順ごとに必須要素（だれが・なにを・どこから・どのように・どこへ）をそろえ、文の意味で受け取り元と情報を対応づけ、足りなければ AI から確かめる")
+        cleaned = app_module._clean_state({"steps": [{"action": "情報を集める", "who": "", "receive": [
+            {"from": "ライン管理", "what": "生産状況", "how": "電話で聞く"}, {"from": "PMK", "what": "トラブル装置の対応状況", "how": "システムで見る"}, {"from": "", "what": ""}]}]})["steps"][0]
+        check(cleaned["receive"] == [{"from": "ライン管理", "what": "生産状況", "how": "電話で聞く"}, {"from": "PMK", "what": "トラブル装置の対応状況", "how": "システムで見る"}]
+              and cleaned["input"] == "生産状況、トラブル装置の対応状況" and cleaned["how_from"] == "" and cleaned["who"] == "",
+              f"AI の state の手順に、受け取り元ごとの receive（どこから・何を・どのように）とだれがを残す（空の行は捨てる）: {cleaned['receive']}")
+        rec_flow = app_module.build_steps_flow([dict(cleaned, no=1, system="", output="", to=""),
+                                                 {"no": 2, "action": "課長が内容を承認する", "who": "課長", "receive": [{"from": "", "what": "", "how": ""}], "system": "", "output": "", "to": ""}], "製造1課")
+        check(labels(rec_flow, "st1") == {"ライン管理": "生産状況／電話", "PMK": "トラブル装置の対応状況／システム（登録・参照）"} and rec_flow.nodes["st2"]["who"] == "製造1課 課長" and rec_flow.nodes["st1"]["who"] == "製造1課",
+              f"流れ図は receive から描く（並べ方によらず、受け取り元ごとに受け取る情報と受け取り方を線に書く）。本人以外がやる手順はそのだれ: {labels(rec_flow, 'st1')} {rec_flow.nodes['st2']['who']}")
+        t_rec = app_module.Task(id=99902, name="朝会資料準備2", steps_json=json.dumps([dict(cleaned, no=1)], ensure_ascii=False))
+        rec_src = {x["name"]: (x["method"], x["info"]) for x in app_module._raw_task_sources(t_rec)}
+        check(rec_src == {"ライン管理": ("phone", "生産状況"), "PMK": ("system", "トラブル装置の対応状況")}, f"業務マップの受け取り元も receive から（受け取り方・情報つき）: {rec_src}")
     html = client.get("/bizmap/").data.decode("utf-8")
     check("map-legend" in html and "箱と線" in html, "業務マップ: 箱と線・色・媒体・だれの凡例")
     js = client.get("/static/flows.js").data.decode("utf-8")

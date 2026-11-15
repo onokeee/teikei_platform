@@ -2942,6 +2942,19 @@ def _match_tasks(text, tasks, exclude=None, limit=3):
 _SPLIT_NAMES_RX = re.compile(r"[、,，／/\n]+")
 
 
+def step_receives(x):
+    out = []
+    for r in (x.get("receive") if isinstance(x, dict) else None) or []:
+        if not isinstance(r, dict):
+            continue
+        item = {k: str(r.get(k) or "").strip() for k in ("from", "what", "how")}
+        if item["from"] or item["what"]:
+            out.append(item)
+    return out
+
+def _receive_covers(recs):
+    return {normalize_text(r["from"]) for r in recs if r["from"]}
+
 def source_infos(names, inp, action):
     if len(names) < 2:
         return {}
@@ -3062,16 +3075,25 @@ def _raw_task_sources(t):
     for x in steps:
         system, inp, action, to = [(x.get(k) or "").strip() for k in ("system", "input", "action", "to")]
         recv = method_of(x.get("how_from") or "")
+        recs = step_receives(x)
+        for r in recs:
+            r_role, r_m = field_role(r["from"]) if r["from"] else ("box", "")
+            if r_role == "line" or not r["from"]:
+                if r["what"] and not internal(r["what"]):
+                    add(r["what"], hint=_method_medium(r_m) if r_role == "line" else None, method=r_m or method_of(r["how"]))
+            elif not internal(r["from"]):
+                add(r["from"], method=method_of(r["how"]) or r_m, info=r["what"])
         role, m = field_role(system)
         if system and role == "line":
-            if not to and inp and not internal(inp):
+            if not recs and not to and inp and not internal(inp):
                 add(inp, hint=_method_medium(m), method=m)
             continue
-        names = [n for n in _names(system) if field_role(n)[0] != "line" and not internal(n) and not _is_destination(n, action)]
-        notes = source_infos(_names(system), inp, action)
+        covered = _receive_covers(recs)
+        names = [n for n in _names(system) if normalize_text(n) not in covered and field_role(n)[0] != "line" and not internal(n) and not _is_destination(n, action)]
+        notes = {} if recs else source_infos(_names(system), inp, action)
         for n in names:
             add(n, method=field_role(n)[1] or recv, info=notes.get(n, ""))
-        if not names and inp and not internal(inp) and not to:
+        if not recs and not names and inp and not internal(inp) and not to:
             add(inp, method=recv)
     if not items:
         for v in _names(t.inputs_note, dots=True):
@@ -3466,18 +3488,39 @@ def build_steps_flow(steps, own_wp="", purpose=""):
     for x in steps:
         sid = f"st{x['no']}"
         action = mask_person_names(x.get("action") or "")
-        d.node(sid, f"{_circled(x['no'])} {action}", "task", who=me)
+        doer = (x.get("who") or "").strip()
+        d.node(sid, f"{_circled(x['no'])} {action}", "task", who=who_of(mask_person_names(doer), own_wp) if doer else me)
         system, inp, to, how, out = [(x.get(k) or "").strip() for k in ("system", "input", "to", "how", "output")]
         recv = method_of(x.get("how_from") or "")
         role, m = field_role(system)
-        src = find(inp)
-        if system and role == "line" and not to:
+        recs = step_receives(x)
+        src = None if recs else find(inp)
+        if system and role == "line" and not to and not recs:
             node = src or (info(inp, hint=_method_medium(m)) if inp else info(f"{vocab_label('methods', m)}で受け取る内容", hint=_method_medium(m), key=nid("s", f"{x['no']}:{m}")))
             d.info_edge(node, sid, m)
         else:
-            names = _names(system) if system and role != "line" else []
-            notes = source_infos(names, inp, action)
+            covered = _receive_covers(recs)
+            names = [n for n in (_names(system) if system and role != "line" else []) if normalize_text(n) not in covered]
+            notes = {} if recs else source_infos(names, inp, action)
             sys_nodes, dests = [], []
+            for r in recs:
+                r_role, r_m = field_role(r["from"]) if r["from"] else ("box", "")
+                how_m = method_of(r["how"])
+                if r_role == "line" or not r["from"]:
+                    what = r["what"]
+                    node = find(what) if what else None
+                    node = node or (info(what, hint=_method_medium(r_m or how_m)) if what else info(f"{vocab_label('methods', r_m)}で受け取る内容", hint=_method_medium(r_m), key=nid("s", f"{x['no']}:{r_m}")))
+                    d.info_edge(node, sid, r_m or how_m)
+                else:
+                    prev_out = find(r["what"]) if r["what"] else None
+                    if prev_out is not None and d.nodes[prev_out]["cls"] == "output":
+                        node = prev_out
+                        d.info_edge(node, sid, how_m)
+                    else:
+                        node = find(r["from"]) or info(r["from"])
+                        d.info_edge(node, sid, how_m or r_m, note=r["what"])
+                sys_nodes.append(node)
+                dests.append(False)
             for name in names:
                 n_role, n_m = field_role(name)
                 if n_role == "line":
@@ -3493,7 +3536,7 @@ def build_steps_flow(steps, own_wp="", purpose=""):
                 dests.append(bool(dest))
             if src and src not in sys_nodes:
                 d.info_edge(src, sid, recv)
-            elif inp and not src and not to and (not sys_nodes or all(dests)) and not notes and not any(same_name(inp, n, 2) for n in names):
+            elif inp and not recs and not src and not to and (not sys_nodes or all(dests)) and not notes and not any(same_name(inp, n, 2) for n in names):
                 node = info(inp, hint=_method_medium(recv))
                 d.info_edge(node, sid, recv)
         if prev:
@@ -3517,7 +3560,7 @@ def build_steps_flow(steps, own_wp="", purpose=""):
                     continue
                 if deliver is None:
                     deliver = oid or src
-                    if deliver is None and inp:
+                    if deliver is None and inp and not recs:
                         deliver = info(inp, hint=_method_medium(recv))
                         d.edge(deliver, sid, "info")
                     deliver = deliver or latest or _output_box(d, f"o{x['no']}", sid)
@@ -3544,7 +3587,7 @@ def _category_step(d, medium, steps):
     return None, ""
 
 def _tie_case_sources(d, steps, sources):
-    texts = [v for x in steps for v in (x.get("system"), x.get("input"), x.get("output")) if v]
+    texts = [v for x in steps for v in [x.get("system"), x.get("input"), x.get("output")] + [r[k] for r in step_receives(x) for k in ("from", "what")] if v]
     tied = []
     for s_ in sources:
         if any(same_thing(s_["name"], v) for v in texts):
@@ -3961,7 +4004,14 @@ INTAKE_PROMPT = """あなたは製造部「PC定型業務ゼロ化プロジェ�
 - すでに state に入っていることは聞き直さない。相手がまとめて書いたり、手順書や画面の写真を送ったりしたら、読み取れることをすべて state に入れ、足りないことだけ聞く。
 - 手順を聞いている間は、毎回「次に何をしますか？」と聞き、chips に「ここまで（手順はこれで全部）」を入れる。相手が「ここまで」「以上」「終わり」「最後」などと答えたら手順は確定とし、それまでは別のことを聞かない。
 - 特定の手順について聞くときは、必ず番号と手順名を添える（例:「①の『装置のトラブル状況を確認する』は、何を見て確認しますか？」）。「確認には何を使いますか？」のように、どの手順の話か分からない聞き方はしない。
-- 手順は「何を（対象）」「どこから・何で（システム・ファイル・紙・人）」「どうする」が分かる粒度で集める。「情報を集める」「資料を作る」「確認する」のように対象や手段が分からない答えには、次の手順に進む前に1つだけ掘り下げて聞く（例:「どんな情報を、どこから集めますか？」）。答えが返ったら、その手順の action を具体的に書き直す（例:「生産管理システムから前日の実績を集める」）。この掘り下げは手順の途中でもよい。
+- 手順ごとに、流れ図の必須要素をそろえる:
+  ・だれが: 基本は本人。上司・他部署・システム（自動）など本人以外がやる手順だけ who に書く。
+  ・なにを・どこから: その手順で使う情報・物と、その受け取り元。受け取り元ごとに receive に1件ずつ書き、それぞれから何を受け取るかを対応づける（例:「PMKからトラブル装置の対応状況と、ライン管理から生産状況」→ receive は「PMK／トラブル装置の対応状況」「ライン管理／生産状況」の2件）。並べ方の決まりに頼らず、文の意味で対応づける。前の手順でできたものを使うときは、what にその名前を書く。
+  ・どのように: 受け取り方（receive の how）と、渡す手順の渡し方（how）。
+  ・どこへ・だれに: 入力先・書き込み先（system）や渡す相手（to）と、渡したものが何に使われるか（use）。
+  ・どうする: action は「何を・どこから・どうする」が分かる文に書き直す（例:「生産管理システムから前日の実績を集める」）。
+- 本人の答えから読み取れる要素は聞き直さず、自分で整理して state に入れる。「情報を集める」「資料を作る」「確認する」のように、必須要素が足りない・あいまいなときは、その手順の番号と名前を添えて短く確かめる（例:「①で、PMKからは何で受け取りますか？」「②の『原因を調べる』は、何を見て調べますか？」）。同じ手順の足りない要素は1回の質問にまとめてよい。手順を聞いている途中でもよい。
+- 本人が「分からない」と答えた要素は unknowns に入れて先へ進む。
 - 初めて「次に何をしますか？」と聞くときは「全部なら『ここまで』を押してください」と添える。
 - 相手が「意味が分からない」「おかしい」と言ったら、謝らずに言い換えて、同じことを聞き直す。
 
@@ -3972,19 +4022,19 @@ INTAKE_PROMPT = """あなたは製造部「PC定型業務ゼロ化プロジェ�
 - search_similar_tasks: 手順が2つそろったら1回呼び、他の人が同じ成果物を作っていれば「同じGr・役割で同じものを作っている人がいます。同じ流れですか？」と確かめる。
 - 道具の結果は事実として使い、結果に無いことは言わない。同じ道具を同じ引数で2回呼ばない。道具を呼んだ往復でも、最後は必ず上の JSON だけで返す。
 - 道具の結果は次のターンでは見えない。分かったこと（例: 二重登録なし、Gr・役割の常用システムは生産管理システム、同じ成果物を同じGr・役割の別の人も作成）は state.notes に短く残し、notes にあることは調べ直さない。渡されていない道具はもう調べ済み。
-- 手順を聞く「次に何をしますか？」は回数に数えない。それ以外の質問が全部で {max_q} 回まで。remaining は「手順以外であと何回聞くつもりか」。手順が2つ以上、できるものと渡す相手（使いみち）、頻度、時間がそろったら done を true にし、reply は「この流れで合っていますか？」と確認の一言にする（chips は空）。使いみちを相手が分からないと答えたら unknowns に入れて先へ進む。
+- 手順を聞く「次に何をしますか？」と、必須要素を確かめる質問は回数に数えない。それ以外の質問（頻度・時間・困りごとなど）が全部で {max_q} 回まで。remaining は「この先あと何回聞くつもりか（必須要素の確認も含む）」。手順が2つ以上あり、各手順の必須要素がそろう（本人が分からないと答えたものを除く）うえで、できるものと渡す相手（使いみち）、頻度、時間がそろったら done を true にし、reply は「この流れで合っていますか？」と確認の一言にする（chips は空）。使いみちを相手が分からないと答えたら unknowns に入れて先へ進む。
 - 相手が「違う」「直したい」と言ったら、state を直して done は false のまま確認し直す。
 - 写真が読めないときは、そう伝えて文字で教えてほしいと頼む。
 - 推測で手順を作らない。相手が言ったことだけを入れる。
 - 人の名前（氏名・〇〇さん）は state にも返事にも書かない。Gr・役割・役職・部署で書く（例: 製造1課の担当者、品質保証課 課長）。
 - 渡す手順（送る・渡す・提出する）の output には、渡したものの名前を入れる。
-- sources・outputs と steps の input・output には情報の名前だけを書く（「〜をメール送付」「〜を印刷」のような渡し方・作業は how や action に書く）。
-- 引き継ぎの話が出たら、前の勤務からの引き継ぎは情報の取り出し元（sources と steps の input）、次の勤務への引き継ぎは渡す相手（recipients と steps の to）として扱う。
+- sources・outputs と steps の receive の what・output には情報の名前だけを書く（「〜をメール送付」「〜を印刷」のような渡し方・作業は how や action に書く）。
+- 引き継ぎの話が出たら、前の勤務からの引き継ぎは情報の取り出し元（sources と steps の receive）、次の勤務への引き継ぎは渡す相手（recipients と steps の to）として扱う。
 
 state は次の形（必ず全部のキーを返す。不明は "" か [] か null）:
 {
   "title": "<業務名。『〜を〜する』で短く>",
-  "steps": [{"no": 1, "action": "<その手順でやること>", "system": "<使うシステム・ファイル・ツール名、または情報をもらう相手（所属・部署）。複数あるときは「、」で並べる。なければ空>", "input": "<元になる情報。system が複数のときは、それぞれから受け取る情報を system と同じ順に「、」で並べる（例: system「PMK、ライン管理」→ input「トラブル装置の対応状況、生産状況」）。なければ空>", "output": "<その手順でできるもの。なければ空>", "to": "<渡す相手（Gr・役割・役職・部署。氏名は書かない）。なければ空>", "how": "<to がある手順の渡し方（メール・手渡し・共有フォルダなど）。なければ空>", "use": "<渡す相手がそれを何に使うか。分からなければ空>", "how_from": "<この手順で情報を受け取る方法（メールで届く・PHSで聞く・システムで見るなど）。なければ空>"}],
+  "steps": [{"no": 1, "action": "<その手順でやること（何を・どこから・どうする）>", "who": "<その手順をやる人。本人なら空。上司・他部署・システム（自動）など本人以外のときだけ（氏名は書かない）>", "receive": [{"from": "<受け取り元（システム・ファイル・紙・所属・部署・役職。氏名は書かない）>", "what": "<そこから受け取る情報・物の名前>", "how": "<受け取り方（システムで見る・共有フォルダ・メールで届く・紙で届く・電話で聞く・口頭など）。分からなければ空>"}], "system": "<作業に使う・入力する・書き込むシステムやファイル（受け取り元は receive に書く）。なければ空>", "output": "<その手順でできるもの。なければ空>", "to": "<渡す相手（Gr・役割・役職・部署。氏名は書かない）。なければ空>", "how": "<to がある手順の渡し方（メール・手渡し・共有フォルダなど）。なければ空>", "use": "<渡す相手がそれを何に使うか。分からなければ空>"}],
   "sources": ["<情報の取り出し元（システム名・帳票名・人）>"],
   "outputs": ["<最終的にできるもの>"],
   "recipients": ["<最終的に渡す相手。人・部署を1つずつ>"],
@@ -4080,9 +4130,19 @@ def _clean_state(data):
         if not isinstance(x, dict) or not str(x.get("action") or "").strip():
             continue
         field = lambda key, n: _masked_clip(x.get(key) or "", n)
+        receive = []
+        for r in x.get("receive") or []:
+            if isinstance(r, dict):
+                item = {"from": _masked_clip(r.get("from") or "", 60), "what": _masked_clip(r.get("what") or "", 100), "how": _masked_clip(r.get("how") or "", 40)}
+                if item["from"] or item["what"]:
+                    receive.append(item)
+        receive = receive[:6]
+        hows = list(dict.fromkeys(r["how"] for r in receive if r["how"]))
         steps.append({
-            "no": len(steps) + 1, "action": field("action", 200), "system": field("system", 100), "input": field("input", 200),
-            "output": field("output", 200), "to": field("to", 100), "how": field("how", 60), "use": field("use", 120), "how_from": field("how_from", 60),
+            "no": len(steps) + 1, "action": field("action", 200), "who": field("who", 60), "receive": receive, "system": field("system", 100),
+            "input": field("input", 200) or "、".join(r["what"] for r in receive if r["what"])[:200],
+            "output": field("output", 200), "to": field("to", 100), "how": field("how", 60), "use": field("use", 120),
+            "how_from": field("how_from", 60) or (hows[0] if len(hows) == 1 else ""),
         })
         if len(steps) >= C.INTAKE_STEP_LIMIT:
             break
@@ -4246,8 +4306,12 @@ def intake_handlers(r, used=None):
         counter = Counter()
         for t in Task.query.all():
             for x in t.steps:
+                recs = step_receives(x)
+                for r in recs:
+                    if r["from"] and field_role(r["from"])[0] != "line":
+                        counter[(r["from"], "取り出し元")] += 1
                 for name in _names(x.get("system")):
-                    if field_role(name)[0] != "line" and not _is_destination(name, x.get("action")):
+                    if normalize_text(name) not in _receive_covers(recs) and field_role(name)[0] != "line" and not _is_destination(name, x.get("action")):
                         counter[(name, "取り出し元")] += 1
                 if (x.get("output") or "").strip():
                     counter[(x["output"].strip(), "できるもの")] += 1
@@ -5848,14 +5912,23 @@ def _state_sources(state):
     found = [(v, "") for v in state["sources"]]
     for x in state["steps"]:
         system, inp, action, to = [(x.get(k) or "").strip() for k in ("system", "input", "action", "to")]
+        recs = step_receives(x)
+        for r in recs:
+            r_role, r_m = field_role(r["from"]) if r["from"] else ("box", "")
+            if r["from"] and r_role != "line":
+                if not internal(r["from"]):
+                    found.append((r["from"], method_of(r["how"]) or r_m))
+            elif r["what"] and not internal(r["what"]):
+                found.append((r["what"], r_m or method_of(r["how"])))
         role, m = field_role(system) if system else ("box", "")
         if system and role == "line":
-            if inp and not to and not internal(inp):
+            if not recs and inp and not to and not internal(inp):
                 found.append((inp, m))
             continue
-        names = [n for n in _names(system) if field_role(n)[0] != "line" and not internal(n) and not _is_destination(n, action)]
+        covered = _receive_covers(recs)
+        names = [n for n in _names(system) if normalize_text(n) not in covered and field_role(n)[0] != "line" and not internal(n) and not _is_destination(n, action)]
         found.extend((n, field_role(n)[1]) for n in names)
-        if not names and inp and not to and not internal(inp):
+        if not recs and not names and inp and not to and not internal(inp):
             found.append((inp, method_of(x.get("how_from") or "")))
     return found
 
@@ -8800,7 +8873,7 @@ document.getElementById("test-btn").addEventListener("click", async function () 
         {% set aif = [] if task.verified else task.ai_fields_list %}
         {% set rulef = task.ai_extra_dict.get('rule_fields') or [] %}
         {% macro mark(key) %}{% if key in aif %}<span class="badge badge-flag me-1">{{ '推定' if key in rulef else 'AI推定' }}</span>{% endif %}{% endmacro %}
-        {% if task.steps %}<tr><th class="w-25">手順（聞き取り）</th><td><ol class="mb-0 ps-3 rq-steps-table">{% for x in task.steps %}<li>{{ x.action }}{% if x.system %} <span class="text-muted small">［{{ x.system }}］</span>{% endif %}{% if x.output %} <span class="small">→ {{ x.output }}</span>{% endif %}{% if x.to %} <span class="small text-muted">（{{ x.to }} へ{% if x.how %}・{{ x.how }}{% endif %}）</span>{% endif %}</li>{% endfor %}</ol></td></tr>{% endif %}
+        {% if task.steps %}<tr><th class="w-25">手順（聞き取り）</th><td><ol class="mb-0 ps-3 rq-steps-table">{% for x in task.steps %}<li>{{ x.action }}{% set rec = x.receive or [] %}{% if rec %} <span class="text-muted small">［{% for r in rec %}{{ r['from'] }}{% if r['from'] and r.what %}：{% endif %}{{ r.what }}{% if not loop.last %}、{% endif %}{% endfor %}］</span>{% endif %}{% set rest = (x.system or '').split('、')|reject('in', rec|map(attribute='from')|list)|select|join('、') %}{% if rest %} <span class="text-muted small">［{{ rest }}］</span>{% endif %}{% if x.output %} <span class="small">→ {{ x.output }}</span>{% endif %}{% if x.to %} <span class="small text-muted">（{{ x.to }} へ{% if x.how %}・{{ x.how }}{% endif %}）</span>{% endif %}</li>{% endfor %}</ol></td></tr>{% endif %}
         <tr><th class="w-25">業務領域</th><td>{{ mark('domain') }}{{ task.domain.name if task.domain else '未選択' }}{% if task.domain_guess %} <span class="badge badge-flag">AI推定: {{ task.domain_guess }}</span>{% endif %}</td></tr>
         <tr><th>目的</th><td>{{ mark('purpose') }}{{ task.purpose }}{% if task.purpose_unknown %} <span class="badge text-bg-danger">目的不明</span>{% endif %}</td></tr>
         <tr><th>アウトプット</th><td>{{ mark('output') }}{{ task.output }}</td></tr>
@@ -13019,7 +13092,11 @@ summary { transition: color 0.15s ease; }
   function renderSteps(steps, upto) {
     stepsBox.innerHTML = "";
     steps.slice(0, upto).forEach(function (x, i) {
-      stepsBox.appendChild(el("li", i >= conv.shownSteps ? "is-new" : null, x.action + (x.system ? "［" + x.system + "］" : "") + (x.to ? " → " + x.to + (x.how ? "（" + x.how + "）" : "") : "")));
+      var rec = (x.receive || []).filter(function (r) { return r.from || r.what; });
+      var froms = rec.map(function (r) { return r.from; });
+      var rest = (x.system || "").split("、").filter(function (v) { return v && froms.indexOf(v) < 0; }).join("、");
+      var recText = rec.length ? "［" + rec.map(function (r) { return (r.from || "") + (r.from && r.what ? "：" : "") + (r.what || ""); }).join("、") + "］" : "";
+      stepsBox.appendChild(el("li", i >= conv.shownSteps ? "is-new" : null, x.action + recText + (rest ? "［" + rest + "］" : "") + (x.to ? " → " + x.to + (x.how ? "（" + x.how + "）" : "") : "")));
     });
     var sc = $("rq-stepcount");
     sc.textContent = "手順 " + upto;
