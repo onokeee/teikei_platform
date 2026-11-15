@@ -1128,7 +1128,7 @@ def _pair_weight(w, a, b):
         return 1
     return 3 if len(w) >= 3 else 2
 
-# ----- 回答した人（業務を1件以上登録したか、月次アンケートに回答した人。対象外は除く。対象者一覧と同じ決まり） -----
+# ----- 回答した人（業務を1件以上登録したか、月次アンケートに回答した人。対象外は除く。人財一覧と同じ決まり） -----
 def person_key(emp_id, name=""):
     key = emp_key(emp_id)
     return ("id", key) if key else ("name", (name or "").strip())
@@ -6892,7 +6892,7 @@ def delete_domain(domain_id):
         flash("業務領域を削除しました。", "info")
     return redirect(url_for("admin.index"))
 
-# ----- 対象者一覧（employees テーブル） -----
+# ----- 人財一覧（employees テーブル） -----
 def _member_payload():
     rows = member_rows()
     periods = member_periods()
@@ -7008,7 +7008,7 @@ def remove_demo():
     flash("デモデータを削除しました。", "info")
     if kept:
         who = "、".join(" ".join(x for x in (p["emp_id"], p["name"]) if x) + f"（{p['detail']}）" for p in kept)
-        flash(f"デモのユーザーIDで本物の業務・回答がある人は消さずに残しました: {who}。対象者一覧のその行に印を付けています。回答率に入れないときは対象外にしてください。", "warning")
+        flash(f"デモのユーザーIDで本物の業務・回答がある人は消さずに残しました: {who}。人財一覧のその行に印を付けています。回答率に入れないときは対象外にしてください。", "warning")
     return redirect(url_for("admin.index"))
 
 # ===== 画面: 月次アンケート =====
@@ -7421,7 +7421,7 @@ MEMBER_STATUS_TEXT = {"yes": "回答", "no": "未回答", "out": "対象外", "b
 
 def export_members():
     rows_m, periods, _stats, _active = _member_payload()
-    header = ["ユーザーID", "氏名", "Gr・役割", "勤務形態", "対象", "対象外にした日", "対象者一覧に載った日", "自動化アイテム（件）"] + [f"{p[:4]}年{int(p[5:])}月" for p in periods]
+    header = ["ユーザーID", "氏名", "Gr・役割", "勤務形態", "対象", "対象外にした日", "人財一覧に載った日", "自動化アイテム（件）"] + [f"{p[:4]}年{int(p[5:])}月" for p in periods]
     rows = []
     for r in rows_m:
         e = r["emp"]
@@ -7491,7 +7491,7 @@ EXPORTS = OrderedDict([
     ("tasks", ("業務一覧（改善案件）", "1業務1行。目的・アウトプット・利用者・頻度・時間・段階・改善方針・AI分析・ECRSメモ・手順など", export_tasks)),
     ("steps", ("業務の手順", "1手順1行。だれ・受け取り（どこから・何を・どのように）・システム・できるもの・渡す相手・使いみち", export_steps)),
     ("stage_logs", ("段階の記録", "案件の段階を変えた履歴（1回1行）", export_stage_logs)),
-    ("members", ("対象者一覧", "1人1行（対象外の人も含む）。Gr・役割・勤務形態・対象外と、月ごとの回答（回答／未回答／対象外／対象前）", export_members)),
+    ("members", ("人財一覧", "1人1行（対象外の人も含む）。Gr・役割・勤務形態・対象外と、月ごとの回答（回答／未回答／対象外／対象前）", export_members)),
     ("respondents", ("回答者の意欲・技術", "回答した人（対象外を除く）ごとの意欲・月次の進め方・使える技術・学びたい技術・登録した業務", export_respondents)),
     ("monthly", ("月次アンケートの回答", "1回答1行。全月度・全設問とコメント", export_monthly)),
     ("questions", ("月次アンケートの設問", "月度ごとの設問（1設問1行）。種類・選択肢・必須・出す条件", export_questions)),
@@ -7569,12 +7569,12 @@ def highlights(tasks):
 # ===== テンプレート =====
 TEMPLATES = {
     'admin/employees.html': r'''{% extends "base.html" %}
-{% block title %}対象者一覧{% endblock %}
+{% block title %}人財一覧{% endblock %}
 {% block content %}
 {% macro member_mark(st, ans) %}{% if st == 'yes' %}<i class="bi bi-check-lg member-yes" title="回答あり"></i>{% elif st == 'out' %}<span class="member-out" title="月末時点で対象外{{ '（回答はありますが数えません）' if ans else '' }}">対象外</span>{% elif st == 'before' %}<span class="member-before" title="対象者になる前の月">－</span>{% endif %}{% endmacro %}
 <div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">
   <div>
-    <h2 class="mb-1">対象者一覧</h2>
+    <h2 class="mb-1">人財一覧</h2>
     <p class="text-muted mb-0">月次アンケートか「自動化アイテム登録」に一度でも回答した人が、ユーザーIDごとに1行で自動で載ります。月ごとの回答と、一人ひとりの意欲（「自動化アイテム登録」の「スキルを身につけながら、一緒にやってみたい」・使える技術・学びたい技術、月次アンケートの改善の進め方）をまとめて見られます。退職や他部門への異動で回答率の分母から外す人は「対象外」にチェックします。</p>
   </div>
   <div class="d-flex gap-2">
@@ -7660,7 +7660,7 @@ TEMPLATES = {
       <td class="text-center" data-sort="{{ '0' if r.emp.active else '1' }}"><input class="form-check-input member-exclude" type="checkbox" data-url="{{ url_for('admin.toggle_employee', employee_id=r.emp.id) }}" {% if not r.emp.active %}checked{% endif %} aria-label="{{ r.emp.emp_id }} を対象外にする"></td>
       <td data-sort="{{ r.emp.emp_id }}">{{ r.emp.emp_id }}{% set dr = demo_real.get(C.emp_key(r.emp.emp_id)) %}{% if dr %} <span class="badge bg-warning-subtle text-warning-emphasis" title="{{ dr.detail }}。デモデータを消してもこの人は残ります。回答率に入れないときは対象外にしてください">{{ dr.label }}</span>{% endif %}</td>
       <td data-sort="{{ r.emp.name or '' }}">{{ r.emp.name or '' }}{% if r.deletable %}
-        <form method="post" action="{{ url_for('admin.delete_employee', employee_id=r.emp.id) }}" class="d-inline" data-confirm="{{ r.emp.emp_id }} を対象者一覧から削除しますか？（まだ回答のない人だけ削除できます）"><button class="btn btn-link btn-sm text-danger p-0 ms-1">削除</button></form>{% endif %}</td>
+        <form method="post" action="{{ url_for('admin.delete_employee', employee_id=r.emp.id) }}" class="d-inline" data-confirm="{{ r.emp.emp_id }} を人財一覧から削除しますか？（まだ回答のない人だけ削除できます）"><button class="btn btn-link btn-sm text-danger p-0 ms-1">削除</button></form>{% endif %}</td>
       <td class="small" data-sort="{{ r.workplace }}">{{ r.workplace or '－' }}</td>
       <td class="small" data-sort="{{ r.work_pattern }}">{{ r.work_pattern or '－' }}</td>
       {% set wr = (0 if d.wish_positive else (1 if d.wish == C.SELF_IMPROVE_YES else (2 if d.wish else 9))) if d else 9 %}
@@ -8186,7 +8186,7 @@ TEMPLATES = {
 
     <form method="post" action="{{ url_for('admin.save_skills') }}" class="card mt-3" id="skills"><div class="card-body">
       <h5 class="card-title">技術の選択肢（自動化アイテム登録）</h5>
-      <p class="small text-muted">「スキルを身につけながら、一緒にやってみたい」にチェックした人が選ぶ「使える技術」「学びたい技術」の選択肢です。上から順に出ます。名前を変えると、すでに選んでいた人の記録も新しい名前になります。消しても、すでに選んでいた人の記録は対象者一覧に残ります（次に選び直すときは選べません）。「{{ C.SKILL_NONE }}」はいつも最後に出ます（消せません）。</p>
+      <p class="small text-muted">「スキルを身につけながら、一緒にやってみたい」にチェックした人が選ぶ「使える技術」「学びたい技術」の選択肢です。上から順に出ます。名前を変えると、すでに選んでいた人の記録も新しい名前になります。消しても、すでに選んでいた人の記録は人財一覧に残ります（次に選び直すときは選べません）。「{{ C.SKILL_NONE }}」はいつも最後に出ます（消せません）。</p>
       <div id="skill-rows">
       {% for s in skill_rows %}
         <div class="row g-1 align-items-center mb-1 skill-row">
@@ -8291,7 +8291,7 @@ TEMPLATES = {
         <li class="nav-item"><a class="nav-link nav-link-admin {% if bp == 'cases' %}active{% endif %}" href="{{ url_for('cases.index') }}">改善案件</a></li>
         <li class="nav-item"><a class="nav-link nav-link-admin {% if bp == 'bizmap' %}active{% endif %}" href="{{ url_for('bizmap.index') }}">業務マップ</a></li>
         <li class="nav-item"><a class="nav-link nav-link-admin {% if request.endpoint in ('monthly.results', 'monthly.survey_admin') %}active{% endif %}" href="{{ url_for('monthly.results') }}">月次集計</a></li>
-        <li class="nav-item"><a class="nav-link nav-link-admin {% if request.endpoint == 'admin.employees' %}active{% endif %}" href="{{ url_for('admin.employees') }}">対象者一覧</a></li>
+        <li class="nav-item"><a class="nav-link nav-link-admin {% if request.endpoint == 'admin.employees' %}active{% endif %}" href="{{ url_for('admin.employees') }}">人財一覧</a></li>
         <li class="nav-item"><a class="nav-link nav-link-admin {% if bp == 'export' %}active{% endif %}" href="{{ url_for('export.index') }}">CSV出力</a></li>
         <li class="nav-item"><a class="nav-link nav-link-admin {% if bp == 'admin' and request.endpoint != 'admin.employees' %}active{% endif %}" href="{{ url_for('admin.index') }}">管理</a></li>
         {% endif %}
@@ -10212,7 +10212,7 @@ TEMPLATES = {
     <div class="text-muted small">毎月同じ基本設問で、変化を追います。</div>
   </div>
   <div class="d-flex gap-2 flex-wrap">
-    <a class="btn btn-outline-primary btn-sm" href="{{ url_for('admin.employees') }}">対象者一覧</a>
+    <a class="btn btn-outline-primary btn-sm" href="{{ url_for('admin.employees') }}">人財一覧</a>
     <a class="btn btn-outline-primary btn-sm" href="{{ url_for('monthly.survey_admin', period=selected) }}">設問を編集</a>
   </div>
 </div>
@@ -10261,7 +10261,7 @@ TEMPLATES = {
         </tbody>
       </table>
       </div>
-      <p class="small text-muted mt-2 mb-0">減った・増えた・自動化したいは ① で「ある」と答えた人のうちの割合、依頼したい・一緒に取り組みたい・自分で取り組みたいは「なくしたい業務がある」と答えた人のうちの割合です（その設問に答えた人が分母）。回答率は、その月までに対象者一覧に載った人（初めて回答した月か、管理画面で追加した月から。「対象外」にした人を除く）のうち、その月に回答した人の割合です（下の小さい数字が 回答した対象者／対象者）。「うち対象者」は回答者に対象外の人が含まれるときだけ出ます。推計月間時間 ＝ 1シフトあたり時間の換算値 × {{ C.SHIFTS_PER_MONTH }}（1か月の出勤日数の目安）。</p>
+      <p class="small text-muted mt-2 mb-0">減った・増えた・自動化したいは ① で「ある」と答えた人のうちの割合、依頼したい・一緒に取り組みたい・自分で取り組みたいは「なくしたい業務がある」と答えた人のうちの割合です（その設問に答えた人が分母）。回答率は、その月までに人財一覧に載った人（初めて回答した月か、管理画面で追加した月から。「対象外」にした人を除く）のうち、その月に回答した人の割合です（下の小さい数字が 回答した対象者／対象者）。「うち対象者」は回答者に対象外の人が含まれるときだけ出ます。推計月間時間 ＝ 1シフトあたり時間の換算値 × {{ C.SHIFTS_PER_MONTH }}（1か月の出勤日数の目安）。</p>
     </div></div>
   </div>
 </div>
@@ -12148,7 +12148,7 @@ body.flow-max-open { overflow: hidden; }
 .fe-color[data-color="blue"] { background: #dbeafe; }
 .fe-color[data-color="purple"] { background: #e9d5ff; }
 .fe-color[data-color="pink"] { background: #fce7f3; }
-/* ---- 管理: 業務マップの区分・対象者一覧 ---- */
+/* ---- 管理: 業務マップの区分・人財一覧 ---- */
 .mv-move { display: flex; gap: 2px; }
 .mv-move .btn { padding: 0 0.4rem; line-height: 1.3; font-size: 0.7rem; }
 .mv-words { min-width: 16rem; }
