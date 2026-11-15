@@ -12994,13 +12994,14 @@ summary { transition: color 0.15s ease; }
   function setIdentity(text, ng) { identity.textContent = text || ""; identity.classList.toggle("is-ng", !!ng); }
   function fillSelects(workplaceId, pattern) {
     var ws = personBox.querySelector('select[name="workplace_id"]');
-    if (ws && workplaceId) ws.value = String(workplaceId);
+    if (ws && workplaceId) { ws.value = String(workplaceId); if (ws.value) clearError(ws.closest(".rq-field")); }
     var ps = personBox.querySelector('select[name="work_pattern"]');
-    if (ps && pattern) ps.value = pattern;
+    if (ps && pattern) { ps.value = pattern; if (ps.value) clearError(ps.closest(".rq-field")); }
   }
   function clearSelects() { personBox.querySelectorAll("select").forEach(function (s) { s.value = ""; }); }
   function forgetPerson() {
     confirmedId = "";
+    addedIds = [];
     clearSelects();
     prefillNote.textContent = "";
     if (!S.respondent) return;
@@ -13075,6 +13076,7 @@ summary { transition: color 0.15s ease; }
         takeTasks(j);
         if (j.resumed && S.tasks.length) toast("前回の続きから登録できます");
       }
+      personBox.querySelectorAll(".rq-field").forEach(clearError);
       setIdentity(ID_OK);
       return true;
     });
@@ -13086,7 +13088,7 @@ summary { transition: color 0.15s ease; }
   var pickBox = $("rq-pick"), intakeBox = $("rq-intake"), finalBox = $("rq-final"), resultBox = $("rq-result");
   var msgBox = $("rq-messages"), chipBox = $("rq-chips"), input = $("rq-input"), flowBox = $("rq-flow"), stepsBox = $("rq-steps");
   var titleInput = $("rq-title"), bulkBox = $("rq-bulk"), bulkText = $("rq-bulk-text");
-  var conv = null, busy = false;
+  var conv = null, busy = false, addedIds = [];
 
   function showOnly(box) {
     [pickBox, intakeBox, finalBox, resultBox].forEach(function (b) { b.classList.toggle("d-none", b !== box); });
@@ -13483,6 +13485,7 @@ summary { transition: color 0.15s ease; }
     if (j.respondent) S.respondent = j.respondent;
     S.stance = j.stance || null;
     S.tasks = j.tasks || S.tasks;
+    if (j.task && j.task.id && addedIds.indexOf(j.task.id) < 0) addedIds.push(j.task.id);
     S.suggested = j.suggested || []; S.suggested_wants = j.suggested_wants || [];
     renderRegistered();
     intakeBox.classList.add("d-none");
@@ -13522,13 +13525,14 @@ summary { transition: color 0.15s ease; }
       var ok = await savePerson(true);
       if (!ok) { toast("「基本情報」を入力してください"); return; }
     }
-    if (!S.tasks.length) {
-      toast("業務を1件以上登録してください");
+    var added = S.tasks.filter(function (t) { return addedIds.indexOf(t.id) >= 0; });
+    if (!added.length) {
+      toast(S.tasks.length ? "この画面ではまだ業務を登録していません。新しく登録する業務は「2 登録する業務」から登録してください（前に登録した業務 " + S.tasks.length + " 件は登録済みです）" : "業務を1件以上登録してください");
       $("sec-task").scrollIntoView({ behavior: "smooth", block: "start" });
       return;
     }
-    var total = S.tasks.reduce(function (a, t) { return a + (t.monthly_minutes || 0); }, 0);
-    var sum = "ありがとうございました。登録した業務 " + S.tasks.length + " 件（月 約 " + (total / 60).toFixed(1) + " 時間）は改善案件として確認し、活動状況に載せます。";
+    var total = added.reduce(function (a, t) { return a + (t.monthly_minutes || 0); }, 0);
+    var sum = "ありがとうございました。今回登録した業務 " + added.length + " 件（月 約 " + (total / 60).toFixed(1) + " 時間）は改善案件として確認し、活動状況に載せます。";
     await api("POST", CFG.api.reset);
     resetPage();
     $("rq-done-sum").textContent = sum;
@@ -13540,6 +13544,7 @@ summary { transition: color 0.15s ease; }
   });
   function resetPage() {
     S.respondent = null;
+    addedIds = [];
     takeTasks({});
     found = null; idProblem = ""; confirmedId = "";
     empInput.value = "";

@@ -2334,6 +2334,11 @@ def smoke_request():
           "P1: ユーザーIDを打ち替えた・見つからないときは回答者・登録一覧・候補・Gr・役割・勤務形態を消してリセットし、聞き取り・登録にユーザーIDを付けて送る")
     check("confirmedId && confirmedId !== key" in js_rq and js_rq.index("forgetPerson();\n      confirmedId = key;") < js_rq.index("if (v.workplace_id && v.work_pattern) debounce"),
           "P2: 別の人の社員IDが見つかったときは、前の人の職場・勤務形態を消してから（自動保存はしない）")
+    check("addedIds.push(j.task.id)" in js_rq and "var added = S.tasks.filter(function (t) { return addedIds.indexOf(t.id) >= 0; });" in js_rq and "この画面ではまだ業務を登録していません" in js_rq
+          and "今回登録した業務" in js_rq and js_rq.count("addedIds = [];") == 3,
+          "送信して完了は、この画面で登録した業務だけを数える（前に登録した業務しかないときは「受け付けました」を出さず、登録を促す）")
+    check('clearError(ws.closest(".rq-field"))' in js_rq and 'clearError(ps.closest(".rq-field"))' in js_rq and 'personBox.querySelectorAll(".rq-field").forEach(clearError);\n      setIdentity(ID_OK);' in js_rq,
+          "前回の値を入れたとき・基本情報を保存できたときは、前に出た「選んでください」を消す")
     check("resetPage();" in js_rq and "function resetPage()" in js_rq and "history.replaceState" in js_rq and js_rq.index("await api(\"POST\", CFG.api.reset);\n    resetPage();") > 0,
           "P3: 送信して完了で回答者をリセットし、お礼のあと画面を空に戻す（URL の社員IDも消す）")
     check("if (j.respondent) S.respondent = j.respondent;" in js_rq, "P18: 登録のあと S.respondent を新しい値にして、技術の欄の事前選択に使う")
