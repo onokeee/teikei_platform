@@ -56,6 +56,12 @@ def smoke_bizmap_edit():
         check([app_module.handoff_of(t) for t in ("課長に渡す", "各ラインから日報を集める", "前週比のコメントを書く", "生産管理課に問い合わせる")] == ["push", "pull", "", "pull"],
               "引き継ぎ方は動詞（伝えに行く語・取りに行く語）で決める")
         check(app_module.mask_person_names("山田さん、課長さん、品質保証課") == "担当者、課長、品質保証課", "氏名は担当者に置き換え、役職は残す")
+        multi = [{"no": 1, "action": "PMKからトラブル装置の対応状況、ライン管理から生産状況を集める", "system": "PMK、ライン管理", "input": "", "output": "", "to": ""},
+                 {"no": 2, "action": "URAと統合保全システムを見て原因を調べる", "system": "URA、統合保全システム", "input": "", "output": "", "to": ""}]
+        fd = app_module.build_steps_flow(multi, "製造1課")
+        into = lambda sid: sorted(fd.nodes[a]["text"] for (a, b), e in fd.edges.items() if b == sid and e["type"] == "info")
+        check(into("st1") == ["PMK", "ライン管理"] and into("st2") == ["URA", "統合保全システム"] and not any("、" in n["text"] for n in fd.nodes.values() if n["cls"] == "source"),
+              f"手順の取り出し元に「、」で並べた名前は、流れ図で1つずつ別の箱にする: {into('st1')} {into('st2')}")
         dg = app_module.Diagram()
         dg.node("s_a", "日次実績集計表（Excel）", "source")
         dg.node("s_b", "生産管理システム", "source")

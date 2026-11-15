@@ -3041,9 +3041,10 @@ def _raw_task_sources(t):
             if not to and inp and not internal(inp):
                 add(inp, hint=_method_medium(m), method=m)
             continue
-        if system and not internal(system) and not _is_destination(system, action):
-            add(system, method=m or recv)
-        elif inp and not internal(inp) and not to:
+        names = [n for n in _names(system) if field_role(n)[0] != "line" and not internal(n) and not _is_destination(n, action)]
+        for n in names:
+            add(n, method=field_role(n)[1] or recv)
+        if not names and inp and not internal(inp) and not to:
             add(inp, method=recv)
     if not items:
         for v in _names(t.inputs_note, dots=True):
@@ -3098,13 +3099,13 @@ def task_destinations(t):
     made = _task_outputs(t, t.steps)
     out = []
     for x in t.steps:
-        system = (x.get("system") or "").strip()
-        if not system or not _is_destination(system, x.get("action")):
-            continue
-        role, m = field_role(system)
-        if role == "line" or any(same_thing(system, v) for v in made) or any(same_name(system, v["name"], 2) for v in out):
-            continue
-        out.append({"name": system, "method": m})
+        for name in _names(x.get("system")):
+            if not _is_destination(name, x.get("action")):
+                continue
+            role, m = field_role(name)
+            if role == "line" or any(same_thing(name, v) for v in made) or any(same_name(name, v["name"], 2) for v in out):
+                continue
+            out.append({"name": name, "method": m})
     return out
 
 def task_recipients(t):
@@ -3447,18 +3448,24 @@ def build_steps_flow(steps, own_wp="", purpose=""):
             node = src or (info(inp, hint=_method_medium(m)) if inp else info(f"{vocab_label('methods', m)}で受け取る内容", hint=_method_medium(m), key=nid("s", f"{x['no']}:{m}")))
             d.info_edge(node, sid, m)
         else:
-            sys_node, dest = None, False
-            if system and role != "line":
-                dest = _is_destination(system, action) or same_info_box(out, system)
+            names = _names(system) if system and role != "line" else []
+            sys_nodes, dests = [], []
+            for name in names:
+                n_role, n_m = field_role(name)
+                if n_role == "line":
+                    continue
+                dest = _is_destination(name, action) or same_info_box(out, name)
                 if dest:
-                    sys_node = same_box(system) or info(system)
-                    d.info_edge(sid, sys_node, m, info_node=sys_node)
+                    node = same_box(name) or info(name)
+                    d.info_edge(sid, node, n_m, info_node=node)
                 else:
-                    sys_node = find(system) or info(system)
-                    d.info_edge(sys_node, sid, m or recv)
-            if src and src != sys_node:
+                    node = find(name) or info(name)
+                    d.info_edge(node, sid, n_m or recv)
+                sys_nodes.append(node)
+                dests.append(bool(dest))
+            if src and src not in sys_nodes:
                 d.info_edge(src, sid, recv)
-            elif inp and not src and not to and (not system or dest) and not same_name(inp, system, 2):
+            elif inp and not src and not to and (not sys_nodes or all(dests)) and not any(same_name(inp, n, 2) for n in names):
                 node = info(inp, hint=_method_medium(recv))
                 d.info_edge(node, sid, recv)
         if prev:
@@ -4211,9 +4218,9 @@ def intake_handlers(r, used=None):
         counter = Counter()
         for t in Task.query.all():
             for x in t.steps:
-                system = (x.get("system") or "").strip()
-                if system and field_role(system)[0] != "line" and not _is_destination(system, x.get("action")):
-                    counter[(system, "取り出し元")] += 1
+                for name in _names(x.get("system")):
+                    if field_role(name)[0] != "line" and not _is_destination(name, x.get("action")):
+                        counter[(name, "取り出し元")] += 1
                 if (x.get("output") or "").strip():
                     counter[(x["output"].strip(), "できるもの")] += 1
             for v in _names(t.inputs_note):
@@ -5817,9 +5824,10 @@ def _state_sources(state):
         if system and role == "line":
             if inp and not to and not internal(inp):
                 found.append((inp, m))
-        elif system and not internal(system) and not _is_destination(system, action):
-            found.append((system, m))
-        elif inp and not to and not internal(inp):
+            continue
+        names = [n for n in _names(system) if field_role(n)[0] != "line" and not internal(n) and not _is_destination(n, action)]
+        found.extend((n, field_role(n)[1]) for n in names)
+        if not names and inp and not to and not internal(inp):
             found.append((inp, method_of(x.get("how_from") or "")))
     return found
 
