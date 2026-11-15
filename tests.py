@@ -786,6 +786,33 @@ def smoke_board():
     check("デモデータを表示中" in html and html.count('text-warning-emphasis">デモ</span>') == 26, "改善案件の一覧: 帯とデモの印")
     code, html = page("/")
     check("デモデータを表示中" in html and 'text-warning-emphasis">デモ</span>' in html, "ダッシュボード: 帯と最近の業務にデモの印")
+    monthly_card = html.split("月次アンケート（時系列）", 1)[1][:2500] if "月次アンケート（時系列）" in html else ""
+    check("（進行中" not in html and monthly_card and "・回答率" not in monthly_card and "月次アンケート回答率" in html,
+          "ダッシュボード: 回答率は上の指標だけに出し（月次のカードに重ねない）、進行中の件数は活動状況へのリンクに重ねない")
+    with app.test_request_context():
+        sugg = app_module._resolve_urls(app_module.suggest_actions(limit=50))
+        tasks_all = Task.query.all()
+        n_elim = len([t for t in tasks_all if t.is_elimination_candidate and t.status != "完了"])
+        cand_status = {t.status for t in tasks_all if t.is_candidate}
+    elim = [x for x in sugg if x["kind"] == "ECRS 排除"]
+    elim_page = page("/cases/?filter=elimination")[1]
+    check(cand_status <= {"受付"} and (not elim or (f"廃止・統合候補の業務が {n_elim} 件" in elim[0]["title"] and f"{n_elim} 件、月間" in elim_page)),
+          f"案件候補は受付の業務だけ。ECRS 排除の件数は、リンク先（廃止・統合候補・完了を除く）の件数と同じ: {n_elim} 件")
+    check(all(x["href"].endswith("#tab-dup") for x in sugg if x["kind"] == "ECRS 結合") and all(x["href"] is None for x in sugg if x["kind"] == "回答促進")
+          and not any(x["kind"] == "調査" and "業務情報が不足" in x["title"] and "充足率 100%" in x["title"] for x in sugg),
+          "ECRS 結合は業務マップの重複・つながりへ、回答促進は管理トップへのリンクにしない。調査の提案は、登録が少ないのか必須項目が足りないのかを分けて書く")
+    check(app_module.name_sort_key("ﾆｯﾎﾟｳＡ") == app_module.name_sort_key("にっぽうa"), "名前順は、半角・全角・カタカナ・ひらがな・大文字小文字の違いをそろえて並べる")
+    with app.app_context():
+        t_old = Task.query.filter(Task.ai_source == "rules").first()
+        old_src, t_old_id = t_old.ai_source, t_old.id
+        t_old.ai_source = "claude"
+        db.session.commit()
+        app_module._migrate_wishes()
+        db.session.commit()
+        moved = db.session.get(Task, t_old_id).ai_source
+        db.session.get(Task, t_old_id).ai_source = old_src
+        db.session.commit()
+    check(moved == "openai", "以前の版の Claude の分析は、起動時に AI 分析（ChatGPT API と同じ扱い）にまとめる")
     client.post("/logout")
     code, html = page("/board/")
     check("デモデータを表示中" in html and 'href="/admin/"' not in html, "未ログインの活動状況にも帯が出る（管理へのリンクはない）")
@@ -995,9 +1022,20 @@ def smoke_board():
         check({"output_users", "inputs"} <= marks_before and not {"output_users", "inputs", "purpose", "output"} & set(wk.ai_fields_list) and not {"output_users", "inputs"} & set(wk.ai_extra_dict.get("rule_fields") or [])
               and "tools" in wk.ai_fields_list, f"保存した項目だけ推定の印が外れる（直していない項目の印は残る）: {wk.ai_fields_list}")
     code, html = page(f"/cases/{wk_id}")
-    check('必須項目（<a href="#f-domain_id" class="alert-link">業務領域</a>・<a href="#f-output" class="alert-link">アウトプット</a>）が未入力です' in html and 'href="#case-info"' in html and 'id="case-info"' in html
+    check('必須項目（<a href="#f-domain_id" class="alert-link">業務領域</a>・<a href="#f-output" class="alert-link">アウトプット</a>）が未入力か「不明」です' in html and 'href="#case-info"' in html and 'id="case-info"' in html
           and 'アウトプット（最終的にできるもの） <span class="badge text-bg-warning">未入力</span>' in html,
           "必須項目が足りないときの案内は、案件管理の業務情報の欄（リンク）を指し、空の欄に「未入力」が付く")
+    check('href="#f-tools" class="badge badge-flag me-1 text-decoration-none"' in html and all(f'id="f-{k}"' in html for k in ("tools", "nature", "pains", "info_from", "prev_task", "next_task", "actors")),
+          "推定の印は、直せる欄へのリンクにする（使用ツール・作業の性質・困りごと・情報の受け取り元・前後の業務・関わる人も業務情報で直せる）")
+    client.post(f"/cases/{wk_id}/update", data=dict(form, tools=["", "Excel", "VBA・マクロ"], pains=["", "手順が人によって違う"], pains_note="毎朝30分かかる", info_from="生産管理システム、課長"))
+    with app.app_context():
+        wk = db.session.get(Task, wk_id)
+        check(wk.tools_list == ["Excel", "VBA・マクロ"] and wk.pains_list == ["手順が人によって違う"] and wk.pains_note == "毎朝30分かかる" and wk.info_from == "生産管理システム、課長"
+              and not {"tools", "pains", "info_from"} & set(wk.ai_fields_list), f"使用ツール・困りごと・情報の受け取り元も直せ、直すと推定の印が外れる: {wk.ai_fields_list}")
+        wk.purpose, wk.output_users = "不明", "分からない"
+        check(wk.unknown_required == ["目的", "利用者"] and {"目的", "利用者"} <= set(wk.missing_required) and not wk.required_filled,
+              "目的が「不明」、利用者が「分からない」だけのときは、必須項目が埋まった扱いにしない（充足率に入れない）")
+        db.session.rollback()
     client.post(f"/cases/{wk_id}/update", data=dict(form))
     with app.app_context():
         wk = db.session.get(Task, wk_id)
@@ -1051,8 +1089,12 @@ def smoke_board():
 
     with app.app_context():
         before = StageLog.query.count()
+    with app.app_context():
+        app_module.Setting.set("ai_suggestions", json.dumps([{"kind": "業務設計", "title": "デモから作った提案", "detail": "", "generated_at": "2026-11-15 10:00"}], ensure_ascii=False))
+        db.session.commit()
     client.post("/admin/demo/clear")
     with app.app_context():
+        check(app_module.Setting.get("ai_suggestions") == "[]", "デモデータを消すと、デモのデータで作った AI の提案も消す")
         check(before > 0 and StageLog.query.count() == 0 and Task.query.count() == 0, f"デモ削除で履歴も消える（{before} -> 0）")
         check(app_module.Workplace.query.filter_by(name="設備保全課").first() is None and app_module.Domain.query.filter_by(name="人員・労務管理").first() is None
               and MonthlySurvey.query.count() == 1 and db.session.get(MonthlySurvey, own_survey) is not None and app_module.Setting.get("demo_masters", "") == "",
@@ -2608,8 +2650,9 @@ def smoke_request():
         with app.app_context():
             t2 = Task.query.filter_by(name="相談したい業務").first()
             check(t2 is not None and t2.is_candidate and t2.pains_list and len(t2.ai_extra_dict["hearing_questions"]) == 2, "相談の案件は困りごとがあれば候補に数え、ヒアリング質問が残る")
-            check(not Task(wish="まずは相談したい", pains="特になし").is_candidate and Task(wish="まずは相談したい", pains="時間がかかる").is_candidate and Task(wish="減らしたい").is_candidate and Task(wish="自動化したい").is_candidate,
-                  "案件候補は「なくしたい・減らしたい」か本当の困りごと（「まずは相談したい」だけでは候補にしない）")
+            check(not Task(wish="まずは相談したい", pains="特になし").wants_change and Task(wish="まずは相談したい", pains="時間がかかる").wants_change and Task(wish="減らしたい").wants_change and Task(wish="自動化したい").wants_change
+                  and Task(wish="減らしたい", status="受付").is_candidate and not Task(wish="減らしたい", status="対応中").is_candidate and not Task(wish="減らしたい", status="完了").is_candidate,
+                  "案件候補は、まだ手を付けていない（受付の）業務のうち「なくしたい・減らしたい」か本当の困りごと（「まずは相談したい」だけでは候補にしない）")
             t2_id = t2.id
         with app.app_context():
             t2 = db.session.get(Task, t2_id)
@@ -2655,7 +2698,8 @@ def smoke_request():
             check(t3.inputs_list == ["生産管理システム"] and t3.nature_list == ["データ取得", "メール・配布"] and "転記・コピー" not in t3.nature_list and t3.pains_list == ["ミスが起きやすい"] and t3.actors == "",
                   f"入力元は取り出し元だけ（渡し方のメールは入れない）、作業の性質は手順の言葉から（転記に決めつけない）、困りごとは言葉から区分に、渡す相手を関わる人にしない: {t3.inputs_list} {t3.nature_list} {t3.pains_list}")
             check(set(t3.ai_fields_list) >= {"inputs", "output_users", "tools", "nature", "pains", "domain"} and set(t3.ai_extra_dict.get("rule_fields") or []) == set(t3.ai_fields_list), "ルールで埋めた項目はすべて推定の印の対象にする")
-            check(t3.missing_required == ["アウトプット"] and "必須項目（アウトプット）を担当者と確認してください。" in t3.ai_ecrs_dict.get("questions", []), f"「必須項目…を確認」は本当に足りない項目だけを挙げる: {t3.ai_ecrs_dict.get('questions')}")
+            check(t3.missing_required == ["目的", "アウトプット"] and "必須項目（目的・アウトプット）を担当者と確認してください。" in t3.ai_ecrs_dict.get("questions", []),
+                  f"「必須項目…を確認」は本当に足りない項目（空か「不明」）だけを挙げる: {t3.ai_ecrs_dict.get('questions')}")
             words = app_module._content_words("日報の実績をExcelの集計表に転記する")
             check({"日報", "実績", "excel", "集計表", "転記"} <= words and not any("の" in w or "を" in w for w in words), f"関連業務の語は、ひらがな・助詞・記号で区切った意味のある語: {sorted(words)}")
             t_week = Task.query.filter_by(name="週報の作成").first()
@@ -2717,7 +2761,7 @@ def smoke_request():
         with app.app_context():
             t4_id = Task.query.filter_by(name="担当者の日報を写す").first().id
         code, html, r = get(f"/cases/{t4_id}")
-        check('<span class="badge badge-flag me-1">推定</span>' in html, "案件詳細: ルールで埋めた項目には「推定」の印が付く")
+        check('text-decoration-none" title="案件管理の「業務情報」で直せます（直すと印が外れます）">推定</a>' in html, "案件詳細: ルールで埋めた項目には「推定」の印が付く（押すと直す欄へ）")
         check("勤務形態" in client.get("/export/monthly.csv").data.decode("utf-8-sig") and "勤務形態" in client.get("/export/respondents.csv").data.decode("utf-8-sig"), "月次・回答者の CSV に勤務形態が出る")
         client.post("/logout")
         with client.session_transaction() as sess:

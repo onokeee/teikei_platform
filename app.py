@@ -136,6 +136,7 @@ BUILD_STAGE_SELF = "伴走"
 
 # ---- 案件候補・改善意欲の判定 ----
 CANDIDATE_WISHES = {"なくしたい", "減らしたい", "自動化したい"}
+UNKNOWN_ANSWERS = {"不明", "分からない", "わからない", "未確認", "未定"}
 SELF_IMPROVE_POSITIVE = {SELF_IMPROVE_YES, "取り組みたい", "教えてもらえれば取り組みたい"}
 STANCE_MONTHS = 6
 
@@ -415,8 +416,21 @@ class Task(db.Model):
         return bool(self.actors or self.info_from)
 
     @property
+    def unknown_required(self):
+        out = []
+        for key, label in C.REQUIRED_FIELDS:
+            if key == "purpose" and (self.purpose or "").strip() and self.purpose_unknown:
+                out.append(label)
+            elif key == "output" and (self.output or "").strip() in C.UNKNOWN_ANSWERS:
+                out.append(label)
+            elif key == "output_users" and self.output_users_list and set(self.output_users_list) <= {"分からない"}:
+                out.append(label)
+        return out
+
+    @property
     def missing_required(self):
-        return [label for key, label in C.REQUIRED_FIELDS if not str(getattr(self, key) or "").strip()]
+        unknown = self.unknown_required
+        return [label for key, label in C.REQUIRED_FIELDS if label in unknown or not str(getattr(self, key) or "").strip()]
 
     @property
     def required_filled(self):
@@ -432,8 +446,12 @@ class Task(db.Model):
         return (not p) or ("不明" in p) or ("分からない" in p) or ("わからない" in p)
 
     @property
-    def is_candidate(self):
+    def wants_change(self):
         return self.wish in C.CANDIDATE_WISHES or any(p != "特になし" for p in self.pains_list)
+
+    @property
+    def is_candidate(self):
+        return self.status == "受付" and self.wants_change
 
     @property
     def is_elimination_candidate(self):
@@ -544,14 +562,14 @@ class Task(db.Model):
             return ""
         if extra.get("ai_plan_demo"):
             return "デモ"
-        if self.ai_source not in ("openai", "claude"):
+        if self.ai_source != "openai":
             return "前回の AI 分析（" + (extra.get("ai_plan_at") or "日付不明") + "）"
         return ""
 
     @property
     def ai_stale_note(self):
         at = self.ai_extra_dict.get("ai_before_edit")
-        return "業務情報を直す前の AI 分析（" + at + "）" if at and self.ai_source in ("openai", "claude") else ""
+        return "業務情報を直す前の AI 分析（" + at + "）" if at and self.ai_source == "openai" else ""
 
     @property
     def domain_guess(self):
@@ -1027,8 +1045,12 @@ def domain_analysis():
     return rows
 
 # ----- 案件候補・重複候補・つながり -----
+def name_sort_key(name):
+    text = unicodedata.normalize("NFKC", name or "").lower()
+    return "".join(chr(ord(ch) - 0x60) if "ァ" <= ch <= "ヶ" else ch for ch in text)
+
 def candidate_tasks(limit=None):
-    tasks = [t for t in Task.query.all() if t.is_candidate and t.status != "完了"]
+    tasks = [t for t in Task.query.all() if t.is_candidate]
     tasks.sort(key=lambda t: t.monthly_minutes or 0, reverse=True)
     return tasks[:limit] if limit else tasks
 
@@ -1281,16 +1303,19 @@ def suggest_actions(limit=10):
     tasks = Task.query.all()
     domain_rows = domain_analysis()
 
+    few = next(min_count for level, _s, _g, min_count, _f in C.ANALYSIS_LEVELS if level == 2)
     for row in domain_rows:
-        if row["level"] <= 1:
-            suggestions.append(
-                {
-                    "kind": "調査",
-                    "title": f"「{row['domain'].name}」領域の業務情報が不足しています",
-                    "detail": f"登録 {row['count']} 件・必須項目の充足率 {row['fill_rate']:.0f}%。担当者へのヒアリングで業務の実態を把握してください。",
-                    "url": ("bizmap.domain", {"domain_id": row["domain"].id}),
-                }
-            )
+        if row["level"] > 1:
+            continue
+        if not row["count"]:
+            title, detail = f"「{row['domain'].name}」領域の業務がまだ登録されていません", "その領域の担当者に、自動化アイテム登録をお願いしてください。"
+        elif row["count"] < few:
+            title = f"「{row['domain'].name}」領域の登録が {row['count']} 件だけで、業務の実態がつかめていません"
+            detail = f"{few} 件以上集まると判定が進みます。その領域の担当者に自動化アイテム登録をお願いするか、ヒアリングしてください。"
+        else:
+            title = f"「{row['domain'].name}」領域の業務情報が不足しています（必須項目の充足率 {row['fill_rate']:.0f}%）"
+            detail = "担当者へのヒアリングで、目的・アウトプット・利用者などの空欄や「不明」を埋めてください。"
+        suggestions.append({"kind": "調査", "title": title, "detail": detail, "url": ("bizmap.domain", {"domain_id": row["domain"].id})})
 
     for t in candidate_tasks(limit=3):
         suggestions.append(
@@ -1302,14 +1327,14 @@ def suggest_actions(limit=10):
             }
         )
 
-    unknown = [t for t in tasks if (t.purpose_unknown or "分からない" in t.output_users_list) and t.status != "完了"]
+    unknown = [t for t in tasks if t.is_elimination_candidate and t.status != "完了"]
     if unknown:
         names = "、".join(t.name for t in unknown[:3])
         suggestions.append(
             {
                 "kind": "ECRS 排除",
-                "title": f"目的または利用者が不明な業務が {len(unknown)} 件あります",
-                "detail": f"{names} など。アウトプットが本当に使われているかを確認し、使われていなければ廃止候補にしてください。",
+                "title": f"廃止・統合候補の業務が {len(unknown)} 件あります",
+                "detail": f"{names} など。目的・利用者が分からない、何のためか分からない、同じ情報を何度も入力する業務です。アウトプットが本当に使われているかを確かめ、使われていなければ廃止、重なっていれば統合を検討してください。",
                 "url": ("cases.index", {"filter": "elimination"}),
             }
         )
@@ -1323,7 +1348,7 @@ def suggest_actions(limit=10):
                 "kind": "ECRS 結合",
                 "title": f"「同じ情報を何度も入力する」業務が {total_dup} 件あります",
                 "detail": f"入力元「{top_src}」からの入力が最多。発生源で一度だけ入力する仕組みや、入力の共通化を検討してください。",
-                "url": ("bizmap.index", {}),
+                "url": ("bizmap.index", {"_anchor": "tab-dup"}),
             }
         )
 
@@ -1333,7 +1358,7 @@ def suggest_actions(limit=10):
                 "kind": "ECRS 結合",
                 "title": f"同じアウトプット「{group['output']}」を {len(group['tasks'])} 人が作成しています",
                 "detail": f"合計 月間 {group['minutes'] / 60:.1f} 時間。1つにまとめる、または上流で自動生成する統合候補です。",
-                "url": ("bizmap.index", {}),
+                "url": ("bizmap.index", {"_anchor": "tab-dup"}),
             }
         )
 
@@ -1367,7 +1392,7 @@ def suggest_actions(limit=10):
                 "kind": "回答促進",
                 "title": f"まだ回答のないGr・役割: {'、'.join(quiet)}",
                 "detail": "月次アンケートの回答も自動化アイテムの登録もまだありません。推進メンバーからそのGr・役割の人に声をかけ、回答をお願いしてください。",
-                "url": ("admin.index", {}),
+                "url": (None, {}),
             }
         )
 
@@ -4490,7 +4515,7 @@ def rule_analyze(task, domains, candidate_tasks):
     minutes = task.monthly_minutes or 0
     if minutes >= 600 or "廃止候補" in flags:
         priority = "高"
-    elif minutes >= 120 or task.is_candidate:
+    elif minutes >= 120 or task.wants_change:
         priority = "中"
     else:
         priority = "低"
@@ -4618,7 +4643,10 @@ def _migrate_wishes():
     rows = Task.query.filter(Task.wish.in_(list(C.LEGACY_WISHES))).all()
     for t in rows:
         t.wish = C.LEGACY_WISHES[t.wish]
-    return bool(rows)
+    old_ai = Task.query.filter(Task.ai_source == "claude").all()
+    for t in old_ai:
+        t.ai_source = "openai"
+    return bool(rows or old_ai)
 
 def _backfill_work_patterns():
     patterns = {emp_key(e.emp_id): e.work_pattern for e in Employee.query.filter(Employee.work_pattern != "").all()}
@@ -5411,6 +5439,7 @@ def demo_ids_with_real_data():
     return found
 
 def clear_demo():
+    Setting.set("ai_suggestions", "[]")
     db.session.flush()
     task_ids = [i for (i,) in db.session.query(Task.id).filter_by(is_demo=True).all()]
     if task_ids:
@@ -5533,7 +5562,6 @@ def index():
         workplaces=workplace_stats(),
         recent=recent,
         monthly_latest=monthly_rows[-1] if monthly_rows else None,
-        active_count=Task.query.filter_by(status="対応中").count(),
     )
 
 @bp_main.post("/ai/suggest")
@@ -6264,7 +6292,7 @@ def index():
     if flt == "candidates":
         tasks = [t for t in tasks if t.is_candidate]
     elif flt == "elimination":
-        tasks = [t for t in tasks if t.is_elimination_candidate]
+        tasks = [t for t in tasks if t.is_elimination_candidate and t.status != "完了"]
     elif flt == "self":
         tasks = [t for t in tasks if t.self_improve in C.SELF_IMPROVE_POSITIVE]
     elif flt == "unverified":
@@ -6273,7 +6301,7 @@ def index():
     if sort == "new":
         tasks.sort(key=lambda t: t.created_at or datetime.min, reverse=True)
     elif sort == "name":
-        tasks.sort(key=lambda t: t.name)
+        tasks.sort(key=lambda t: name_sort_key(t.name))
     else:
         tasks.sort(key=lambda t: t.monthly_minutes or 0, reverse=True)
 
@@ -6331,14 +6359,14 @@ def _update_task_info(task, f):
     if minutes:
         task.compute_minutes()
         changed = True
-    for key in ("purpose", "output", "output_users_note", "inputs_note", "prev_task", "next_task", "actors"):
+    for key in ("purpose", "output", "output_users_note", "inputs_note", "prev_task", "next_task", "actors", "info_from", "pains_note"):
         if key in f:
             value = mask_person_names((f.get(key) or "").replace("\r\n", "\n").strip())[:500]
             if value != (getattr(task, key) or "").strip():
                 setattr(task, key, value)
                 unmark_estimate(task, key)
                 changed = True
-    for key, choices in (("output_users", C.OUTPUT_USERS), ("inputs", C.INPUT_SOURCES)):
+    for key, choices in (("output_users", C.OUTPUT_USERS), ("inputs", C.INPUT_SOURCES), ("tools", C.TOOLS), ("nature", C.NATURES), ("pains", C.PAINS)):
         if key in f:
             values = _ordered(f.getlist(key), choices)
             if set(values) != set(getattr(task, key + "_list")):
@@ -6351,7 +6379,7 @@ def _after_info_edit(task):
     extra = task.ai_extra_dict
     extra["info_edited_at"] = _ai_stamp()
     kind = ""
-    if task.ai_source in ("openai", "claude"):
+    if task.ai_source == "openai":
         extra.setdefault("ai_before_edit", _ai_stamp(task.ai_at) if task.ai_at else "日付不明")
         kind = "ai"
     elif task.ai_source:
@@ -8957,7 +8985,8 @@ TEMPLATES = {
       <table class="table table-sm mb-0">
         {% set aif = [] if task.verified else task.ai_fields_list %}
         {% set rulef = task.ai_extra_dict.get('rule_fields') or [] %}
-        {% macro mark(key) %}{% if key in aif %}<span class="badge badge-flag me-1">{{ '推定' if key in rulef else 'AI推定' }}</span>{% endif %}{% endmacro %}
+        {% set fixat = {'domain': 'domain_id', 'output_users_note': 'output_users', 'inputs_note': 'inputs'} %}
+        {% macro mark(key) %}{% if key in aif %}<a href="#f-{{ fixat.get(key, key) }}" class="badge badge-flag me-1 text-decoration-none" title="案件管理の「業務情報」で直せます（直すと印が外れます）">{{ '推定' if key in rulef else 'AI推定' }}</a>{% endif %}{% endmacro %}
         {% if task.steps %}<tr><th class="w-25">手順（聞き取り）</th><td><ol class="mb-0 ps-3 rq-steps-table">{% for x in task.steps %}<li>{{ x.action }}{% set rec = x.receive or [] %}{% if rec %} <span class="text-muted small">［{% for r in rec %}{{ r['from'] }}{% if r['from'] and r.what %}：{% endif %}{{ r.what }}{% if not loop.last %}、{% endif %}{% endfor %}］</span>{% endif %}{% set rest = (x.system or '').split('、')|reject('in', rec|map(attribute='from')|list)|select|join('、') %}{% if rest %} <span class="text-muted small">［{{ rest }}］</span>{% endif %}{% if x.output %} <span class="small">→ {{ x.output }}</span>{% endif %}{% if x.to %} <span class="small text-muted">（{{ x.to }} へ{% if x.how %}・{{ x.how }}{% endif %}）</span>{% endif %}</li>{% endfor %}</ol></td></tr>{% endif %}
         <tr><th class="w-25">業務領域</th><td>{{ mark('domain') }}{{ task.domain.name if task.domain else '未選択' }}{% if task.domain_guess %} <span class="badge badge-flag">AI推定: {{ task.domain_guess }}</span>{% endif %}</td></tr>
         <tr><th>目的</th><td>{{ mark('purpose') }}{{ task.purpose }}{% if task.purpose_unknown %} <span class="badge text-bg-danger">目的不明</span>{% endif %}</td></tr>
@@ -9002,7 +9031,7 @@ TEMPLATES = {
     <div class="card mb-3"><div class="card-body">
       <div class="d-flex justify-content-between align-items-center">
         <h5 class="card-title mb-0">AI分析{{ C.tip("AIの推定は参考情報です。担当者確認（右側）を経て正式な情報になります。") }}
-          {% if task.ai_source == 'openai' %}<span class="badge text-bg-primary">ChatGPT API</span>{% elif task.ai_source == 'claude' %}<span class="badge text-bg-primary">Claude API</span>{% elif task.ai_source %}<span class="badge text-bg-secondary">ルールベース</span>{% endif %}
+          {% if task.ai_source == 'openai' %}<span class="badge text-bg-primary">ChatGPT API</span>{% elif task.ai_source %}<span class="badge text-bg-secondary">ルールベース</span>{% endif %}
           {% if task.ai_priority %}<span class="badge text-bg-{{ {'高':'danger','中':'warning','低':'light text-muted'}.get(task.ai_priority, 'light') }}">優先度 {{ task.ai_priority }}</span>{% endif %}
         </h5>
         <form method="post" action="{{ url_for('cases.reanalyze', task_id=task.id) }}">
@@ -9067,7 +9096,7 @@ TEMPLATES = {
       {% set shown = [] %}
       <ul class="mb-0">
         {% for r in related_by_ai %}{% if r.id not in shown %}{% set _ = shown.append(r.id) %}
-        <li><a href="{{ url_for('cases.detail', task_id=r.id) }}">{{ r.name }}</a> <span class="badge badge-flag">{{ 'AI' if task.ai_source in ('openai', 'claude') else '推定' }}</span> <span class="small text-muted">{{ r.workplace.name if r.workplace else '' }}／{{ r.monthly_minutes|hours }} h</span></li>
+        <li><a href="{{ url_for('cases.detail', task_id=r.id) }}">{{ r.name }}</a> <span class="badge badge-flag">{{ 'AI' if task.ai_source == 'openai' else '推定' }}</span> <span class="small text-muted">{{ r.workplace.name if r.workplace else '' }}／{{ r.monthly_minutes|hours }} h</span></li>
         {% endif %}{% endfor %}
         {% for r in related %}{% if r.id not in shown %}{% set _ = shown.append(r.id) %}
         <li><a href="{{ url_for('cases.detail', task_id=r.id) }}">{{ r.name }}</a> <span class="small text-muted">{{ r.workplace.name if r.workplace else '' }}／{{ r.monthly_minutes|hours }} h</span></li>
@@ -9121,7 +9150,7 @@ TEMPLATES = {
       </div>
 
       {% set missing = task.missing_required %}
-      {% macro need(label) %}{% if label in missing %} <span class="badge text-bg-warning">未入力</span>{% endif %}{% endmacro %}
+      {% macro need(label) %}{% if label in task.unknown_required %} <span class="badge text-bg-warning">不明</span>{% elif label in missing %} <span class="badge text-bg-warning">未入力</span>{% endif %}{% endmacro %}
       <label class="form-label small mb-1 mt-2" id="case-info"><strong>業務情報</strong></label>{{ C.tip("直すと推定の印が外れます。必須項目が空なら「未入力」が付きます。\n頻度・1回の時間・担当人数を変えると、保存したときに月間時間を計算し直します。") }}
       <div class="row g-2 mb-2">
         <div class="col-8">
@@ -9171,16 +9200,36 @@ TEMPLATES = {
           </select>
         </div>
         <div class="col-6">
-          <label class="form-label small mb-0">前の業務</label>
-          <input type="text" name="prev_task" class="form-control form-control-sm" value="{{ task.prev_task or '' }}" maxlength="500">
+          <label class="form-label small mb-0" for="f-prev_task">前の業務</label>
+          <input type="text" name="prev_task" id="f-prev_task" class="form-control form-control-sm" value="{{ task.prev_task or '' }}" maxlength="500">
         </div>
         <div class="col-6">
-          <label class="form-label small mb-0">後の業務</label>
-          <input type="text" name="next_task" class="form-control form-control-sm" value="{{ task.next_task or '' }}" maxlength="500">
+          <label class="form-label small mb-0" for="f-next_task">後の業務</label>
+          <input type="text" name="next_task" id="f-next_task" class="form-control form-control-sm" value="{{ task.next_task or '' }}" maxlength="500">
         </div>
         <div class="col-12">
-          <label class="form-label small mb-0">関わる人・部署（「、」区切り。氏名は書かない）</label>
-          <input type="text" name="actors" class="form-control form-control-sm" value="{{ task.actors or '' }}" maxlength="500" placeholder="例：課長、生産管理課">
+          <label class="form-label small mb-0" for="f-actors">関わる人・部署（「、」区切り。氏名は書かない）</label>
+          <input type="text" name="actors" id="f-actors" class="form-control form-control-sm" value="{{ task.actors or '' }}" maxlength="500" placeholder="例：課長、生産管理課">
+        </div>
+        <div class="col-12">
+          <label class="form-label small mb-0" for="f-info_from">情報の受け取り元（「、」区切り）</label>
+          <input type="text" name="info_from" id="f-info_from" class="form-control form-control-sm" value="{{ task.info_from or '' }}" maxlength="500" placeholder="例：生産管理システム、課長">
+        </div>
+        <div class="col-12" id="f-tools">
+          <div class="form-label small mb-0">使用ツール</div>
+          <input type="hidden" name="tools" value="">
+          {% for v in C.TOOLS %}<div class="form-check form-check-inline small mb-0"><input class="form-check-input" type="checkbox" name="tools" value="{{ v }}" id="f-tl-{{ loop.index }}" {% if v in task.tools_list %}checked{% endif %}><label class="form-check-label" for="f-tl-{{ loop.index }}">{{ v }}</label></div>{% endfor %}
+        </div>
+        <div class="col-12" id="f-nature">
+          <div class="form-label small mb-0">作業の性質</div>
+          <input type="hidden" name="nature" value="">
+          {% for v in C.NATURES %}<div class="form-check form-check-inline small mb-0"><input class="form-check-input" type="checkbox" name="nature" value="{{ v }}" id="f-na-{{ loop.index }}" {% if v in task.nature_list %}checked{% endif %}><label class="form-check-label" for="f-na-{{ loop.index }}">{{ v }}</label></div>{% endfor %}
+        </div>
+        <div class="col-12" id="f-pains">
+          <div class="form-label small mb-0">困りごと</div>
+          <input type="hidden" name="pains" value="">
+          {% for v in C.PAINS %}<div class="form-check form-check-inline small mb-0"><input class="form-check-input" type="checkbox" name="pains" value="{{ v }}" id="f-pa-{{ loop.index }}" {% if v in task.pains_list %}checked{% endif %}><label class="form-check-label" for="f-pa-{{ loop.index }}">{{ v }}</label></div>{% endfor %}
+          <input type="text" name="pains_note" class="form-control form-control-sm mt-1" value="{{ task.pains_note or '' }}" maxlength="500" placeholder="本人の言葉（補足）" aria-label="困りごとの補足">
         </div>
       </div>
 
@@ -9229,7 +9278,7 @@ TEMPLATES = {
     <form method="post" action="{{ url_for('cases.verify', task_id=task.id) }}" class="card"><div class="card-body">
       <h5 class="card-title">担当者確認（推進メンバー）{{ C.tip("必須項目の内容とAIの推定を本人・推進メンバーが確認すると、業務情報の充足率に算入されます。") }}</h5>
       {% if not task.required_filled %}
-      <div class="alert alert-warning py-1 small">必須項目（{% for key, label in C.REQUIRED_FIELDS if label in task.missing_required %}<a href="#f-{{ key }}" class="alert-link">{{ label }}</a>{% if not loop.last %}・{% endif %}{% endfor %}）が未入力です。ヒアリングで確かめて、上の「案件管理」の<a href="#case-info" class="alert-link">業務情報</a>に入れて「保存する」を押してください。</div>
+      <div class="alert alert-warning py-1 small">必須項目（{% for key, label in C.REQUIRED_FIELDS if label in task.missing_required %}<a href="#f-{{ key }}" class="alert-link">{{ label }}</a>{% if not loop.last %}・{% endif %}{% endfor %}）が未入力か「不明」です。ヒアリングで確かめて、上の「案件管理」の<a href="#case-info" class="alert-link">業務情報</a>に入れて「保存する」を押してください。</div>
       {% endif %}
       {% if task.verified %}
         <div class="small mb-2">確認者: {{ task.verified_by or '－' }}</div>
@@ -9266,7 +9315,7 @@ TEMPLATES = {
 {% block title %}改善案件一覧{% endblock %}
 {% block content %}
 <div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
-  <h2 class="mb-0">改善案件一覧{{ C.tip("登録された業務はすべて改善案件です。希望が「なくしたい・減らしたい」か、困りごとのある業務を「案件候補」として数えます。") }}</h2>
+  <h2 class="mb-0">改善案件一覧{{ C.tip("登録された業務はすべて改善案件です。まだ手を付けていない（受付の）業務のうち、希望が「なくしたい・減らしたい」か、困りごとのある業務を「案件候補」として数えます。") }}</h2>
   <div class="d-flex gap-2">
     <a class="btn btn-primary btn-sm" href="{{ url_for('survey.index') }}">自動化アイテムを登録する</a>
   </div>
@@ -9313,8 +9362,8 @@ TEMPLATES = {
       <label class="form-label small mb-0">絞り込み</label>
       <select name="filter" class="form-select form-select-sm">
         <option value="">すべて</option>
-        <option value="candidates" {% if args.get('filter') == 'candidates' %}selected{% endif %}>案件候補（なくしたい・減らしたい・困りごとあり）</option>
-        <option value="elimination" {% if args.get('filter') == 'elimination' %}selected{% endif %}>廃止・統合候補</option>
+        <option value="candidates" {% if args.get('filter') == 'candidates' %}selected{% endif %}>案件候補（受付で、なくしたい・減らしたい・困りごとあり）</option>
+        <option value="elimination" {% if args.get('filter') == 'elimination' %}selected{% endif %}>廃止・統合候補（完了を除く）</option>
         <option value="self" {% if args.get('filter') == 'self' %}selected{% endif %}>自主改善希望</option>
         <option value="unverified" {% if args.get('filter') == 'unverified' %}selected{% endif %}>担当者未確認</option>
       </select>
@@ -9437,7 +9486,7 @@ TEMPLATES = {
     <div class="card stat h-100"><div class="card-body">
       <div class="stat-head"><span class="stat-tile tile-teal"><i class="bi bi-list-check"></i></span><span class="stat-label">PCの定型・定期業務の月間時間</span></div>
       <div class="stat-value">{{ '%.1f'|format(k.total_hours) }}<span class="stat-unit">時間/月</span></div>
-      <div class="stat-sub">年間換算 {{ '%.0f'|format(k.annual_hours) }} 時間 ・ <a href="{{ url_for('cases.index', filter='candidates') }}">案件候補 {{ k.candidate_count }} 件</a>{{ C.tip("なくしたい・減らしたい・困りごとあり") }}</div>
+      <div class="stat-sub">年間換算 {{ '%.0f'|format(k.annual_hours) }} 時間 ・ <a href="{{ url_for('cases.index', filter='candidates') }}">案件候補 {{ k.candidate_count }} 件</a>{{ C.tip("まだ手を付けていない（受付の）業務のうち、希望がなくしたい・減らしたいか、困りごとのあるもの") }}</div>
     </div></div>
   </div>
   <div class="col-6 col-lg-3">
@@ -9463,7 +9512,7 @@ TEMPLATES = {
   </div>
 </div>
 
-<p class="dash-link"><a href="{{ url_for('board.index') }}"><i class="bi bi-kanban"></i>活動状況で案件の進み具合を見る（進行中 {{ active_count }} 件）<i class="bi bi-arrow-right-short"></i></a></p>
+<p class="dash-link"><a href="{{ url_for('board.index') }}"><i class="bi bi-kanban"></i>活動状況で案件の進み具合を見る<i class="bi bi-arrow-right-short"></i></a></p>
 
 <h2 class="section-title">アンケートとGr・役割の状況</h2>
 <div class="row g-3 mb-4">
@@ -9473,7 +9522,7 @@ TEMPLATES = {
         <h5 class="card-title mb-0">月次アンケート（時系列）{{ C.tip("毎月同じ設問でPCの定型・定期業務の変化を追います。") }}</h5>
       </div>
       {% if monthly_latest %}
-      <div class="small text-muted mb-2">最新 {{ monthly_latest.label }}：回答 {{ monthly_latest.n }} 人{% if monthly_latest.member_answered != monthly_latest.n %}（うち対象者 {{ monthly_latest.member_answered }} 人）{% endif %}{% if monthly_latest.response_rate is not none %}・回答率 {{ '%.0f'|format(monthly_latest.response_rate) }}%（{{ monthly_latest.member_answered }}／{{ monthly_latest.members }} 人）{% endif %}{% if monthly_latest.pattern_counts %}・{% for k, v in monthly_latest.pattern_counts.items() %}{{ k }} {{ v }}人{% if not loop.last %}／{% endif %}{% endfor %}{% endif %}</div>
+      <div class="small text-muted mb-2">最新 {{ monthly_latest.label }}：回答 {{ monthly_latest.n }} 人{% if monthly_latest.member_answered != monthly_latest.n %}（うち対象者 {{ monthly_latest.member_answered }} 人）{% endif %}{% if monthly_latest.pattern_counts %}・{% for k, v in monthly_latest.pattern_counts.items() %}{{ k }} {{ v }}人{% if not loop.last %}／{% endif %}{% endfor %}{% endif %}</div>
       <div class="row g-2 text-center mb-2">
         <div class="col-4"><div class="kpi-label">PCの定型・定期業務あり</div><div class="mini-value">{{ '%.0f'|format(monthly_latest.has_rate) }}%</div></div>
         <div class="col-4"><div class="kpi-label">先月より減った</div><div class="mini-value text-green">{{ '%.0f'|format(monthly_latest.decreased_rate) }}%</div></div>
@@ -9491,7 +9540,7 @@ TEMPLATES = {
       <h5 class="card-title">Gr・役割別の回答状況{{ C.tip("回答した人は、業務を1件以上登録したか、月次アンケートに回答した人（対象外は除く）を、いまのGr・役割（月次アンケートか「自動化アイテム登録」のいちばん新しい回答で選んだGr・役割）で1人1回数えます。自主改善はそのうち自ら改善に取り組みたい人です。業務・月間時間・案件候補は、業務を登録したときのGr・役割で数えます。") }}</h5>
       <div class="table-responsive">
       <table class="table table-sm mb-0">
-        <thead><tr><th>Gr・役割</th><th class="text-end">回答した人</th><th class="text-end">業務</th><th class="text-end">月間時間</th><th class="text-end" title="希望が「なくしたい・減らしたい」か、困りごとのある業務">案件候補</th><th class="text-end">自主改善</th></tr></thead>
+        <thead><tr><th>Gr・役割</th><th class="text-end">回答した人</th><th class="text-end">業務</th><th class="text-end">月間時間</th><th class="text-end" title="まだ手を付けていない（受付の）業務のうち、希望が「なくしたい・減らしたい」か、困りごとのあるもの">案件候補</th><th class="text-end">自主改善</th></tr></thead>
         <tbody>
         {% for w in workplaces %}
         <tr class="{% if w.respondents == 0 %}text-muted{% endif %}">
