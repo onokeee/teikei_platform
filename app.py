@@ -6915,7 +6915,7 @@ def employees():
     everyone = [p for p in dx_all if not (p["key"][0] == "id" and p["key"][1] in excluded)]
     for r in rows:
         r["dx"] = by_key.get(emp_key(r["emp"].emp_id))
-    summary, wish_counts, have, learn, stance_options = people_summary(everyone)
+    _summary, wish_counts, have, learn, stance_options = people_summary(everyone)
     names = [w.name for w in _workplaces()]
     used = {r["workplace"] for r in rows if r["workplace"]}
     wp = db.session.get(Workplace, request.args.get("workplace_id", type=int) or 0)
@@ -6925,7 +6925,6 @@ def employees():
         periods=periods,
         stats=stats,
         active_count=active,
-        summary=summary,
         wish_counts=wish_counts,
         have=have.most_common(),
         learn=learn.most_common(),
@@ -7655,33 +7654,6 @@ TEMPLATES = {
     <h2 class="mb-1">人財一覧</h2>
     <p class="text-muted mb-0">月次アンケートか「自動化アイテム登録」に一度でも回答した人が、ユーザーIDごとに1行で自動で載ります。月ごとの回答と、一人ひとりの意欲（「自動化アイテム登録」の「スキルを身につけながら、一緒にやってみたい」・使える技術・学びたい技術、月次アンケートの改善の進め方）をまとめて見られます。退職や他部門への異動で回答率の分母から外す人は「対象外」にチェックします。</p>
   </div>
-  <div class="d-flex gap-2">
-    <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('monthly.results') }}">月次集計</a>
-  </div>
-</div>
-
-<div class="row g-3 mb-3">
-  <div class="col-6 col-lg-3"><div class="card kpi-card h-100"><div class="card-body py-2">
-    <div class="kpi-label">回答した人</div>
-    <div class="kpi-value fs-3">{{ summary.total }}<span class="fs-6 text-muted"> 人</span></div>
-    <div class="kpi-sub">業務を1件以上登録したか、月次アンケートに回答した人（対象外は除く）</div>
-  </div></div></div>
-  <div class="col-6 col-lg-3"><div class="card kpi-card h-100"><div class="card-body py-2">
-    <div class="kpi-label">自分で改善したい</div>
-    <div class="kpi-value fs-3">{{ summary.positive }}<span class="fs-6 text-muted"> 人</span></div>
-    <div class="kpi-sub">自動化アイテム登録での「一緒にやってみたい」のチェックと、直近6か月の月次の進め方（「自分で取り組みたい」「学びながら改善チームと一緒に取り組みたい」）のうち、新しいほうで判断（チェックなしは意思表示なしとして扱う）。伴走している「自主改善」の案件がある人も含む</div>
-    {% if summary.positive_by_pattern %}<div class="kpi-sub">{% for k, v in summary.positive_by_pattern.items() %}{{ k }} {{ v }}人{% if not loop.last %}／{% endif %}{% endfor %}</div>{% endif %}
-  </div></div></div>
-  <div class="col-6 col-lg-3"><div class="card kpi-card h-100"><div class="card-body py-2">
-    <div class="kpi-label">直近の月次で「自分で・一緒に取り組みたい」</div>
-    <div class="kpi-value fs-3">{{ summary.self_now }}<span class="fs-6 text-muted"> 人</span></div>
-    <div class="kpi-sub">{{ summary.period_label }}</div>
-  </div></div></div>
-  <div class="col-6 col-lg-3"><div class="card kpi-card h-100"><div class="card-body py-2">
-    <div class="kpi-label">学びたい技術を挙げた人</div>
-    <div class="kpi-value fs-3">{{ summary.learners }}<span class="fs-6 text-muted"> 人</span></div>
-    <div class="kpi-sub">勉強会・伴走の対象（下の「学びたい技術」）</div>
-  </div></div></div>
 </div>
 
 <div class="card mb-3"><div class="card-body">
@@ -8188,7 +8160,6 @@ TEMPLATES = {
       <p class="small mb-2">毎月の設問を編集します。</p>
       <div class="d-flex flex-wrap gap-2">
         <a class="btn btn-sm btn-outline-primary" href="{{ url_for('monthly.survey_admin') }}">月次の設問を編集</a>
-        <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('monthly.results') }}">月次集計</a>
       </div>
     </div></div>
 
@@ -9543,7 +9514,6 @@ TEMPLATES = {
     <div class="card h-100"><div class="card-body">
       <div class="d-flex justify-content-between align-items-center">
         <h5 class="card-title mb-0">月次アンケート（時系列）</h5>
-        <a class="small" href="{{ url_for('monthly.results') }}">月次集計へ</a>
       </div>
       {% if monthly_latest %}
       <div class="small text-muted mb-2">最新 {{ monthly_latest.label }}：回答 {{ monthly_latest.n }} 人{% if monthly_latest.member_answered != monthly_latest.n %}（うち対象者 {{ monthly_latest.member_answered }} 人）{% endif %}{% if monthly_latest.response_rate is not none %}・回答率 {{ '%.0f'|format(monthly_latest.response_rate) }}%（{{ monthly_latest.member_answered }}／{{ monthly_latest.members }} 人）{% endif %}{% if monthly_latest.pattern_counts %}・{% for k, v in monthly_latest.pattern_counts.items() %}{{ k }} {{ v }}人{% if not loop.last %}／{% endif %}{% endfor %}{% endif %}</div>
@@ -9725,7 +9695,7 @@ TEMPLATES = {
 {% block title %}月次アンケートの設問{% endblock %}
 {% block content %}
 <nav aria-label="breadcrumb"><ol class="breadcrumb small mb-2">
-  <li class="breadcrumb-item"><a href="{{ url_for('monthly.results', period=period) }}">月次アンケート 集計</a></li>
+  <li class="breadcrumb-item"><a href="{{ url_for('monthly.results', period=period) }}">月次集計</a></li>
   <li class="breadcrumb-item active">設問の編集</li>
 </ol></nav>
 <div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">

@@ -1773,9 +1773,11 @@ def smoke_login_monthly():
     with app.app_context():
         answered_n = len(app_module.answered_people())
     code, html_e, r = get("/admin/employees")
-    m = re.search(r'kpi-label">回答した人</div>\s*<div class="kpi-value fs-3">(\d+)<span', html_e)
-    check(m is not None and int(m.group(1)) == answered_n and "業務を1件以上登録したか、月次アンケートに回答した人（対象外は除く）" in html_e and f"回答した人 {answered_n} 人／業務" in html and "一度でも回答した人）" not in html + html_e,
-          f"P9: 人財一覧と管理の人数は「回答した人」（対象外とまだ回答のない人を除く）: {answered_n} 人")
+    check(f"回答した人 {answered_n} 人／業務" in html and "一度でも回答した人）" not in html + html_e and 'kpi-label">回答した人' not in html_e,
+          f"P9: 管理の人数は「回答した人」（対象外とまだ回答のない人を除く）: {answered_n} 人。人財一覧には人数のカードを置かない")
+    html_d = client.get("/").data.decode("utf-8")
+    check(all(h.count('href="/monthly/results"') == 1 for h in (html, html_e, html_d)) and "月次集計へ" not in html_d,
+          "管理・人財一覧・ダッシュボードに月次集計へのボタンやリンクはない（ヘッダーのタブだけ）")
     check('href="/admin/employees">人財一覧</a>' in html_e and 'active" href="/admin/employees">人財一覧' in html_e and 'active" href="/admin/">管理' not in html_e
           and 'active" href="/admin/">管理' in html and "breadcrumb-item\"><a href=\"/admin/\">管理" not in html_e and 'href="/admin/employees">人財一覧</a>' in html
           and "対象者・月次アンケート" not in html,
@@ -1830,8 +1832,8 @@ def smoke_login_monthly():
     client.post("/login", data={"emp_id": "admin", "password": "adminpass"})
     code, html, r = get("/admin/employees")
     check(code == 200 and "DX人財情報" not in html and "人材育成" not in html and "田中 一郎" in html and "E777" in html, "人財一覧（DX人財情報をまとめた）: 自動化を検討の回答者と、月次だけ答えた人が並ぶ")
-    check("自分で改善したい" in html and "直近の月次で「自分で・一緒に取り組みたい」" in html and all(f">{h}</button>" in html for h in ("Gr・役割", "勤務形態", "意欲（自動化アイテム登録）", "月次：改善の進め方", "使える技術", "学びたい技術")),
-          "人財一覧: DX人財情報の集計カードと、Gr・役割・勤務形態・意欲・進め方・技術の列")
+    check("kpi-card" not in html and "直近の月次で「自分で・一緒に取り組みたい」" not in html and all(f">{h}</button>" in html for h in ("Gr・役割", "勤務形態", "意欲（自動化アイテム登録）", "月次：改善の進め方", "使える技術", "学びたい技術")),
+          "人財一覧: 上の人数のカードは置かず、Gr・役割・勤務形態・意欲・進め方・技術の列を並べる")
     check('id="member-table"' in html and 'data-filter="wp"' in html and 'id="member-month"' in html and 'id="member-month-st"' in html and 'data-filter="m0"' not in html
           and "function applySort()" in html and "function applyFilter()" in html and 'aria-sort="none"' in html and "monthOk(tr)" in html,
           "人財一覧: 列名を押して並べ替え、見出しの下の欄で列ごとに絞り込める（月の回答は表の上の1か所で絞り込む）")
@@ -1962,7 +1964,6 @@ def _people_checks(check):
     check("チェックなし" in html and "改善チームに任せたい" not in html and ">伴走<" in html and f"/survey/start?emp=P004&amp;src=monthly&amp;m={want_id}" in html and "検査記録の転記・日報の集計" in html
           and "自分で／一緒に 1回（回答 2 回中）" in html and "自分で／一緒に 0回（回答 1 回中）" in html and period_label(prev) in html and ">特になし<" in html,
           "P16・P20・P21・P23・P24: 人財一覧の意欲・進め方・技術・業務の列（チェックなし・伴走・月次の進め方と回数・特になし・業務0件の人の自動化を検討へのリンク）")
-    check(f">{len(people)}<span" in html and "業務を1件以上登録したか、月次アンケートに回答した人（対象外は除く）" in html, "P9: 人財一覧の「回答した人」も同じ決まり")
     rows = list(csv.reader(io.StringIO(client.get("/export/respondents.csv").data.decode("utf-8-sig"))))
     by_id = {x[0]: x for x in rows[1:]}
     check(set(by_id) == set(people) and "P004" in by_id and "自分で取り組みたい" in by_id["P004"] and period_label(prev) in by_id["P004"] and by_id["P003"][5] == "チェックなし",
@@ -1970,9 +1971,6 @@ def _people_checks(check):
     html = client.get("/").data.decode("utf-8")
     check("自ら改善に取り組みたい人（回答した人 5 人中）" in html and "<th class=\"text-end\">回答した人</th>" in html and "（うち対象者 1 人）" in html,
           "P9・P17・P7: ダッシュボードの自主改善者の分母・職場別の「回答した人」・月次カードの回答数（うち対象者）")
-    html = client.get("/admin/employees").data.decode("utf-8")
-    m = re.search(r'kpi-label">回答した人</div>\s*<div class="kpi-value fs-3">(\d+)<span', html)
-    check(m is not None and m.group(1) == "5", "P9: 人財一覧も同じ人数")
     rid = None
     with app.app_context():
         rid = Respondent.query.filter_by(emp_id="P008").first()
@@ -2046,7 +2044,7 @@ def _people_round2_checks(check):
           f"R2-4: 職場別の回答した人・自主改善は1人1回、いまの職場で数える（業務は登録した職場）: {got}")
     check(quiet is not None and all(names[w] not in quiet["title"] for w in (w1, w2, w3)), f"R2-4: 「まだ回答のない職場」には前に回答があった職場を出さない: {quiet and quiet['title']}")
     html = client.get("/admin/employees").data.decode("utf-8")
-    check(later in html and 'text-bg-secondary">スキルを身につけながら、一緒にやってみたい' in html and "直近6か月" in html, "R2-5・R2-6: 人財一覧の意欲に灰色のバッジと「その後の月次で依頼したい」、判断の説明")
+    check(later in html and 'text-bg-secondary">スキルを身につけながら、一緒にやってみたい' in html, "R2-5・R2-6: 人財一覧の意欲に灰色のバッジと「その後の月次で依頼したい」")
     html = client.get("/").data.decode("utf-8")
     check("いまのGr・役割" in html and "1人1回" in html, "R2-4: ダッシュボードのGr・役割別の注記")
     rows = list(csv.reader(io.StringIO(client.get("/export/respondents.csv").data.decode("utf-8-sig"))))
@@ -2678,7 +2676,7 @@ def smoke_request():
         check(code == 200 and '<span class="badge text-bg-dark">夜勤</span>' in html and '<span class="badge text-bg-dark">昼勤・夜勤の両方</span>' in html, "改善案件の一覧に夜勤・両方のバッジが出る")
         code, html, r = get("/admin/employees")
         check(code == 200 and ">勤務形態</button>" in html and "交代勤務" in html, "人財一覧に勤務形態の列が出る")
-        check("登録: スキルを身につけながら、一緒にやってみたい" in html and "割ける時間" not in html and "発表・共有" not in html and "学びたい技術を挙げた人" in html, "人財一覧の意欲は依頼の「一緒にやってみたい」から出し、集めなくなった列は出さない")
+        check("登録: スキルを身につけながら、一緒にやってみたい" in html and "割ける時間" not in html and "発表・共有" not in html, "人財一覧の意欲は依頼の「一緒にやってみたい」から出し、集めなくなった列は出さない")
         code, html, r = get("/bizmap/")
         check(code == 200 and "日報の集計" in html, "業務マップに新しい案件が載る")
         code, html, r = get("/cases/?wish=まずは相談したい")
