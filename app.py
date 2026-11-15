@@ -8406,21 +8406,20 @@ document.getElementById("test-btn").addEventListener("click", async function () 
 <form method="get" class="card mb-3"><div class="card-body py-2">
   <div class="row g-2 align-items-end">
     <div class="col-6 col-md-3">
-      <label class="form-label small mb-0">Gr・役割</label>
-      <select name="workplace_id" class="form-select form-select-sm">
+      <label class="form-label small mb-0" for="map-wp">Gr・役割</label>
+      <select name="workplace_id" id="map-wp" class="form-select form-select-sm" onchange="this.form.submit()">
         <option value="">製造部全体</option>
         {% for w in workplaces %}<option value="{{ w.id }}" {% if args.get('workplace_id')|string == w.id|string %}selected{% endif %}>{{ w.name }}</option>{% endfor %}
       </select>
     </div>
     <div class="col-6 col-md-3">
-      <label class="form-label small mb-0">業務領域</label>
-      <select name="domain_id" class="form-select form-select-sm">
+      <label class="form-label small mb-0" for="map-domain">業務領域</label>
+      <select name="domain_id" id="map-domain" class="form-select form-select-sm" onchange="this.form.submit()">
         <option value="">すべて</option>
         {% for d in domains %}<option value="{{ d.id }}" {% if args.get('domain_id')|string == d.id|string %}selected{% endif %}>{{ d.name }}</option>{% endfor %}
       </select>
     </div>
-    <div class="col-6 col-md-2"><button class="btn btn-sm btn-primary">表示</button></div>
-    <div class="col-12 col-md-4 small text-muted text-md-end">
+    <div class="col-12 col-md-6 small text-muted text-md-end">
       図に載せた業務 {{ task_count }} 件（関わる人・情報の受け取り元の入力あり {{ flow_info_count }} 件）{% if pending_count %}・月次で挙がった未登録の業務 {{ pending_count }} 件{% endif %}
     </div>
   </div>

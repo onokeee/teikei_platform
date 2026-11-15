@@ -343,6 +343,8 @@ def smoke_bizmap_edit():
     r = client.get("/bizmap/")
     html = r.data.decode("utf-8")
     check("tab-people" not in html and "tab-goods" not in html and "nav-tabs" not in html and "システム・情報源と業務のつながり" in html and "Gr・役割・部署の間の受け渡し" in html and "領域別の把握状況" in html and "同じアウトプットを複数人が作成" in html and "classDef dupout" in html, "業務マップはタブなしの1ページ（図・表・把握状況・重複）")
+    check('id="map-wp" class="form-select form-select-sm" onchange="this.form.submit()"' in html and 'id="map-domain" class="form-select form-select-sm" onchange="this.form.submit()"' in html and ">表示</button>" not in html,
+          "業務マップの Gr・役割・業務領域は、プルダウンを切り替えた時点で表示し直す（表示ボタンはない）")
     r = client.get("/bizmap/domain/2")
     check(r.status_code == 200, "domain page renders")
 
