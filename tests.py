@@ -2222,9 +2222,13 @@ def _people_round2_checks(check):
           and "6か月より前" not in html and review not in html and later not in html and (c2.get("accompanied"), c1x.get("accompanied")) == ("1 件", "0 件"),
           f"R3-1・R3-2: 人財一覧の進め方は古い答えでも灰色や「6か月より前」を付けず、答えた月をそのまま出す。「担当区分の見直しを」も出さず、伴走は件数の列で出す: {c5} {c2}")
     by_id = {x[0]: x for x in rows[1:]}
-    check(by_id["A002"][6] == f"スキルを身につけながら、一緒にやってみたい（{later}・{review}）" and by_id["A001"][6] == f"スキルを身につけながら、一緒にやってみたい（{later}）"
-          and by_id["A003"][6] == "スキルを身につけながら、一緒にやってみたい" and by_id["A005"][8] == f"{period_label(stale)}（6か月より前）" and by_id["A006"][8] == period_label(prev),
-          f"R3-3: 回答者CSVの意欲の列にも同じ注記（その後の月次で依頼したい・担当区分の見直しを）、月度の列に「6か月より前」: {by_id['A002'][6]} / {by_id['A005'][8]}")
+    yes_w = "スキルを身につけながら、一緒にやってみたい"
+    check(rows[0][5:13] == ["自分で改善したい", "意欲（自動化アイテム登録）", later, review, "月次の進め方（空でない直近の答え）", "その月度", "その月度が6か月より前", "月次で自分で・一緒にと答えた回数"]
+          and rows[0][-2:] == ["伴走の業務", "希望の業務"] and all(len(x) == len(rows[0]) for x in rows)
+          and by_id["A002"][6:9] == [yes_w, "○", "○"] and by_id["A001"][6:9] == [yes_w, "○", ""] and by_id["A003"][6:9] == [yes_w, "", ""]
+          and by_id["A005"][10:12] == [period_label(stale), "○"] and by_id["A006"][10:12] == [period_label(prev), ""]
+          and by_id["A002"][-2:] == ["A2の業務", ""] and by_id["A003"][-2:] == ["A3の業務", ""] and by_id["A001"][-2:] == ["", "A1の業務"],
+          f"R3-3: 回答者CSVは1列に1つの情報。注記（その後の月次で依頼したい・担当区分の見直しを・その月度が6か月より前）はそれぞれ別の列に ○、伴走と希望の業務も別の列: {by_id['A002']}")
 
     captured = []
     real_ai = app_module.suggest_actions_ai
@@ -2373,8 +2377,8 @@ def _people_round4_checks(check):
     by_id = {x[0]: x for x in rows[1:]}
     check(c1["wish"] == yes and (c1["wish_note"], c1["wish_hint"]) == ("", "") and c1["wish_positive"] and c1["positive"] and (c2["wish_note"], c2["wish_hint"]) == (later, review)
           and later not in html and review not in html
-          and by_id["C001"][6] == yes and by_id["C002"][6] == f"チェックなし（{later}・{review}）",
-          f"R4-1: 依頼したいと答えたあとに「一緒にやってみたい」にチェックした業務を登録したら、いちばん新しいのはチェックなので「{later}」「{review}」を出さない（回答者CSVも同じ）: {by_id['C001'][6]} / {by_id['C002'][6]}")
+          and by_id["C001"][6:9] == [yes, "", ""] and by_id["C002"][6:9] == ["チェックなし", "○", "○"],
+          f"R4-1: 依頼したいと答えたあとに「一緒にやってみたい」にチェックした業務を登録したら、いちばん新しいのはチェックなので「{later}」「{review}」に印を付けない（回答者CSVも同じ）: {by_id['C001'][6:9]} / {by_id['C002'][6:9]}")
 
     # ---- R4-3: 前の月度にあとから答えても、回答者・人財一覧のいまの職場・勤務形態は変えない ----
     base = {"has": "ある", "hours": list(app_module.MONTHLY_HOURS_OPTIONS)[1], "task_names": "日報の集計", "trend": "変わらない", "wants": "ない"}

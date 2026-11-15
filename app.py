@@ -1281,13 +1281,6 @@ def dx_people(workplace_id=None, wish=None, include_excluded=False):
     rows.sort(key=lambda p: (not p["positive"], wish_rank.get(p["wish"], 9), 9 if p["stance_old"] else stance_rank.get(p["stance_latest"], 9), p["workplace_id"] or 0, p["name"]))
     return rows
 
-def wish_text(p):
-    note = "・".join(x for x in (p["wish_note"], p["wish_hint"]) if x)
-    return p["wish"] + (f"（{note}）" if p["wish"] and note else "")
-
-def stance_period_text(p):
-    return p["stance_label"] + (f"（{C.STANCE_MONTHS}か月より前）" if p["stance_old"] else "")
-
 # ----- 次のアクション提案（ルールベース） -----
 def suggest_actions(limit=10):
     suggestions = []
@@ -7580,16 +7573,21 @@ def export_members():
     return header, rows
 
 
+def _target_names(p, label):
+    return "・".join(x["task"].name for x in p["target_tasks"] if x["label"] == label)
+
 def export_respondents():
-    header = ["ユーザーID", "氏名", "Gr・役割", "勤務形態", "班", "自分で改善したい", "意欲（自動化アイテム登録）", "月次の進め方（空でない直近の答え）", "その月度", "月次で自分で・一緒にと答えた回数",
-              "使える技術", "学びたい技術", "登録業務数", "月間時間(分)", "一緒にやってみたい業務数", "伴走・希望の業務"]
+    header = ["ユーザーID", "氏名", "Gr・役割", "勤務形態", "班", "自分で改善したい", "意欲（自動化アイテム登録）", C.SELF_IMPROVE_LATER_ASK, C.ASSIGNMENT_REVIEW,
+              "月次の進め方（空でない直近の答え）", "その月度", f"その月度が{C.STANCE_MONTHS}か月より前", "月次で自分で・一緒にと答えた回数",
+              "使える技術", "学びたい技術", "登録業務数", "月間時間(分)", "一緒にやってみたい業務数", f"{C.BUILD_STAGE_SELF}の業務", "希望の業務"]
+    mark = lambda v: "○" if v else ""
     rows = []
     for p in dx_people():
         rows.append([
-            p["emp_id"], p["name"], p["workplace"].name if p["workplace"] else "", p["work_pattern"], p["shift_team"], "○" if p["positive"] else "", wish_text(p),
-            p["stance_latest"], stance_period_text(p), p["self_positive_count"] if p["monthly"] else "",
+            p["emp_id"], p["name"], p["workplace"].name if p["workplace"] else "", p["work_pattern"], p["shift_team"], mark(p["positive"]), p["wish"],
+            mark(p["wish_note"]), mark(p["wish_hint"]), p["stance_latest"], p["stance_label"], mark(p["stance_old"]), p["self_positive_count"] if p["monthly"] else "",
             "・".join(p["skills"]) or (C.SKILL_NONE if p["skills_none"] else ""), "・".join(p["learn"]) or (C.SKILL_NONE if p["learn_none"] else ""),
-            p["task_count"], p["minutes"], p["checked_count"], "・".join(f"{x['task'].name}（{x['label']}）" for x in p["target_tasks"]),
+            p["task_count"], p["minutes"], p["checked_count"], _target_names(p, C.BUILD_STAGE_SELF), _target_names(p, "希望"),
         ])
     return header, rows
 
