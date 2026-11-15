@@ -801,14 +801,19 @@ def smoke_board():
     check("最近の動き" not in html and "pb-funnel" not in html, "最近の動き・集計帯がない")
     check("田中 一郎" in html, "依頼者名が出る（既定）")
     check("大画面" not in html and "pb-chip" not in html and "pb-scope-select" in html and ">製造1課</option>" in html and "<footer" not in html, "大画面リンクなし・職場は見出しのプルダウン・フッターなし")
-    check("pb-strip" in html and "累計改善案件" in html and "年間削減工数" in html and "削減率" in html and "自主改善者" not in html and "自動化・廃止業務" not in html and "先月より減った" not in html, "活動状況: 指標は累計改善案件と年間削減工数の2枚")
+    check("pb-strip" in html and "累計改善案件" not in html and "年間削減工数" in html and "削減率" in html and "自主改善者" not in html and "自動化・廃止業務" not in html and "先月より減った" not in html
+          and 'aria-label="これまでの成果"' in html and "pb-row:hover" not in client.get("/static/style.css").data.decode("utf-8"),
+          "活動状況: 件数は見出しだけに出し（累計改善案件のカードはない）、指標は年間削減工数。行は押せないので浮かせない")
+    with app.app_context():
+        n_done = len([t for t in Task.query.all() if t.status == "完了"])
+    check(("新しい 8 件を表示" in html) == (n_done > 8), f"活動状況: 完了が8件より多いときは「新しい 8 件を表示」と添える（完了 {n_done} 件）")
     check(html.count("pb-case-name") == 2 and "不良品発生報告のメール配信" in html and "pb-case-num" in html, "活動状況: 直近の完了2件が同じ行に並ぶ")
     with app.app_context():
         wp_tasks = Task.query.filter_by(workplace_id=2).all()
         wp_total = len(wp_tasks)
         wp_done = len([t for t in wp_tasks if t.status == "完了"])
     code, html = page("/board/?workplace_id=2")
-    check(code == 200 and f'<div class="stat-value">{wp_total}<span class="stat-unit">件</span></div>' in html and f"完了 {wp_done} " in html, f"職場を選ぶとカードの数字もその職場の値（{wp_total} 件）")
+    check(code == 200 and f'class="pb-total">全<b>{wp_total}</b>件' in html and f"完了<b>{wp_done}</b>" in html, f"職場を選ぶと見出しの件数もその職場の値（{wp_total} 件）")
     check("自動化アイテムとして登録してみませんか" in html and "自動化アイテムを登録する</a>" in html and "自動化を検討" not in html and 'href="/survey/"' in html and 'href="/monthly/"' in html, "掲示板: 自動化依頼と月次アンケートへの導線")
 
     with app.app_context():
@@ -1154,7 +1159,8 @@ def smoke_login_monthly():
         code, html, r = get(url)
         check(code == 302 and "/login" in r.headers["Location"], f"未ログイン: {url} はログインへ")
     code, html, r = get("/login")
-    check(code == 200 and "パスワード" in html and "許可リスト" not in html, "ログイン画面")
+    check(code == 200 and "パスワード" in html and "許可リスト" not in html and "月次アンケート・自動化アイテム登録・活動状況はログインなしで使えます" in html,
+          "ログイン画面（回答者が使う画面はログインなしで使えると、自動化アイテム登録も含めて案内する）")
 
     # ---- ログイン（固定の管理者アカウント） ----
     r = client.post("/login", data={"emp_id": "admin", "password": "wrong"})
@@ -1257,6 +1263,9 @@ def smoke_login_monthly():
     r = client.post("/monthly/submit", data=form)
     check(r.status_code == 302 and "/monthly/done" in r.headers["Location"], "通常のフォーム送信でも受付")
     code, html, r = get(f"/monthly/done?period={period}")
+    r_again = client.get(f"/monthly/done?period={period}")
+    check(r_again.status_code == 302 and "/monthly/" in r_again.headers["Location"] and "/done" not in r_again.headers["Location"],
+          "完了ページを直接（もう一度）開いたときは「受け付けました」を出さず、回答フォームへ送る")
     check(code == 200 and "回答を受け付けました" in html and "自動化アイテムを登録する" in html and "自動化を検討" not in html and "src=monthly" in html and "日報の転記" in html, "完了ページ（なくしたい業務があれば「自動化アイテムを登録する」へ）")
     with app.app_context():
         MonthlyResponse.query.filter_by(period=period, emp_id="DEMO-001").delete()
@@ -2418,6 +2427,17 @@ def smoke_request():
     check("addedIds.push(j.task.id)" in js_rq and "var added = S.tasks.filter(function (t) { return addedIds.indexOf(t.id) >= 0; });" in js_rq and "if (!added.length) { updateActions(); return; }" in js_rq
           and "今回登録した業務" in js_rq and js_rq.count("addedIds = [];") == 3 and "backToPick(true);\n    updateActions();" in js_rq,
           "送信して完了は、この画面で登録した業務だけを数える（ボタンは登録したあとにしか出さず、完了したら入力欄が出たままでも消す）")
+    sfm = js_rq.split("async function startFromMonthly()", 1)[1].split("startIntake(false, \"monthly\", next);", 1)[0]
+    check(sfm.index("savePerson(false)") < sfm.index("var next = nextMonthlyTask();") and "すべて登録済みです" in sfm and "normName(t.monthly_name) === n" in js_rq,
+          "月次アンケートから来たときは、登録済みの業務を読み込んでから次の業務を決め、AI が名前を変えた登録済みの業務も同じ業務として扱う（再読み込みでやり直さない）")
+    html_rq = app.test_client().get("/survey/").data.decode("utf-8")
+    check("前回の続きから登録できます" not in js_rq and 'toast("送信しました")' not in js_rq and "3つ選んで" not in html_rq and "あと少しです。下の項目を選んで登録してください。" in html_rq,
+          "古い知らせ（前回の続きから・送信しました・3つ選んで）は出さない")
+    check("this.disabled = true;" in js_rq and "if (!conv.finalReady) {" in js_rq and 'finalBox.classList.add("d-none");\n    $("rq-confirm-yes").disabled = false;' in js_rq
+          and 'if (done) $("rq-confirm-yes").disabled = false;' in js_rq and "input.placeholder = INPUT_PH;" in js_rq,
+          "「はい」は一度押したら止め、選んだ頻度・希望は「直したい」のあとも消さない。「直したい」で下の欄を閉じ、次の聞き取りでは入力欄の例文を戻す")
+    check('id="rq-name-field"' in html_rq and 'fieldError("name", "業務名を入れてください")' in js_rq and '$("rq-name-field").classList.toggle("d-none", !!(conv.state.title || conv.title));' in js_rq,
+          "業務名が決まらないまま流れができたときは、最後の欄で業務名を入れてもらう（入れる欄のない「業務名を入力してください」で止まらない）")
     check("function updateActions()" in js_rq and '$("rq-start").classList.toggle("d-none", !picking);' in js_rq and 'finishBtn.classList.toggle("d-none", !addedIds.length || !(picking || done));' in js_rq and "new MutationObserver(updateActions)" in js_rq,
           "下のボタンは段階で切り替える（業務名を入れる段階は「聞き取りを始める」、この画面で登録したあとは「送信して完了」も出す。聞き取り中は出さない）")
     check('$("rq-history").classList.toggle("d-none", !S.tasks.length);' in js_rq and 'el("span", "rq-reg-new", "今回")' in js_rq and "rq-registered-count" not in js_rq,
@@ -2726,7 +2746,13 @@ def smoke_request():
     client.post("/logout")
     client.post("/survey/api/respondent", json={"emp_id": "T002", "name": "試験 次郎", "workplace_id": 1, "work_pattern": "普通勤務"})
     r = client.post("/survey/api/intake", json={"emp_id": "T002", "title": "x", "messages": [], "state": {}})
-    check(r.status_code == 400 and "AI連携が設定されていません" in r.get_json()["message"], "AI 未設定なら聞き取りは始められず、設定を案内する")
+    check(r.status_code == 400 and r.get_json()["message"] == "いまは AI の聞き取りを使えません。改善チームに連絡してください" and "管理画面" not in r.get_json()["message"],
+          "AI 未設定なら聞き取りは始められず、回答者には改善チームへの連絡を案内する（管理画面の話はしない）")
+    html_off = client.get("/survey/").data.decode("utf-8")
+    check("いまは AI の聞き取りを使えないため、登録できません" in html_off and 'id="rq-start" disabled' in html_off and "ai: false" in html_off,
+          "AI 未設定のときは、自動化アイテム登録の画面に知らせを出し、「聞き取りを始める」を押せなくする")
+    big = client.post("/survey/api/intake", data=b"x" * (3 * 1024 * 1024), headers={"Content-Type": "application/json", "Accept": "application/json"})
+    check(big.status_code == 413 and "写真が大きすぎます" in (big.get_json() or {}).get("message", ""), "大きすぎる写真は「写真が大きすぎます」と返す（4MB と書かない）")
 
     _survey_round2_checks(check)
     return fails
@@ -2780,7 +2806,7 @@ def _survey_round2_checks(check):
     r = client.post("/survey/api/respondent", json={"emp_id": "S001", "workplace_id": 1, "work_pattern": "普通勤務"})
     with app.app_context():
         n_resp = Respondent.query.filter(db.func.lower(Respondent.emp_id) == "s001").count()
-    check(r.status_code == 200 and r.get_json()["resumed"] is True and n_resp == 1, "R2-8: 「あなたのこと」の回答者も大文字・小文字の違いで別の人にしない")
+    check(r.status_code == 200 and "resumed" not in r.get_json() and n_resp == 1, "R2-8: 「あなたのこと」の回答者も大文字・小文字の違いで別の人にしない")
     check(r.get_json()["suggested"] == ["今月の業務"], f"R2-12: 引き継ぎがなければ候補は直近の月次の回答から: {r.get_json()['suggested']}")
 
     html = client.get("/survey/", query_string={"emp": "S001", "src": "monthly", "m": old_id}).data.decode("utf-8")

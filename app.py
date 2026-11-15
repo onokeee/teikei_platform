@@ -5843,7 +5843,6 @@ def api_respondent():
         return jsonify({"success": False, "errors": errors}), 400
     newest = current_period() >= newest_period(emp_id)
     r = _respondent_for(emp_id)
-    resumed = r is not None
     if r is None:
         r = Respondent(emp_id=emp_id)
         db.session.add(r)
@@ -5855,7 +5854,7 @@ def api_respondent():
     remember_person(emp_id, name, workplace_id if newest else None, work_pattern if newest else None)
     db.session.commit()
     session["respondent_id"] = r.id
-    return jsonify({"success": True, "resumed": resumed, **_state(r)})
+    return jsonify({"success": True, **_state(r)})
 
 @bp_survey.post("/api/reset")
 def api_reset():
@@ -6021,10 +6020,10 @@ def api_intake():
     if not state["title"] and data.get("title"):
         state["title"] = mask_person_names(str(data.get("title")).strip())[:200]
     image = data.get("image") or None
-    if image is not None and (not isinstance(image, str) or len(image) > 6_000_000 or not _IMAGE_PREFIX.match(image)):
-        return jsonify({"success": False, "message": "写真は PNG・JPEG・WebP・GIF で、4MB までにしてください"}), 400
+    if image is not None and (not isinstance(image, str) or not _IMAGE_PREFIX.match(image)):
+        return jsonify({"success": False, "message": "写真は PNG・JPEG・WebP・GIF の画像にしてください"}), 400
     if not ai_enabled():
-        return jsonify({"success": False, "message": "AI連携が設定されていません。管理画面の「AI連携」で URL・API キー・モデル名を設定してください"}), 400
+        return jsonify({"success": False, "message": "いまは AI の聞き取りを使えません。改善チームに連絡してください"}), 400
     used = set()
     origin = "monthly" if data.get("origin") == "monthly" else ""
     result = ai_intake(messages, state, image, r.work_pattern or "", handlers=intake_handlers(r, used), tools=intake_tools_for(state), origin=origin)
@@ -7221,7 +7220,9 @@ def done():
     row = db.session.get(MonthlyResponse, last) if last else None
     if row is not None and row.period != period:
         row = _response_for(period, row.emp_id)
-    wants = monthly_task_names(row.answer("wants_tasks")) if row is not None and row.answer("wants") == "ある" else []
+    if row is None:
+        return redirect(url_for("monthly.form", period=period))
+    wants = monthly_task_names(row.answer("wants_tasks")) if row.answer("wants") == "ある" else []
     return render_template("monthly/done.html", period_label=period_label(period), row=row, wants_tasks=wants)
 
 @bp_monthly.route("/api/employee/<emp_id>")
@@ -7639,8 +7640,6 @@ def highlights(tasks):
     recent = sorted(completed, key=lambda t: (t.completed_at or datetime.min, t.id), reverse=True)[:2]
     return {
         "tasks": len(tasks),
-        "status_counts": Counter(t.status for t in tasks),
-        "completed": len(completed),
         "saved_hours": saved_minutes / 60.0,
         "saved_annual_hours": saved_minutes * 12 / 60.0,
         "reduction_rate": (saved_minutes / total_minutes * 100.0) if total_minutes else 0.0,
@@ -8270,7 +8269,7 @@ TEMPLATES = {
   <div class="card login-card"><div class="card-body">
     <div class="login-mark"><i class="bi bi-person-lock"></i></div>
     <h1 class="login-title">ログイン</h1>
-    <p class="login-sub">推進メンバー用です。アンケートの回答と活動状況はログインなしで使えます。</p>
+    <p class="login-sub">推進メンバー用です。月次アンケート・自動化アイテム登録・活動状況はログインなしで使えます。</p>
     {% if error %}<div class="alert alert-danger py-2 small">{{ error }}</div>{% endif %}
     <form method="post" action="{{ url_for('auth.login') }}">
       <input type="hidden" name="next" value="{{ next }}">
@@ -8832,15 +8831,10 @@ TEMPLATES = {
   </div>
 </header>
 
-{% if hl %}
-<section class="pb-wins" aria-label="これまでの成果と自動化アイテム登録への入口">
+{% if hl and (hl.tasks or hl.recent) %}
+<section class="pb-wins" aria-label="これまでの成果">
   <div class="pb-strip">
     {% if hl.tasks %}
-    <div class="card pb-stat"><div class="card-body">
-      <div class="stat-head"><span class="stat-tile tile-blue"><i class="bi bi-kanban"></i></span><span class="stat-label">累計改善案件</span></div>
-      <div class="stat-value">{{ hl.tasks }}<span class="stat-unit">件</span></div>
-      <div class="stat-sub">受付 {{ hl.status_counts.get('受付', 0) }} ・ 対応中 {{ hl.status_counts.get('対応中', 0) }} ・ 完了 {{ hl.completed }} ・ 保留 {{ hl.status_counts.get('保留', 0) }}</div>
-    </div></div>
     <div class="card pb-stat"><div class="card-body">
       <div class="stat-head"><span class="stat-tile tile-green"><i class="bi bi-hourglass-split"></i></span><span class="stat-label">年間削減工数</span></div>
       <div class="stat-value">{{ '%.0f'|format(hl.saved_annual_hours) }}<span class="stat-unit">時間</span></div>
@@ -8873,7 +8867,7 @@ TEMPLATES = {
 {% endif %}
 
 <section>
-  <h2 class="pb-section">完了 <span class="pb-n">{{ n_done }}</span>{% if n_done and current_user %}<a class="pb-link" href="{{ url_for('cases.index', stage='done') }}">完了した案件を見る</a>{% endif %}</h2>
+  <h2 class="pb-section">完了 <span class="pb-n">{{ n_done }}</span>{% if n_done > b.done_shown|length %}<span class="pb-more">新しい {{ b.done_shown|length }} 件を表示</span>{% endif %}{% if n_done and current_user %}<a class="pb-link" href="{{ url_for('cases.index', stage='done') }}">完了した案件を見る</a>{% endif %}</h2>
   {% for t in b.done_shown %}{{ row(t, show_names) }}{% else %}<div class="pb-empty">完了した案件はまだありません</div>{% endfor %}
 </section>
 
@@ -10595,6 +10589,7 @@ TEMPLATES = {
           <input type="text" class="form-control" id="rq-title" placeholder="分かる範囲で（例：日報の実績を集計表に転記する）" maxlength="200" aria-label="業務名">
         </div>
         <div id="rq-dup-note" class="rq-dup d-none"></div>
+        {% if not ai_enabled %}<div class="alert alert-warning py-2 small mt-2 mb-0">いまは AI の聞き取りを使えないため、登録できません。改善チームに連絡してください。</div>{% endif %}
       </div>
 
       <div id="rq-intake" class="rq-intake d-none">
@@ -10633,7 +10628,8 @@ TEMPLATES = {
       </div>
 
       <div id="rq-final" class="rq-final d-none">
-        <div class="rq-final-title">あと少しです。3つ選んで登録してください。</div>
+        <div class="rq-final-title">あと少しです。下の項目を選んで登録してください。</div>
+        <div class="rq-field d-none" data-key="name" id="rq-name-field"><div class="rq-label"><span>業務名</span><span class="rq-req">必須</span></div><input type="text" class="form-control" id="rq-name" maxlength="200" placeholder="例：日報の実績を集計表に転記する" aria-label="業務名"><div class="rq-err"></div></div>
         <div class="rq-field" data-key="frequency"><div class="rq-label"><span>頻度</span><span class="rq-req">必須</span></div><div class="rq-pills" id="rq-frequency"></div><div class="rq-err"></div></div>
         <div class="rq-field" data-key="duration"><div class="rq-label"><span>1回の時間</span><span class="rq-req">必須</span></div><div class="rq-pills" id="rq-duration"></div><div class="rq-err"></div></div>
         <div class="rq-field d-none" data-key="shift" id="rq-shift-field"><div class="rq-label"><span>この業務はいつやりますか</span><span class="rq-req">必須</span></div><div class="rq-pills" id="rq-shift"></div><div class="rq-err"></div></div>
@@ -10673,7 +10669,7 @@ TEMPLATES = {
   </section>
 
   <div class="rq-finish" id="rq-actions">
-    <button type="button" class="btn btn-primary btn-lg" id="rq-start"><i class="bi bi-chat-dots"></i> 聞き取りを始める</button>
+    <button type="button" class="btn btn-primary btn-lg" id="rq-start"{% if not ai_enabled %} disabled{% endif %}><i class="bi bi-chat-dots"></i> 聞き取りを始める</button>
     <button type="button" class="btn btn-outline-primary btn-lg d-none" id="rq-finish"><i class="bi bi-send"></i> 送信して完了</button>
   </div>
 
@@ -10694,6 +10690,7 @@ TEMPLATES = {
 <script>
   window.RQ_CONFIG = {
     emp: {{ emp|tojson }},
+    ai: {{ ai_enabled|tojson }},
     prefill: {{ prefill|tojson }},
     monthly: {{ monthly|tojson }},
     api: {
@@ -12559,7 +12556,7 @@ html { scroll-behavior: smooth; }
 .card, .pb-row, .pb-waiting li, .btn, .nav-link, .form-control, .form-select, .badge, .list-group-item, .table > tbody > tr {
   transition: background-color 0.18s ease, color 0.18s ease, border-color 0.18s ease, box-shadow 0.22s ease, transform 0.18s ease;
 }
-.pb-row:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.09); }
+.pb-more { font-size: 0.8rem; font-weight: 500; color: var(--ui-text-2); margin-left: 0.5rem; }
 .pb-waiting li:hover { background: #fafafc; }
 .btn:active { transform: scale(0.97); }
 .btn-primary:hover, .btn-success:hover { box-shadow: 0 4px 14px rgba(0, 0, 0, 0.14); }
@@ -12934,14 +12931,14 @@ summary { transition: color 0.15s ease; }
 .rq-suggest-row { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; width: 100%; }
 .rq-from { background: var(--ui-accent-soft); border-radius: var(--ui-radius-sm); padding: 0.7rem 0.9rem; margin-bottom: 0.9rem; }
 .rq-from-title { font-weight: 700; color: var(--ui-accent-text); margin-bottom: 0.15rem; }
-.rq-from-list { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.45rem; }
-.rq-from-item { background: var(--ui-surface); border-radius: 999px; padding: 0.15rem 0.7rem; font-size: 0.85rem; }
+.rq-from-list { display: flex; flex-wrap: wrap; gap: 0.15rem 1rem; margin-top: 0.45rem; }
+.rq-from-item { font-size: 0.88rem; }
 .rq-from-item.is-done { color: var(--ui-green-text); }
-.rq-from-item.is-now { font-weight: 700; color: var(--ui-accent-text); box-shadow: 0 0 0 1.5px var(--ui-accent); }
+.rq-from-item.is-now { font-weight: 700; color: var(--ui-accent-text); }
 .mq-next { margin-top: 1.1rem; padding-top: 1rem; border-top: 1px solid var(--ui-line); }
 .mq-next-title { font-weight: 700; margin-bottom: 0.45rem; }
-.mq-next-tasks { display: flex; flex-wrap: wrap; justify-content: center; gap: 0.35rem; margin-bottom: 0.6rem; }
-.mq-next-tasks span { background: var(--ui-fill); border-radius: 999px; padding: 0.2rem 0.75rem; font-size: 0.88rem; }
+.mq-next-tasks { display: flex; flex-wrap: wrap; justify-content: center; gap: 0.15rem 0.9rem; margin-bottom: 0.6rem; font-size: 0.92rem; }
+.mq-next-tasks span::before { content: "・"; color: var(--ui-text-2); }
 .rq-pick-row { display: flex; gap: 0.5rem; }
 .rq-pick-row .btn { white-space: nowrap; }
 .rq-intake { display: grid; grid-template-columns: 1.1fr 1fr; gap: 1rem; align-items: start; }
@@ -13228,10 +13225,7 @@ summary { transition: color 0.15s ease; }
       S.respondent = j.respondent;
       S.stance = j.stance || null;
       confirmedId = normId(j.respondent.emp_id);
-      if (changed) {
-        takeTasks(j);
-        if (j.resumed && S.tasks.length) toast("前回の続きから登録できます");
-      }
+      if (changed) takeTasks(j);
       personBox.querySelectorAll(".rq-field").forEach(clearError);
       setIdentity(ID_OK);
       return true;
@@ -13245,6 +13239,7 @@ summary { transition: color 0.15s ease; }
   var msgBox = $("rq-messages"), chipBox = $("rq-chips"), input = $("rq-input"), flowBox = $("rq-flow"), stepsBox = $("rq-steps");
   var titleInput = $("rq-title"), bulkBox = $("rq-bulk"), bulkText = $("rq-bulk-text");
   var conv = null, busy = false, addedIds = [];
+  var INPUT_PH = input.placeholder, AI_OFF = "いまは AI の聞き取りを使えません。改善チームに連絡してください";
 
   function showOnly(box) {
     [pickBox, intakeBox, finalBox, resultBox].forEach(function (b) { b.classList.toggle("d-none", b !== box); });
@@ -13324,15 +13319,17 @@ summary { transition: color 0.15s ease; }
   }
   async function startFromMonthly() {
     renderMonthlyBanner();
-    var next = nextMonthlyTask();
-    if (!next) return;
-    titleInput.value = next;
+    titleInput.value = nextMonthlyTask();
     if (!S.respondent) {
       fillSelects(CFG.monthly.workplace_id, CFG.monthly.work_pattern);
       await lookupEmp();
       var ok = await savePerson(false);
       if (!ok) { toast("「基本情報」の空欄を選ぶと始められます"); return; }
     }
+    var next = nextMonthlyTask();
+    titleInput.value = next;
+    renderMonthlyBanner();
+    if (!next) { toast("月次アンケートで挙げた業務は、すべて登録済みです"); return; }
     startIntake(false, "monthly", next);
   }
   // 会話の欄に足して、いちばん下まで送る
@@ -13421,6 +13418,7 @@ summary { transition: color 0.15s ease; }
     appendMsg(n);
   }
   function setFlowDone(done) {
+    if (done) $("rq-confirm-yes").disabled = false;
     $("rq-confirm").classList.toggle("d-none", !done);
     $("rq-inputrow").classList.toggle("d-none", done);
     $("rq-flowpane").classList.toggle("is-done", done);
@@ -13489,7 +13487,7 @@ summary { transition: color 0.15s ease; }
     });
   }
   function normName(v) { return (v || "").normalize("NFKC").replace(/\s+/g, "").toLowerCase(); }
-  function ownTask(name) { var n = normName(name); return n ? (S.tasks || []).filter(function (t) { return normName(t.name) === n; })[0] : null; }
+  function ownTask(name) { var n = normName(name); return n ? (S.tasks || []).filter(function (t) { return normName(t.name) === n || normName(t.monthly_name) === n; })[0] : null; }
   function showDupNote(task, origin, monthlyName) {
     var box = $("rq-dup-note");
     box.innerHTML = "";
@@ -13499,6 +13497,7 @@ summary { transition: color 0.15s ease; }
     box.classList.remove("d-none");
   }
   async function startIntake(skipDup, origin, monthlyName) {
+    if (!CFG.ai) { toast(AI_OFF); return; }
     if (!S.respondent) {
       var ok = await savePerson(true);
       if (!ok) { toast("先に「基本情報」を入力してください"); return; }
@@ -13518,6 +13517,7 @@ summary { transition: color 0.15s ease; }
     $("rq-flow-title").textContent = title || "流れ図";
     $("rq-stepcount").textContent = "手順 0";
     $("rq-progress").textContent = "AI が質問します";
+    input.placeholder = INPUT_PH;
     bulkBox.classList.add("d-none");
     showOnly(intakeBox);
     setFlowDone(false);
@@ -13562,26 +13562,36 @@ summary { transition: color 0.15s ease; }
     }
   });
   $("rq-confirm-no").addEventListener("click", function () {
+    if (!conv) return;
     conv.done = false;
+    finalBox.classList.add("d-none");
+    $("rq-confirm-yes").disabled = false;
     setFlowDone(false);
     $("rq-progress").textContent = "直したいところを教えてください";
     input.placeholder = "例：2番は違う。先に課長に確認する";
     input.focus();
   });
   $("rq-confirm-yes").addEventListener("click", function () {
-    setPill($("rq-frequency"), conv.state.frequency);
-    setPill($("rq-duration"), conv.state.duration);
-    setPill($("rq-wish"), "");
-    var shiftWork = !!(S.respondent && S.respondent.work_pattern === "交代勤務");
-    $("rq-shift-field").classList.toggle("d-none", !shiftWork);
-    setPill($("rq-shift"), conv.state.shift);
-    var st = S.stance;
-    var preset = !!(st && st.self_improve);
-    $("rq-self").checked = preset;
-    $("rq-skills").classList.toggle("d-none", !preset);
-    fillSkills();
-    $("rq-self-note").textContent = preset ? "月次アンケート（" + st.period_label + "）で「" + st.value + "」と答えたので、チェックを入れています（外せます）" : "";
-    $("rq-self-note").classList.toggle("d-none", !preset);
+    if (!conv) return;
+    this.disabled = true;
+    if (!conv.finalReady) {
+      conv.finalReady = true;
+      setPill($("rq-frequency"), conv.state.frequency);
+      setPill($("rq-duration"), conv.state.duration);
+      setPill($("rq-wish"), "");
+      var shiftWork = !!(S.respondent && S.respondent.work_pattern === "交代勤務");
+      $("rq-shift-field").classList.toggle("d-none", !shiftWork);
+      setPill($("rq-shift"), conv.state.shift);
+      var st = S.stance;
+      var preset = !!(st && st.self_improve);
+      $("rq-self").checked = preset;
+      $("rq-skills").classList.toggle("d-none", !preset);
+      fillSkills();
+      $("rq-self-note").textContent = preset ? "月次アンケート（" + st.period_label + "）で「" + st.value + "」と答えたので、チェックを入れています（外せます）" : "";
+      $("rq-self-note").classList.toggle("d-none", !preset);
+      $("rq-name").value = "";
+    }
+    $("rq-name-field").classList.toggle("d-none", !!(conv.state.title || conv.title));
     finalBox.classList.remove("d-none");
     finalBox.scrollIntoView({ behavior: "smooth", block: "start" });
   });
@@ -13605,18 +13615,20 @@ summary { transition: color 0.15s ease; }
     on($("rq-skills-learn"), S.respondent && S.respondent.c3_learn);
   }
   $("rq-self-label").textContent = O.self_improve_yes;
+  $("rq-name").addEventListener("input", function () { clearError($("rq-name-field")); });
   $("rq-self").addEventListener("change", function () { $("rq-skills").classList.toggle("d-none", !this.checked); });
   $("rq-save-task").addEventListener("click", async function () {
     if (!conv) return;
     var btn = this;
     var body = {
-      name: conv.state.title || conv.title, state: conv.state, messages: conv.messages,
+      name: conv.state.title || conv.title || $("rq-name").value.trim(), state: conv.state, messages: conv.messages,
       frequency: pillValue($("rq-frequency")), duration: pillValue($("rq-duration")), wish: pillValue($("rq-wish")),
       force: !!(conv.allowDup && normName(conv.state.title || conv.title) === conv.allowDup),
       self_improve: $("rq-self").checked, skills: pillValues($("rq-skills-have")), learn: pillValues($("rq-skills-learn")),
       shift: pillValue($("rq-shift")), monthly_name: conv.monthlyName || ""
     };
     var missing = false;
+    if (!body.name) { fieldError("name", "業務名を入れてください"); missing = true; }
     if (S.respondent && S.respondent.work_pattern === "交代勤務" && !body.shift) { fieldError("shift", "選んでください"); missing = true; }
     if (!body.frequency) { fieldError("frequency", "選んでください"); missing = true; }
     if (!body.duration) { fieldError("duration", "選んでください"); missing = true; }
@@ -13698,7 +13710,6 @@ summary { transition: color 0.15s ease; }
     var done = $("rq-done");
     done.classList.remove("d-none");
     done.scrollIntoView({ behavior: "smooth", block: "center" });
-    toast("送信しました");
     if (window.uiCelebrate) window.uiCelebrate();
   });
   function resetPage() {
@@ -13802,6 +13813,13 @@ def create_app(test_config=None):
     @app.errorhandler(404)
     def not_found(_error):
         return render_template("errors/404.html"), 404
+
+    @app.errorhandler(413)
+    def too_large(_error):
+        message = "写真が大きすぎます。もう少し小さい写真にしてください" if request.path.endswith("/api/intake") else f"送った内容が大きすぎます（{app.config['MAX_CONTENT_LENGTH'] // (1024 * 1024)}MB まで）"
+        if _wants_json():
+            return jsonify({"success": False, "message": message}), 413
+        return message, 413
 
     @app.errorhandler(500)
     def server_error(_error):
