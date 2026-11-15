@@ -10491,8 +10491,7 @@ document.getElementById("test-btn").addEventListener("click", async function () 
 
   <section class="card rq-card rq-sec" id="sec-task">
     <div class="card-body">
-      <div class="rq-sec-head"><span class="rq-no">2</span><span class="rq-sec-title">登録する業務</span><span class="rq-sec-sub" id="rq-registered-count"></span></div>
-      <div id="rq-registered" class="rq-registered"></div>
+      <div class="rq-sec-head"><span class="rq-no">2</span><span class="rq-sec-title">登録する業務</span></div>
 
       <div id="rq-from-monthly" class="rq-from d-none"></div>
       <div id="rq-pick">
@@ -10572,6 +10571,12 @@ document.getElementById("test-btn").addEventListener("click", async function () 
           <button type="button" class="btn btn-outline-primary" id="rq-another"><i class="bi bi-plus-lg"></i> 続けて別の業務を登録する</button>
         </div>
       </div>
+
+      <details class="rq-history d-none" id="rq-history">
+        <summary>これまでに登録した業務（<span id="rq-history-count">0</span> 件）</summary>
+        <p class="rq-history-note">確認用です（ここから選ぶ必要はありません）。同じ名前の業務を登録しようとすると、その場でお知らせします。進み具合は「活動状況」でも見られます。</p>
+        <div id="rq-registered" class="rq-registered"></div>
+      </details>
     </div>
   </section>
 
@@ -12784,6 +12789,15 @@ summary { transition: color 0.15s ease; }
 .rq-reg { display: flex; align-items: center; gap: 0.5rem; padding: 0.35rem 0.6rem; background: var(--ui-fill); border-radius: var(--ui-radius-sm); }
 .rq-reg-name { font-weight: 600; }
 .rq-reg-meta { color: var(--ui-text-2); font-size: 0.85rem; margin-left: auto; white-space: nowrap; }
+.rq-history { margin-top: 1.25rem; padding-top: 0.75rem; border-top: 1px dashed var(--ui-line); }
+.rq-history > summary { display: inline-flex; align-items: center; gap: 0.35rem; cursor: pointer; list-style: none; color: var(--ui-text-2); font-size: 0.85rem; }
+.rq-history > summary::-webkit-details-marker { display: none; }
+.rq-history > summary::before { content: "\25B8"; transition: transform 0.15s; }
+.rq-history[open] > summary::before { transform: rotate(90deg); }
+.rq-history-note { margin: 0.4rem 0 0.5rem; color: var(--ui-text-3); font-size: 0.78rem; }
+.rq-history .rq-reg { background: transparent; border: 1px solid var(--ui-line); font-size: 0.85rem; }
+.rq-history .rq-reg-name { font-weight: 500; }
+.rq-reg-new { padding: 0 0.45rem; border-radius: 999px; background: var(--ui-accent-soft); color: var(--ui-accent-text); font-size: 0.7rem; font-weight: 600; }
 .rq-suggest { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; margin-bottom: 0.6rem; }
 .rq-suggest-label { font-size: 0.85rem; color: var(--ui-text-2); }
 .rq-suggest-row { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; width: 100%; }
@@ -13103,10 +13117,12 @@ summary { transition: color 0.15s ease; }
   function renderRegistered() {
     var box = $("rq-registered");
     box.innerHTML = "";
-    $("rq-registered-count").textContent = S.tasks.length ? "登録済み " + S.tasks.length + " 件" : "";
+    $("rq-history").classList.toggle("d-none", !S.tasks.length);
+    $("rq-history-count").textContent = S.tasks.length;
     S.tasks.forEach(function (t) {
       var row = el("div", "rq-reg");
       row.appendChild(el("span", "rq-reg-name", t.name));
+      if (addedIds.indexOf(t.id) >= 0) row.appendChild(el("span", "rq-reg-new", "今回"));
       row.appendChild(el("span", "rq-reg-meta", "月 " + t.hours + " h・" + (t.wish || "") + (t.stage ? "・" + t.stage : "")));
       box.appendChild(row);
     });
