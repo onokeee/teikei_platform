@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import urllib.error
+import zipfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -1019,9 +1020,27 @@ def smoke_board():
         new_task = Task.query.filter_by(name="日報の実績をExcelの集計表に転記する").first()
         check(new_task.stage_dates["start"] == new_task.created_at, "開始の日付は登録日")
 
-    r = client.get("/cases/export.csv")
+    r = client.get("/export/tasks.csv")
     csv = r.data.decode("utf-8-sig")
     check("進捗段階" in csv and "段階更新日" in csv and "テスト" in csv, "CSVに進捗段階")
+    keys = ("tasks", "steps", "stage_logs", "members", "respondents", "monthly", "questions", "workplaces", "domains")
+    html = client.get("/export/").data.decode("utf-8")
+    check(all(f'href="/export/{k}.csv"' in html for k in keys) and 'href="/export/all.zip"' in html and 'href="/export/">CSV出力</a>' in html,
+          "CSV出力のタブに、アプリのすべての CSV と「すべてまとめて出力（ZIP）」が並ぶ")
+    z = zipfile.ZipFile(io.BytesIO(client.get("/export/all.zip").data))
+    check(sorted(n.rsplit("_", 1)[0] for n in z.namelist()) == sorted(keys) and z.read(z.namelist()[0]).startswith("\ufeff".encode("utf-8")),
+          f"ZIP にすべての CSV が入る（UTF-8 BOM 付き）: {z.namelist()}")
+    steps_csv = client.get("/export/steps.csv").data.decode("utf-8-sig")
+    logs_csv = client.get("/export/stage_logs.csv").data.decode("utf-8-sig")
+    members_csv = client.get("/export/members.csv").data.decode("utf-8-sig")
+    check("受け取り（どこから：何を（どのように））" in steps_csv and "各ラインから手書きの日報を集める" in steps_csv and "段階,日時,担当者" in logs_csv
+          and "ユーザーID,氏名,Gr・役割,勤務形態,対象,対象外にした日" in members_csv and "所属" not in members_csv.splitlines()[0],
+          "手順（1手順1行）・段階の記録・対象者一覧の CSV（対象者一覧に使わない所属・メールの列はない）")
+    check(client.get("/export/nothing.csv").status_code == 404 and app.test_client().get("/export/tasks.csv").status_code == 302, "CSV出力はログインが要り、ないデータは 404")
+    check(all(client.get(u).status_code == 404 for u in ("/cases/export.csv", "/monthly/export.csv", "/admin/export/respondents.csv", "/admin/employees/export.csv")),
+          "各画面にあった CSV のルートはない")
+    check(not any(".csv" in client.get(u).data.decode("utf-8") for u in ("/cases/", "/monthly/results", "/admin/", "/admin/employees")),
+          "改善案件・月次集計・管理・対象者一覧に CSV のボタンはない（CSV出力のタブに集める）")
 
     with app.app_context():
         before = StageLog.query.count()
@@ -1176,7 +1195,7 @@ def smoke_login_monthly():
     check(code == 200 and "PCの定型・定期業務あり" in html and "設問ごとの推移" in html and "trend-table" in html and "コメント" in html and "勤務形態別の推移" in html and "交代勤務" in html, "集計: 推移・設問ごとの推移・勤務形態別の推移・月度の詳細")
     code, html, r = get("/")
     check("月次アンケート（時系列）" in html and "一緒に取り組みたい" in html, "ダッシュボードの月次カード")
-    code, html, r = get("/monthly/export.csv")
+    code, html, r = get("/export/monthly.csv")
     csv = r.data.decode("utf-8-sig")
     check(code == 200 and "PCの定型・定期業務（繰り返しの手動作業）はありますか" in csv and "コメント" in csv, "CSV に設問の文章が列名で出る")
 
@@ -1883,7 +1902,7 @@ def _people_checks(check):
           and "自分で／一緒に 1回（回答 2 回中）" in html and "自分で／一緒に 0回（回答 1 回中）" in html and period_label(prev) in html and ">特になし<" in html,
           "P16・P20・P21・P23・P24: 対象者一覧の意欲・進め方・技術・業務の列（チェックなし・伴走・月次の進め方と回数・特になし・業務0件の人の自動化を検討へのリンク）")
     check(f">{len(people)}<span" in html and "業務を1件以上登録したか、月次アンケートに回答した人（対象外は除く）" in html, "P9: 対象者一覧の「回答した人」も同じ決まり")
-    rows = list(csv.reader(io.StringIO(client.get("/admin/export/respondents.csv").data.decode("utf-8-sig"))))
+    rows = list(csv.reader(io.StringIO(client.get("/export/respondents.csv").data.decode("utf-8-sig"))))
     by_id = {x[0]: x for x in rows[1:]}
     check(set(by_id) == set(people) and "P004" in by_id and "自分で取り組みたい" in by_id["P004"] and period_label(prev) in by_id["P004"] and by_id["P003"][5] == "チェックなし",
           f"P19: 回答者CSVは DX人財情報と同じ人・同じ値（月次だけの人も入る）: {sorted(by_id)}")
@@ -1969,7 +1988,7 @@ def _people_round2_checks(check):
     check(later in html and 'text-bg-secondary">スキルを身につけながら、一緒にやってみたい' in html and "直近6か月" in html, "R2-5・R2-6: 対象者一覧の意欲に灰色のバッジと「その後の月次で依頼したい」、判断の説明")
     html = client.get("/").data.decode("utf-8")
     check("いまのGr・役割" in html and "1人1回" in html, "R2-4: ダッシュボードのGr・役割別の注記")
-    rows = list(csv.reader(io.StringIO(client.get("/admin/export/respondents.csv").data.decode("utf-8-sig"))))
+    rows = list(csv.reader(io.StringIO(client.get("/export/respondents.csv").data.decode("utf-8-sig"))))
     check("月次の進め方（空でない直近の答え）" in rows[0] and "月次の進め方（直近の回答）" not in rows[0], "R2-7: 回答者CSVの見出しは「月次の進め方（空でない直近の答え）」")
     review = "担当区分の見直しを"
     check(a5["stance_old"] and not a6["stance_old"] and a2["wish_hint"] == review and a2["positive"] and a1["wish_hint"] == "" and a3["wish_hint"] == "",
@@ -2128,7 +2147,7 @@ def _people_round4_checks(check):
     c1, c2 = people["C001"], people["C002"]
     html = client.get("/admin/employees").data.decode("utf-8")
     row_of = lambda e: next((x for x in html.split("<tr") if f">{e}<" in x), "")
-    rows = list(csv.reader(io.StringIO(client.get("/admin/export/respondents.csv").data.decode("utf-8-sig"))))
+    rows = list(csv.reader(io.StringIO(client.get("/export/respondents.csv").data.decode("utf-8-sig"))))
     by_id = {x[0]: x for x in rows[1:]}
     check(c1["wish"] == yes and (c1["wish_note"], c1["wish_hint"]) == ("", "") and c1["wish_positive"] and c1["positive"] and (c2["wish_note"], c2["wish_hint"]) == (later, review)
           and later not in row_of("C001") and review not in row_of("C001") and f'text-bg-success">{yes}' in row_of("C001") and review in row_of("C002")
@@ -2603,7 +2622,7 @@ def smoke_request():
         check(code == 200 and "日報の集計" in html, "業務マップに新しい案件が載る")
         code, html, r = get("/cases/?wish=まずは相談したい")
         check(code == 200 and "相談したい業務" in html, "改善案件の一覧を「まずは相談したい」で絞れる")
-        csv_text = client.get("/cases/export.csv").data.decode("utf-8-sig")
+        csv_text = client.get("/export/tasks.csv").data.decode("utf-8-sig")
         check("手順（聞き取り）" in csv_text and "1. 生産管理システムから前日の実績をCSVで出す［生産管理システム］" in csv_text and "4. 課長にメールで送る［メール］（課長へ）" in csv_text and ",夜勤," in csv_text and "AI推定の項目" in csv_text, "改善案件の CSV に勤務・手順（システム・渡す相手・渡し方）・AI推定の項目が出る")
         header = csv_text.splitlines()[0].split(",")
         check(all(h in header for h in ("分からなかったこと", "改善後の流れ（AI案）", "ECRSメモ 排除（Eliminate）", "ECRSメモ 簡素化（Simplify）", "改善内容・結果", "確認者")) and "CSV を Power Query で取り込む → 集計表が自動で更新される" in csv_text,
@@ -2614,7 +2633,7 @@ def smoke_request():
             t4_id = Task.query.filter_by(name="担当者の日報を写す").first().id
         code, html, r = get(f"/cases/{t4_id}")
         check('<span class="badge badge-flag me-1">推定</span>' in html, "案件詳細: ルールで埋めた項目には「推定」の印が付く")
-        check("勤務形態" in client.get("/monthly/export.csv").data.decode("utf-8-sig") and "勤務形態" in client.get("/admin/export/respondents.csv").data.decode("utf-8-sig"), "月次・回答者の CSV に勤務形態が出る")
+        check("勤務形態" in client.get("/export/monthly.csv").data.decode("utf-8-sig") and "勤務形態" in client.get("/export/respondents.csv").data.decode("utf-8-sig"), "月次・回答者の CSV に勤務形態が出る")
         client.post("/logout")
         with client.session_transaction() as sess:
             left = dict(sess)
@@ -2768,7 +2787,7 @@ def _survey_round2_checks(check):
     client.post("/login", data={"emp_id": "admin", "password": "adminpass"})
     html_d = client.get(f"/cases/{tid}").data.decode("utf-8")
     html_l = client.get("/cases/").data.decode("utf-8")
-    rows = list(csv.reader(io.StringIO(client.get("/cases/export.csv").data.decode("utf-8-sig"))))
+    rows = list(csv.reader(io.StringIO(client.get("/export/tasks.csv").data.decode("utf-8-sig"))))
     col = rows[0].index("自分で改善")
     row = next(x for x in rows[1:] if x[0] == str(tid))
     check("<th>自分で改善</th><td>チェックなし</td>" in html_d and ">チェックなし</td>" in html_l and row[col] == "チェックなし" and "改善チームに任せたい" not in html_d,
@@ -3243,7 +3262,7 @@ def smoke_ai():
               and ">ルールベース</span>" in html and f'<span class="badge text-bg-light border">{note}</span> 前回の AI 分析で出た案です' in html and "新しい流れ1" in html
               and '<span class="badge badge-flag">推定</span>' in html and '<span class="badge badge-flag">AI</span>' not in html,
               f"再分析がルールに落ちたら、そのことを知らせ、前回の AI の改善案は日付つきで分けて出す（いまの分析のように見せない。関連業務もルールの推定と出す）: {note}")
-        csv_text = client.get("/cases/export.csv").data.decode("utf-8-sig")
+        csv_text = client.get("/export/tasks.csv").data.decode("utf-8-sig")
         check(f"［{note}］新しい流れ1" in csv_text, "CSV の改善後の流れ（AI案）にも、前回の AI 分析の案であることと日付を付ける")
         script.append(message(ai_json))
         r = client.post(f"/cases/{task_id}/reanalyze", follow_redirects=True)
@@ -3264,7 +3283,7 @@ def smoke_ai():
         check(len(calls) == n_calls and after == before and stale == f"業務情報を直す前の AI 分析（{stamp}）" and edited
               and "業務情報を直しました。AI 分析を新しくするには「再分析」を押してください" in html and f'<span class="badge text-bg-light border">{stale}</span>' in html and ">ChatGPT API</span>" in html,
               f"R3-10: 業務情報を直して保存しても AI の分析はそのまま残し（AI は呼ばない）、「業務情報を直す前の AI 分析（日時）」の印と「再分析」を促す知らせを出す: {stale}")
-        csv_text = client.get("/cases/export.csv").data.decode("utf-8-sig")
+        csv_text = client.get("/export/tasks.csv").data.decode("utf-8-sig")
         check(f"［{stale}］テスト要約" in csv_text, "R3-10: 案件CSVの AI要約にも「業務情報を直す前の AI 分析（日時）」の印を付ける")
         script.append(message(ai_json))
         r = client.post(f"/cases/{task_id}/reanalyze", follow_redirects=True)

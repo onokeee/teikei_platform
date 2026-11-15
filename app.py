@@ -13,6 +13,7 @@ import sys
 import unicodedata
 import urllib.error
 import urllib.request
+import zipfile
 from collections import Counter, OrderedDict, defaultdict
 from datetime import datetime, timedelta
 
@@ -6453,52 +6454,6 @@ def withdraw_task(task_id):
     flash(f"「{name}」の登録を取り消しました。", "info")
     return redirect(url_for("cases.index"))
 
-def _csv_response(buf, filename):
-    return Response(buf.getvalue().encode("utf-8-sig"), mimetype="text/csv", headers={"Content-Disposition": "attachment; filename=" + filename})
-
-@bp_cases.route("/export.csv")
-def export_csv():
-    buf = io.StringIO()
-    w = csv.writer(buf)
-    w.writerow(
-        [
-            "ID", "業務名", "回答者", "Gr・役割", "業務領域", "目的", "アウトプット", "利用者", "利用者補足", "入力情報", "入力情報補足",
-            "前の業務", "後の業務", "関わる人・部署", "情報の受取元",
-            "頻度", "1回あたり時間", "担当人数", "月間時間(分)", "使用ツール", "作業の性質", "困りごと", "困りごと補足",
-            "改善の希望", "自分で改善", "補足", "ステータス", "進捗段階", "段階更新日", "活動状況のひとこと", "改善方針", "担当区分", "担当者", "手順完了", "改善後月間時間(分)", "削減(分/月)",
-            "担当者確認", "AI領域", "AI優先度", "AIフラグ", "AI要約", "登録日", "勤務", "手順（聞き取り）", "AI推定の項目",
-            "分からなかったこと", "改善後の流れ（AI案）", *[f"ECRSメモ {label}" for _key, label, _q in C.ECRS], "改善内容・結果", "確認者",
-        ]
-    )
-    for t in Task.query.order_by(Task.id).all():
-        extra = t.ai_extra_dict
-        w.writerow(
-            [
-                t.id, t.name, t.respondent.name if t.respondent else "", t.workplace.name if t.workplace else "",
-                t.domain.name if t.domain else "", t.purpose, t.output, "・".join(t.output_users_list), t.output_users_note,
-                "・".join(t.inputs_list), t.inputs_note, t.prev_task, t.next_task,
-                t.actors, t.info_from,
-                t.frequency, t.duration, t.headcount,
-                t.monthly_minutes, "・".join(t.tools_list), "・".join(t.nature_list), "・".join(t.pains_list), t.pains_note,
-                t.wish, t.self_improve or C.SELF_IMPROVE_UNCHECKED, t.note, t.status, t.stage_name, t.stage_since.strftime("%Y-%m-%d") if t.stage_since else "", t.progress_note,
-                t.decision, t.assignment, t.assignee, "・".join(str(s) for s in t.steps_done_list),
-                "" if t.after_minutes is None else t.after_minutes, t.saved_minutes, "済" if t.verified else "",
-                t.ai_domain or "", t.ai_priority or "", "・".join(t.ai_flags_list), (f"［{t.ai_stale_note}］" if t.ai_stale_note else "") + (t.ai_summary or ""),
-                t.created_at.strftime("%Y-%m-%d %H:%M") if t.created_at else "",
-                t.shift or "", "\n".join(_step_line(x) for x in t.steps), "・".join(t.ai_fields_list),
-                "・".join(extra.get("unknowns") or []), (f"［{t.ai_plan_note}］" if t.ai_plan_note and extra.get("tobe_steps") else "") + " → ".join(extra.get("tobe_steps") or []),
-                *[getattr(t, "ecrs_" + key) or "" for key, _label, _q in C.ECRS],
-                t.result_note or "", t.verified_by or "",
-            ]
-        )
-    return _csv_response(buf, "tasks_{}.csv".format(datetime.now().strftime("%Y%m%d")))
-
-def _step_line(x):
-    line = f"{x.get('no')}. {x.get('action') or ''}" + (f"［{x['system']}］" if x.get("system") else "") + (f" → {x['output']}" if x.get("output") else "")
-    if x.get("to"):
-        line += f"（{x['to']}へ" + (f"・{x['how']}" if x.get("how") else "") + "）"
-    return line
-
 # ===== 画面: 業務マップ =====
 bp_bizmap = Blueprint("bizmap", __name__, url_prefix="/bizmap")
 
@@ -7002,15 +6957,6 @@ def delete_employee(employee_id):
     flash("社員を削除しました。", "info")
     return redirect(url_for("admin.employees"))
 
-@bp_admin.route("/employees/export.csv")
-def export_employees():
-    buf = io.StringIO()
-    w = csv.writer(buf)
-    w.writerow(["ユーザーID", "氏名", "所属", "Gr・役割", "勤務形態", "メール", "対象", "元"])
-    for e in Employee.query.order_by(Employee.workplace_id, Employee.emp_id).all():
-        w.writerow([e.emp_id, e.name, e.department, e.workplace.name if e.workplace else "", e.work_pattern or "", e.email, "1" if e.active else "0", e.source])
-    return _csv_response(buf, "employees.csv")
-
 # ----- 業務マップの区分 -----
 @bp_admin.route("/map-vocab")
 def map_vocab_page():
@@ -7048,7 +6994,7 @@ def map_vocab_try():
         "handoff": vocab["handoff"][handoff]["label"] if handoff in vocab["handoff"] else "（決まらない）",
     })
 
-# ----- デモデータ・エクスポート -----
+# ----- デモデータ -----
 @bp_admin.post("/demo/load")
 def load_demo():
     n = seed_demo()
@@ -7064,23 +7010,6 @@ def remove_demo():
         who = "、".join(" ".join(x for x in (p["emp_id"], p["name"]) if x) + f"（{p['detail']}）" for p in kept)
         flash(f"デモのユーザーIDで本物の業務・回答がある人は消さずに残しました: {who}。対象者一覧のその行に印を付けています。回答率に入れないときは対象外にしてください。", "warning")
     return redirect(url_for("admin.index"))
-
-@bp_admin.route("/export/respondents.csv")
-def export_respondents():
-    buf = io.StringIO()
-    w = csv.writer(buf)
-    w.writerow(["ユーザーID", "氏名", "Gr・役割", "勤務形態", "自分で改善したい", "意欲（自動化アイテム登録）", "月次の進め方（空でない直近の答え）", "その月度", "月次で自分で・一緒にと答えた回数",
-                "使える技術", "学びたい技術", "登録業務数", "月間時間(分)", "一緒にやってみたい業務数", "伴走・希望の業務"])
-    for p in dx_people():
-        w.writerow(
-            [
-                p["emp_id"], p["name"], p["workplace"].name if p["workplace"] else "", p["work_pattern"], "○" if p["positive"] else "", wish_text(p),
-                p["stance_latest"], stance_period_text(p), p["self_positive_count"] if p["monthly"] else "",
-                "・".join(p["skills"]) or (C.SKILL_NONE if p["skills_none"] else ""), "・".join(p["learn"]) or (C.SKILL_NONE if p["learn_none"] else ""),
-                p["task_count"], p["minutes"], p["checked_count"], "・".join(f"{x['task'].name}（{x['label']}）" for x in p["target_tasks"]),
-            ]
-        )
-    return _csv_response(buf, "respondents_{}.csv".format(datetime.now().strftime("%Y%m%d")))
 
 # ===== 画面: 月次アンケート =====
 bp_monthly = Blueprint("monthly", __name__, url_prefix="/monthly")
@@ -7307,27 +7236,6 @@ def results():
         choice_keys=[q["key"] for q in (survey.questions if survey else []) if q["type"] == "choice"],
     )
 
-@bp_monthly.route("/export.csv")
-def export_csv():
-    surveys = {s.period: s for s in MonthlySurvey.query.all()}
-    keys, texts = [], {}
-    for s in sorted(surveys.values(), key=lambda s: s.period):
-        for q in s.questions:
-            if q["key"] not in texts:
-                keys.append(q["key"])
-                texts[q["key"]] = q["text"]
-    buf = io.StringIO()
-    w = csv.writer(buf)
-    w.writerow(["月度", "ユーザーID", "氏名", "Gr・役割", "勤務形態"] + [texts[k] for k in keys] + ["コメント", "回答日時"])
-    for r in MonthlyResponse.query.order_by(MonthlyResponse.period, MonthlyResponse.workplace_id, MonthlyResponse.name).all():
-        a = r.answers
-        w.writerow(
-            [r.period, r.emp_id, r.name, r.workplace.name if r.workplace else "", r.work_pattern or ""]
-            + [a.get(k, "") for k in keys]
-            + [r.comment or "", r.created_at.strftime("%Y-%m-%d %H:%M") if r.created_at else ""]
-        )
-    return _csv_response(buf, "monthly_{}.csv".format(datetime.now().strftime("%Y%m%d")))
-
 # ----- 設問の編集（要ログイン） -----
 @bp_monthly.route("/admin")
 def survey_admin():
@@ -7432,6 +7340,194 @@ def survey_admin_delete(survey_id):
         flash(f"{survey.period_label}の設問セットを削除しました。", "success")
     return redirect(url_for("monthly.survey_admin", period=current_period()))
 
+# ===== 画面: CSV出力（アプリのデータを CSV で出す。ほかの画面に CSV のボタンは置かない） =====
+bp_export = Blueprint("export", __name__, url_prefix="/export")
+
+
+def _csv_bytes(header, rows):
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(header)
+    w.writerows(rows)
+    return buf.getvalue().encode("utf-8-sig")
+
+
+def export_tasks():
+    header = [
+        "ID", "業務名", "回答者", "Gr・役割", "業務領域", "目的", "アウトプット", "利用者", "利用者補足", "入力情報", "入力情報補足",
+        "前の業務", "後の業務", "関わる人・部署", "情報の受取元",
+        "頻度", "1回あたり時間", "担当人数", "月間時間(分)", "使用ツール", "作業の性質", "困りごと", "困りごと補足",
+        "改善の希望", "自分で改善", "補足", "ステータス", "進捗段階", "段階更新日", "活動状況のひとこと", "改善方針", "担当区分", "担当者", "手順完了", "改善後月間時間(分)", "削減(分/月)",
+        "担当者確認", "AI領域", "AI優先度", "AIフラグ", "AI要約", "登録日", "勤務", "手順（聞き取り）", "AI推定の項目",
+        "分からなかったこと", "改善後の流れ（AI案）", *[f"ECRSメモ {label}" for _key, label, _q in C.ECRS], "改善内容・結果", "確認者",
+    ]
+    rows = []
+    for t in Task.query.order_by(Task.id).all():
+        extra = t.ai_extra_dict
+        rows.append([
+            t.id, t.name, t.respondent.name if t.respondent else "", t.workplace.name if t.workplace else "",
+            t.domain.name if t.domain else "", t.purpose, t.output, "・".join(t.output_users_list), t.output_users_note,
+            "・".join(t.inputs_list), t.inputs_note, t.prev_task, t.next_task,
+            t.actors, t.info_from,
+            t.frequency, t.duration, t.headcount,
+            t.monthly_minutes, "・".join(t.tools_list), "・".join(t.nature_list), "・".join(t.pains_list), t.pains_note,
+            t.wish, t.self_improve or C.SELF_IMPROVE_UNCHECKED, t.note, t.status, t.stage_name, t.stage_since.strftime("%Y-%m-%d") if t.stage_since else "", t.progress_note,
+            t.decision, t.assignment, t.assignee, "・".join(str(s) for s in t.steps_done_list),
+            "" if t.after_minutes is None else t.after_minutes, t.saved_minutes, "済" if t.verified else "",
+            t.ai_domain or "", t.ai_priority or "", "・".join(t.ai_flags_list), (f"［{t.ai_stale_note}］" if t.ai_stale_note else "") + (t.ai_summary or ""),
+            t.created_at.strftime("%Y-%m-%d %H:%M") if t.created_at else "",
+            t.shift or "", "\n".join(_step_line(x) for x in t.steps), "・".join(t.ai_fields_list),
+            "・".join(extra.get("unknowns") or []), (f"［{t.ai_plan_note}］" if t.ai_plan_note and extra.get("tobe_steps") else "") + " → ".join(extra.get("tobe_steps") or []),
+            *[getattr(t, "ecrs_" + key) or "" for key, _label, _q in C.ECRS],
+            t.result_note or "", t.verified_by or "",
+        ])
+    return header, rows
+
+
+def _step_line(x):
+    line = f"{x.get('no')}. {x.get('action') or ''}" + (f"［{x['system']}］" if x.get("system") else "") + (f" → {x['output']}" if x.get("output") else "")
+    if x.get("to"):
+        line += f"（{x['to']}へ" + (f"・{x['how']}" if x.get("how") else "") + "）"
+    return line
+
+
+def _receive_text(x):
+    return "、".join(f"{r['from']}{'：' if r['from'] and r['what'] else ''}{r['what']}" + (f"（{r['how']}）" if r["how"] else "") for r in step_receives(x))
+
+
+def export_steps():
+    header = ["業務ID", "業務名", "手順", "やること", "だれ（本人以外のとき）", "受け取り（どこから：何を（どのように））", "使う・入力するシステム", "元になる情報", "受け取り方",
+              "できるもの", "渡す相手", "渡し方", "使いみち"]
+    rows = []
+    for t in Task.query.order_by(Task.id).all():
+        for x in t.steps:
+            rows.append([t.id, t.name, x.get("no") or "", x.get("action") or "", x.get("who") or "", _receive_text(x), x.get("system") or "", x.get("input") or "",
+                         x.get("how_from") or "", x.get("output") or "", x.get("to") or "", x.get("how") or "", x.get("use") or ""])
+    return header, rows
+
+
+def export_stage_logs():
+    header = ["業務ID", "業務名", "段階", "日時", "担当者"]
+    rows = []
+    for log_row in StageLog.query.order_by(StageLog.task_id, StageLog.at, StageLog.id).all():
+        t = log_row.task
+        rows.append([log_row.task_id, t.name if t else "", t.stage_label(log_row.stage) if t else C.STAGE_NAMES.get(log_row.stage, log_row.stage),
+                     log_row.at.strftime("%Y-%m-%d %H:%M") if log_row.at else "", log_row.by or ""])
+    return header, rows
+
+
+MEMBER_STATUS_TEXT = {"yes": "回答", "no": "未回答", "out": "対象外", "before": "対象前"}
+
+
+def export_members():
+    rows_m, periods, _stats, _active = _member_payload()
+    header = ["ユーザーID", "氏名", "Gr・役割", "勤務形態", "対象", "対象外にした日", "対象者一覧に載った日", "自動化アイテム（件）"] + [f"{p[:4]}年{int(p[5:])}月" for p in periods]
+    rows = []
+    for r in rows_m:
+        e = r["emp"]
+        rows.append([e.emp_id, e.name or "", r["workplace"], r["work_pattern"], "対象外" if e.active is False else "対象",
+                     e.excluded_at.strftime("%Y-%m-%d") if e.active is False and e.excluded_at else "", e.created_at.strftime("%Y-%m-%d") if e.created_at else "",
+                     r["considered"]] + [MEMBER_STATUS_TEXT.get(st, "") for _p, st in r["cells"]])
+    return header, rows
+
+
+def export_respondents():
+    header = ["ユーザーID", "氏名", "Gr・役割", "勤務形態", "自分で改善したい", "意欲（自動化アイテム登録）", "月次の進め方（空でない直近の答え）", "その月度", "月次で自分で・一緒にと答えた回数",
+              "使える技術", "学びたい技術", "登録業務数", "月間時間(分)", "一緒にやってみたい業務数", "伴走・希望の業務"]
+    rows = []
+    for p in dx_people():
+        rows.append([
+            p["emp_id"], p["name"], p["workplace"].name if p["workplace"] else "", p["work_pattern"], "○" if p["positive"] else "", wish_text(p),
+            p["stance_latest"], stance_period_text(p), p["self_positive_count"] if p["monthly"] else "",
+            "・".join(p["skills"]) or (C.SKILL_NONE if p["skills_none"] else ""), "・".join(p["learn"]) or (C.SKILL_NONE if p["learn_none"] else ""),
+            p["task_count"], p["minutes"], p["checked_count"], "・".join(f"{x['task'].name}（{x['label']}）" for x in p["target_tasks"]),
+        ])
+    return header, rows
+
+
+def export_monthly():
+    keys, texts = [], {}
+    for s in sorted(MonthlySurvey.query.all(), key=lambda s: s.period):
+        for q in s.questions:
+            if q["key"] not in texts:
+                keys.append(q["key"])
+                texts[q["key"]] = q["text"]
+    header = ["月度", "ユーザーID", "氏名", "Gr・役割", "勤務形態"] + [texts[k] for k in keys] + ["コメント", "回答日時"]
+    rows = []
+    for r in MonthlyResponse.query.order_by(MonthlyResponse.period, MonthlyResponse.workplace_id, MonthlyResponse.name).all():
+        a = r.answers
+        rows.append([r.period, r.emp_id, r.name, r.workplace.name if r.workplace else "", r.work_pattern or ""] + [a.get(k, "") for k in keys]
+                    + [r.comment or "", r.created_at.strftime("%Y-%m-%d %H:%M") if r.created_at else ""])
+    return header, rows
+
+
+QUESTION_TYPE_TEXT = {"choice": "選択（1つ）", "text": "記述", "list": "記述（複数）"}
+
+
+def export_questions():
+    header = ["月度", "受付", "順", "設問", "種類", "選択肢", "必須", "出す条件"]
+    rows = []
+    for s in sorted(MonthlySurvey.query.all(), key=lambda s: s.period):
+        qs = s.questions
+        texts = {q["key"]: q.get("text") or "" for q in qs}
+        for i, q in enumerate(qs, 1):
+            dep = q.get("depends") if isinstance(q.get("depends"), dict) else {}
+            cond = f"「{texts.get(dep.get('key'), dep.get('key') or '')}」が{'／'.join(dep.get('show_if') or [])}のとき" if dep.get("key") else ""
+            rows.append([s.period, "受付中" if s.is_active else "停止", i, q.get("text") or "", QUESTION_TYPE_TEXT.get(q.get("type"), q.get("type") or ""),
+                         "／".join(q.get("options") or []) if isinstance(q.get("options"), list) else "", "○" if q.get("required") or dep.get("required") else "", cond])
+    return header, rows
+
+
+def export_workplaces():
+    return ["ID", "Gr・役割", "並び順"], [[w.id, w.name, w.sort] for w in Workplace.query.order_by(Workplace.sort, Workplace.id).all()]
+
+
+def export_domains():
+    return (["ID", "業務領域", "説明", "並び順", "上位の領域"],
+            [[d.id, d.name, d.description or "", d.sort, d.parent.name if d.parent else ""] for d in Domain.query.order_by(Domain.sort, Domain.id).all()])
+
+
+EXPORTS = OrderedDict([
+    ("tasks", ("業務一覧（改善案件）", "1業務1行。目的・アウトプット・利用者・頻度・時間・段階・改善方針・AI分析・ECRSメモ・手順など", export_tasks)),
+    ("steps", ("業務の手順", "1手順1行。だれ・受け取り（どこから・何を・どのように）・システム・できるもの・渡す相手・使いみち", export_steps)),
+    ("stage_logs", ("段階の記録", "案件の段階を変えた履歴（1回1行）", export_stage_logs)),
+    ("members", ("対象者一覧", "1人1行（対象外の人も含む）。Gr・役割・勤務形態・対象外と、月ごとの回答（回答／未回答／対象外／対象前）", export_members)),
+    ("respondents", ("回答者の意欲・技術", "回答した人（対象外を除く）ごとの意欲・月次の進め方・使える技術・学びたい技術・登録した業務", export_respondents)),
+    ("monthly", ("月次アンケートの回答", "1回答1行。全月度・全設問とコメント", export_monthly)),
+    ("questions", ("月次アンケートの設問", "月度ごとの設問（1設問1行）。種類・選択肢・必須・出す条件", export_questions)),
+    ("workplaces", ("Gr・役割マスタ", "Gr・役割の一覧", export_workplaces)),
+    ("domains", ("業務領域マスタ", "業務領域（業務体系）の一覧", export_domains)),
+])
+
+
+@bp_export.route("/")
+def index():
+    items = []
+    for key, (title, desc, build) in EXPORTS.items():
+        header, rows = build()
+        items.append({"key": key, "title": title, "desc": desc, "count": len(rows), "columns": len(header)})
+    return render_template("export/index.html", items=items)
+
+
+@bp_export.route("/<key>.csv")
+def download(key):
+    if key not in EXPORTS:
+        abort(404)
+    header, rows = EXPORTS[key][2]()
+    filename = f"{key}_{datetime.now():%Y%m%d}.csv"
+    return Response(_csv_bytes(header, rows), mimetype="text/csv", headers={"Content-Disposition": "attachment; filename=" + filename})
+
+
+@bp_export.route("/all.zip")
+def download_all():
+    stamp = f"{datetime.now():%Y%m%d}"
+    mem = io.BytesIO()
+    with zipfile.ZipFile(mem, "w", zipfile.ZIP_DEFLATED) as z:
+        for key, (_title, _desc, build) in EXPORTS.items():
+            header, rows = build()
+            z.writestr(f"{key}_{stamp}.csv", _csv_bytes(header, rows))
+    return Response(mem.getvalue(), mimetype="application/zip", headers={"Content-Disposition": f"attachment; filename=portal_csv_{stamp}.zip"})
+
 # ===== 画面: 活動状況 =====
 bp_board = Blueprint("board", __name__, url_prefix="/board")
 
@@ -7483,8 +7579,6 @@ TEMPLATES = {
   </div>
   <div class="d-flex gap-2">
     <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('monthly.results') }}">月次集計</a>
-    <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('admin.export_employees') }}">CSV（対象者）</a>
-    <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('admin.export_respondents') }}">CSV（意欲・技術）</a>
   </div>
 </div>
 
@@ -8043,8 +8137,6 @@ TEMPLATES = {
         <form method="post" action="{{ url_for('admin.remove_demo') }}" data-confirm="デモデータを削除します。よろしいですか？">
           <button class="btn btn-sm btn-outline-danger" {% if not demo_active %}disabled{% endif %}>デモデータを削除</button>
         </form>
-        <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('cases.export_csv') }}">業務一覧CSV</a>
-        <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('admin.export_respondents') }}">回答者CSV</a>
       </div>
       <p class="small text-muted mt-2 mb-0">データは <code>instance/portal.sqlite3</code> に保存されます。バックアップはこのファイルをコピーしてください。</p>
     </div></div>
@@ -8200,6 +8292,7 @@ TEMPLATES = {
         <li class="nav-item"><a class="nav-link nav-link-admin {% if bp == 'bizmap' %}active{% endif %}" href="{{ url_for('bizmap.index') }}">業務マップ</a></li>
         <li class="nav-item"><a class="nav-link nav-link-admin {% if request.endpoint in ('monthly.results', 'monthly.survey_admin') %}active{% endif %}" href="{{ url_for('monthly.results') }}">月次集計</a></li>
         <li class="nav-item"><a class="nav-link nav-link-admin {% if request.endpoint == 'admin.employees' %}active{% endif %}" href="{{ url_for('admin.employees') }}">対象者一覧</a></li>
+        <li class="nav-item"><a class="nav-link nav-link-admin {% if bp == 'export' %}active{% endif %}" href="{{ url_for('export.index') }}">CSV出力</a></li>
         <li class="nav-item"><a class="nav-link nav-link-admin {% if bp == 'admin' and request.endpoint != 'admin.employees' %}active{% endif %}" href="{{ url_for('admin.index') }}">管理</a></li>
         {% endif %}
       </ul>
@@ -9167,7 +9260,6 @@ TEMPLATES = {
 <div class="d-flex flex-wrap justify-content-between align-items-center mb-2 gap-2">
   <h2 class="mb-0">改善案件一覧</h2>
   <div class="d-flex gap-2">
-    <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('cases.export_csv') }}">CSVエクスポート</a>
     <a class="btn btn-primary btn-sm" href="{{ url_for('survey.index') }}">自動化アイテムを登録する</a>
   </div>
 </div>
@@ -10083,6 +10175,34 @@ TEMPLATES = {
 {% endif %}
 {% endblock %}
 ''',
+    'export/index.html': r'''{% extends "base.html" %}
+{% block title %}CSV出力{% endblock %}
+{% block content %}
+<div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">
+  <div>
+    <h2 class="mb-1">CSV出力</h2>
+    <p class="text-muted mb-0">このアプリのデータを CSV で出力します。画面の絞り込みに関係なく、いま入っている全件を出します（デモデータを投入しているときはデモデータも含みます）。文字コードは UTF-8（BOM 付き）で、Excel でそのまま開けます。</p>
+  </div>
+  <a class="btn btn-primary btn-sm text-nowrap" href="{{ url_for('export.download_all') }}"><i class="bi bi-file-earmark-zip"></i> すべてまとめて出力（ZIP）</a>
+</div>
+<div class="card"><div class="card-body">
+  <table class="table align-middle mb-0 export-table">
+    <thead><tr><th>データ</th><th>中身</th><th class="text-end">件数</th><th></th></tr></thead>
+    <tbody>
+    {% for x in items %}
+    <tr>
+      <td class="fw-semibold">{{ x.title }}</td>
+      <td class="small text-muted">{{ x.desc }}</td>
+      <td class="text-end text-nowrap">{{ x.count }} 行</td>
+      <td class="text-end"><a class="btn btn-outline-secondary btn-sm text-nowrap" href="{{ url_for('export.download', key=x.key) }}"><i class="bi bi-download"></i> CSV</a></td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div></div>
+<p class="small text-muted mt-2 mb-0">ファイル名は「データの名前_出力した日.csv」です。ZIP には上の CSV がすべて入ります。</p>
+{% endblock %}
+''',
     'monthly/results.html': r'''{% extends "base.html" %}
 {% block title %}月次アンケート 集計{% endblock %}
 {% block content %}
@@ -10092,7 +10212,6 @@ TEMPLATES = {
     <div class="text-muted small">毎月同じ基本設問で、変化を追います。</div>
   </div>
   <div class="d-flex gap-2 flex-wrap">
-    <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('monthly.export_csv') }}">CSV</a>
     <a class="btn btn-outline-primary btn-sm" href="{{ url_for('admin.employees') }}">対象者一覧</a>
     <a class="btn btn-outline-primary btn-sm" href="{{ url_for('monthly.survey_admin', period=selected) }}">設問を編集</a>
   </div>
@@ -13506,7 +13625,7 @@ def create_app(test_config=None):
         app.config.update(test_config)
 
     db.init_app(app)
-    for blueprint in (bp_main, bp_survey, bp_cases, bp_bizmap, bp_people, bp_admin, bp_monthly, bp_board, bp_auth):
+    for blueprint in (bp_main, bp_survey, bp_cases, bp_bizmap, bp_people, bp_admin, bp_monthly, bp_export, bp_board, bp_auth):
         app.register_blueprint(blueprint)
 
     @app.route("/static/<path:filename>", endpoint="static")
