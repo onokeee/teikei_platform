@@ -2339,6 +2339,8 @@ def smoke_request():
         b = calls[-1]["body"]
         outs = {i["call_id"]: json.loads(i["output"]) for i in b["input"] if i.get("type") == "function_call_output"}
         check(len(calls) == n_before + 2 and r.status_code == 200 and "氏名" not in outs["call_ph"] and outs["call_ph"]["勤務形態"] == "交代勤務" and outs["call_ph"]["月次アンケート"]["行っている業務"] == "日報の集計、出勤簿の転記" and outs["call_dup"]["二重登録"] is False, "聞き取り中に AI が本人の履歴と二重登録の有無を道具で調べ、結果を受け取って続ける")
+        check("二重登録でなければ、そのことには触れない" in b["instructions"] and "「二重登録ではありません」" in outs["call_dup"]["note"],
+              "二重登録でないときは、AI は本人に何も伝えない（指示と道具の結果の両方に書く）")
         check(r.status_code == 200 and len(j["state"]["steps"]) == 1 and "st1" in j["diagram"] and "生産管理システム" in j["diagram"] and "flowchart LR" in j["diagram"], "2ターン目: 手順1が入り、図に手順とシステムが出る")
         check(len(j["frames"]) == 1 and j["frames"][0] == j["diagram"], "増えた手順のぶんだけコマ送りの図（frames）が返る")
         check([m.get("role") for m in b["input"] if m.get("role")] == ["assistant", "user"] and b["input"][1]["content"] == "生産管理システムから前日の実績をCSVで出す", "会話の記録をそのまま送る（道具の項目は role なしで続く）")

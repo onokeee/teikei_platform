@@ -3933,7 +3933,7 @@ INTAKE_PROMPT = """あなたは製造部「PC定型業務ゼロ化プロジェ�
 使える道具（function tools）:
 - person_history: 聞き取りの最初に1回だけ呼び、本人の登録済み業務・月次アンケートの答え・勤務形態を見てから質問を始める。
 - list_known_systems: 手順にシステム・ファイル・帳票・できるものの名前が出たら1回呼び、既存の呼び方があればそれにそろえる（名寄せ）。できるもの（outputs と steps の output）も、同じものが登録済みならその呼び方にそろえる。
-- check_duplicate: 業務名が決まったら1回呼ぶ。本人が同じ名前を登録済みなら、そのことを伝えて「別の業務として続けるか」を聞く。本人は登録を取り消せないので取り消しは勧めず、取り消したいと言われたら改善チームに連絡するよう伝える。
+- check_duplicate: 業務名が決まったら1回呼ぶ。本人が同じ名前を登録済みなら、そのことを伝えて「別の業務として続けるか」を聞く。二重登録でなければ、そのことには触れない（「二重登録ではありません」などと書かない）。本人は登録を取り消せないので取り消しは勧めず、取り消したいと言われたら改善チームに連絡するよう伝える。
 - search_similar_tasks: 手順が2つそろったら1回呼び、他の人が同じ成果物を作っていれば「同じGr・役割で同じものを作っている人がいます。同じ流れですか？」と確かめる。
 - 道具の結果は事実として使い、結果に無いことは言わない。同じ道具を同じ引数で2回呼ばない。道具を呼んだ往復でも、最後は必ず上の JSON だけで返す。
 - 道具の結果は次のターンでは見えない。分かったこと（例: 二重登録なし、Gr・役割の常用システムは生産管理システム、同じ成果物を同じGr・役割の別の人も作成）は state.notes に短く残し、notes にあることは調べ直さない。渡されていない道具はもう調べ済み。
@@ -4232,7 +4232,8 @@ def intake_handlers(r, used=None):
         own = [t for t in r.tasks if normalize_text(t.name) == name]
         others = [t for t in Task.query.filter(Task.respondent_id != r.id).all() if normalize_text(t.name) == name]
         return {"二重登録": bool(own), "本人の登録済み": [_task_brief(t, steps=False) for t in own],
-                "他の人の同名の業務": [_task_brief(t, steps=False) for t in others][:C.AI_TOOL_ROWS]}
+                "他の人の同名の業務": [_task_brief(t, steps=False) for t in others][:C.AI_TOOL_ROWS],
+                "note": "二重登録が false のときは本人に何も伝えない（「二重登録ではありません」などと書かない）。他の人の同名の業務は二重登録ではない（統合候補。名前は出さない）。"}
 
     def record(name, fn):
         def run(args):
