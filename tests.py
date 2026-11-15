@@ -2301,7 +2301,11 @@ def smoke_request():
         return text in html or json.dumps(text)[1:-1] in html
 
     check(code == 200 and "聞き取りを始める" in html and "一気に書く" in html and "写真を貼る" in html and "最初から見る" in html and 'id="rq-dup-note"' in html and 'id="rq-dup"' in html and in_html("まずは相談したい") and in_html("スキルを身につけながら、一緒にやってみたい") and "mermaid" in html and in_html("日報の集計"), "依頼ページ: 聞き取り・一気に書く・写真・再生・3つの希望・一緒にやってみたい・業務名の引き継ぎ")
-    check("登録する業務" in html and "どの業務を登録しますか" in html and "改善への関わり方" not in html and "部全体について" not in html, "第3節・第4節は無くなっている（第2節は「登録する業務」）")
+    check("登録する業務" in html and '<div class="rq-label"><span>業務名</span></div>' in html and "どの業務を登録しますか" not in html and "改善への関わり方" not in html and "部全体について" not in html,
+          "第3節・第4節は無くなっている（第2節は「登録する業務」、入力欄の見出しは「業務名」）")
+    check(html.index('id="rq-pick"') < html.index('id="rq-actions"') < html.index('id="rq-start"') < html.index('id="rq-finish"')
+          and 'class="btn btn-outline-primary btn-lg d-none" id="rq-finish"' in html and html.count('id="rq-start"') == 1,
+          "「聞き取りを始める」は入力欄の横ではなく下の大きなボタン（「送信して完了」の場所）。「送信して完了」は最初は出さない")
     check('<details class="rq-history d-none" id="rq-history">' in html and "これまでに登録した業務" in html and "ここから選ぶ必要はありません" in html
           and html.index('id="rq-pick"') < html.index('id="rq-history"') < html.index('id="rq-registered"') and "rq-registered-count" not in html,
           "登録済みの業務は入力欄の上に並べず、下のたたんだ「これまでに登録した業務」に確認用として出す")
@@ -2340,6 +2344,8 @@ def smoke_request():
     check("addedIds.push(j.task.id)" in js_rq and "var added = S.tasks.filter(function (t) { return addedIds.indexOf(t.id) >= 0; });" in js_rq and "この画面ではまだ業務を登録していません" in js_rq
           and "今回登録した業務" in js_rq and js_rq.count("addedIds = [];") == 3,
           "送信して完了は、この画面で登録した業務だけを数える（前に登録した業務しかないときは「受け付けました」を出さず、登録を促す）")
+    check("function updateActions()" in js_rq and '$("rq-start").classList.toggle("d-none", !picking);' in js_rq and 'finishBtn.classList.toggle("d-none", !addedIds.length || !(picking || done));' in js_rq and "new MutationObserver(updateActions)" in js_rq,
+          "下のボタンは段階で切り替える（業務名を入れる段階は「聞き取りを始める」、この画面で登録したあとは「送信して完了」も出す。聞き取り中は出さない）")
     check('$("rq-history").classList.toggle("d-none", !S.tasks.length);' in js_rq and 'el("span", "rq-reg-new", "今回")' in js_rq and "rq-registered-count" not in js_rq,
           "これまでに登録した業務の欄は、登録がなければ出さず、今回登録した業務には「今回」を付ける")
     check('clearError(ws.closest(".rq-field"))' in js_rq and 'clearError(ps.closest(".rq-field"))' in js_rq and 'personBox.querySelectorAll(".rq-field").forEach(clearError);\n      setIdentity(ID_OK);' in js_rq,

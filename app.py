@@ -10495,11 +10495,10 @@ document.getElementById("test-btn").addEventListener("click", async function () 
 
       <div id="rq-from-monthly" class="rq-from d-none"></div>
       <div id="rq-pick">
-        <div class="rq-label"><span>どの業務を登録しますか</span></div>
+        <div class="rq-label"><span>業務名</span></div>
         <div class="rq-suggest d-none" id="rq-suggest"></div>
         <div class="rq-pick-row">
-          <input type="text" class="form-control" id="rq-title" placeholder="業務名（分かる範囲で。例：日報の実績を集計表に転記する）" maxlength="200">
-          <button type="button" class="btn btn-primary" id="rq-start"><i class="bi bi-chat-dots"></i> 聞き取りを始める</button>
+          <input type="text" class="form-control" id="rq-title" placeholder="分かる範囲で（例：日報の実績を集計表に転記する）" maxlength="200" aria-label="業務名">
         </div>
         <div class="small text-muted mt-2">業務名が決まっていなくても始められます。AI が聞きながら決めます。</div>
         <div id="rq-dup-note" class="rq-dup d-none"></div>
@@ -10580,8 +10579,9 @@ document.getElementById("test-btn").addEventListener("click", async function () 
     </div>
   </section>
 
-  <div class="rq-finish">
-    <button type="button" class="btn btn-primary btn-lg" id="rq-finish"><i class="bi bi-send"></i> 送信して完了</button>
+  <div class="rq-finish" id="rq-actions">
+    <button type="button" class="btn btn-primary btn-lg" id="rq-start"><i class="bi bi-chat-dots"></i> 聞き取りを始める</button>
+    <button type="button" class="btn btn-outline-primary btn-lg d-none" id="rq-finish"><i class="bi bi-send"></i> 送信して完了</button>
   </div>
 
   <section class="card rq-card rq-done d-none" id="rq-done">
@@ -12714,7 +12714,7 @@ summary { transition: color 0.15s ease; }
 .rq-sec-head { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem 0.6rem; margin-bottom: 1.1rem; }
 .rq-sec-head .rq-no { width: 1.9rem; height: 1.9rem; background: var(--ui-text); color: #fff; font-size: 0.9rem; }
 .rq-sec-title { font-weight: 700; font-size: 1.1rem; letter-spacing: -0.01em; white-space: nowrap; }
-.rq-finish { display: flex; justify-content: center; margin: 1.5rem 0; }
+.rq-finish { display: flex; flex-wrap: wrap; justify-content: center; gap: 0.75rem; margin: 1.5rem 0; }
 .rq-finish .btn { min-width: 260px; }
 .rq-done { animation: ui-fade-up 0.4s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
 .rq-id-row { display: flex; align-items: flex-end; gap: 1rem; flex-wrap: wrap; }
@@ -13016,6 +13016,7 @@ summary { transition: color 0.15s ease; }
   function forgetPerson() {
     confirmedId = "";
     addedIds = [];
+    updateActions();
     clearSelects();
     prefillNote.textContent = "";
     if (!S.respondent) return;
@@ -13107,6 +13108,16 @@ summary { transition: color 0.15s ease; }
   function showOnly(box) {
     [pickBox, intakeBox, finalBox, resultBox].forEach(function (b) { b.classList.toggle("d-none", b !== box); });
   }
+  function updateActions() {
+    if (!pickBox) return;
+    var picking = !pickBox.classList.contains("d-none"), done = !resultBox.classList.contains("d-none"), finishBtn = $("rq-finish");
+    $("rq-start").classList.toggle("d-none", !picking);
+    finishBtn.classList.toggle("d-none", !addedIds.length || !(picking || done));
+    finishBtn.classList.toggle("btn-primary", done);
+    finishBtn.classList.toggle("btn-outline-primary", !done);
+  }
+  var actionWatch = new MutationObserver(updateActions);
+  [pickBox, intakeBox, finalBox, resultBox].forEach(function (b) { actionWatch.observe(b, { attributes: true, attributeFilter: ["class"] }); });
   function takeTasks(j) {
     S.tasks = j.tasks || [];
     S.suggested = j.suggested || []; S.suggested_wants = j.suggested_wants || [];
@@ -13580,6 +13591,7 @@ summary { transition: color 0.15s ease; }
   // ---------- 初期表示 ----------
   renderRegistered();
   renderSuggest();
+  updateActions();
   if (CFG.prefill) titleInput.value = CFG.prefill;
   if (S.respondent) {
     empInput.value = S.respondent.emp_id || "";
