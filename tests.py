@@ -2331,9 +2331,9 @@ def smoke_request():
           "P1: ユーザーIDを打ち替えた・見つからないときは回答者・登録一覧・候補・Gr・役割・勤務形態を消してリセットし、聞き取り・登録にユーザーIDを付けて送る")
     check("confirmedId && confirmedId !== key" in js_rq and js_rq.index("forgetPerson();\n      confirmedId = key;") < js_rq.index("if (v.workplace_id && v.work_pattern) debounce"),
           "P2: 別の人の社員IDが見つかったときは、前の人の職場・勤務形態を消してから（自動保存はしない）")
-    check("addedIds.push(j.task.id)" in js_rq and "var added = S.tasks.filter(function (t) { return addedIds.indexOf(t.id) >= 0; });" in js_rq and "この画面ではまだ業務を登録していません" in js_rq
-          and "今回登録した業務" in js_rq and js_rq.count("addedIds = [];") == 3,
-          "送信して完了は、この画面で登録した業務だけを数える（前に登録した業務しかないときは「受け付けました」を出さず、登録を促す）")
+    check("addedIds.push(j.task.id)" in js_rq and "var added = S.tasks.filter(function (t) { return addedIds.indexOf(t.id) >= 0; });" in js_rq and "if (!added.length) { updateActions(); return; }" in js_rq
+          and "今回登録した業務" in js_rq and js_rq.count("addedIds = [];") == 3 and "backToPick(true);\n    updateActions();" in js_rq,
+          "送信して完了は、この画面で登録した業務だけを数える（ボタンは登録したあとにしか出さず、完了したら入力欄が出たままでも消す）")
     check("function updateActions()" in js_rq and '$("rq-start").classList.toggle("d-none", !picking);' in js_rq and 'finishBtn.classList.toggle("d-none", !addedIds.length || !(picking || done));' in js_rq and "new MutationObserver(updateActions)" in js_rq,
           "下のボタンは段階で切り替える（業務名を入れる段階は「聞き取りを始める」、この画面で登録したあとは「送信して完了」も出す。聞き取り中は出さない）")
     check('$("rq-history").classList.toggle("d-none", !S.tasks.length);' in js_rq and 'el("span", "rq-reg-new", "今回")' in js_rq and "rq-registered-count" not in js_rq,

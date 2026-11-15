@@ -13422,16 +13422,8 @@ summary { transition: color 0.15s ease; }
 
   // ---------- 送信して完了 ----------
   $("rq-finish").addEventListener("click", async function () {
-    if (!S.respondent) {
-      var ok = await savePerson(true);
-      if (!ok) { toast("「基本情報」を入力してください"); return; }
-    }
     var added = S.tasks.filter(function (t) { return addedIds.indexOf(t.id) >= 0; });
-    if (!added.length) {
-      toast(S.tasks.length ? "この画面ではまだ業務を登録していません。新しく登録する業務は「2 登録する業務」から登録してください（前に登録した業務 " + S.tasks.length + " 件は登録済みです）" : "業務を1件以上登録してください");
-      $("sec-task").scrollIntoView({ behavior: "smooth", block: "start" });
-      return;
-    }
+    if (!added.length) { updateActions(); return; }
     var total = added.reduce(function (a, t) { return a + (t.monthly_minutes || 0); }, 0);
     var sum = "ありがとうございました。今回登録した業務 " + added.length + " 件（月 約 " + (total / 60).toFixed(1) + " 時間）は改善案件として確認し、活動状況に載せます。";
     await api("POST", CFG.api.reset);
@@ -13459,6 +13451,7 @@ summary { transition: color 0.15s ease; }
     $("rq-dup-note").classList.add("d-none");
     $("rq-dup").classList.add("d-none");
     backToPick(true);
+    updateActions();
     if (window.history && history.replaceState) history.replaceState(null, "", location.pathname);
   }
 
