@@ -75,6 +75,8 @@ DX_WISH_OPTIONS = [SELF_IMPROVE_YES, SELF_IMPROVE_UNCHECKED]
 INTAKE_MAX_QUESTIONS = 6
 INTAKE_STEP_LIMIT = 12
 WORK_PATTERNS = ["普通勤務", "交代勤務"]
+SHIFT_PATTERN = "交代勤務"
+SHIFT_TEAMS = ["1班", "2班", "3班"]
 SHIFT_OPTIONS = ["昼勤", "夜勤", "昼勤・夜勤の両方"]
 FREQUENCY_HINTS = {"毎日": "毎日（出勤のたび）", "不定期": "不定期（月1回として計算）"}
 
@@ -224,6 +226,7 @@ PERSON_FIELDS = [
     {"key": "emp_id", "type": "text", "label": "ユーザーID", "required": True, "lookup": True, "placeholder": "例：E001"},
     {"key": "workplace_id", "type": "select", "label": "Gr・役割", "required": True, "options": "workplaces"},
     {"key": "work_pattern", "type": "select", "label": "勤務形態", "required": True, "options": "work_patterns"},
+    {"key": "shift_team", "type": "select", "label": "班", "required": True, "options": "shift_teams"},
 ]
 
 # ===== データモデル（SQLite） =====
@@ -269,6 +272,7 @@ class Respondent(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.now)
     is_demo = db.Column(db.Boolean, default=False)
     work_pattern = db.Column(db.String(20), default="")
+    shift_team = db.Column(db.String(10), default="")
 
     c2_skills = db.Column(db.Text, default="")
     c3_learn = db.Column(db.Text, default="")
@@ -612,6 +616,7 @@ class Employee(db.Model):
     emp_id = db.Column(db.String(50), unique=True, nullable=False)
     name = db.Column(db.String(100), nullable=False)
     work_pattern = db.Column(db.String(20), default="")
+    shift_team = db.Column(db.String(10), default="")
     workplace_id = db.Column(db.Integer, db.ForeignKey("workplaces.id"), nullable=True)
     active = db.Column(db.Boolean, default=True)
     excluded_at = db.Column(db.DateTime, nullable=True)
@@ -652,6 +657,7 @@ class MonthlyResponse(db.Model):
     period = db.Column(db.String(7), nullable=False)
     emp_id = db.Column(db.String(50), nullable=False)
     work_pattern = db.Column(db.String(20), default="")
+    shift_team = db.Column(db.String(10), default="")
     name = db.Column(db.String(100), default="")
     workplace_id = db.Column(db.Integer, db.ForeignKey("workplaces.id"), nullable=True)
     respondent_id = db.Column(db.Integer, db.ForeignKey("respondents.id"), nullable=True)
@@ -696,9 +702,11 @@ _ADDED_COLUMNS = {
     "respondents": {
         "emp_id": "VARCHAR(50)",
         "work_pattern": "VARCHAR(20) DEFAULT ''",
+        "shift_team": "VARCHAR(10) DEFAULT ''",
     },
     "employees": {
         "work_pattern": "VARCHAR(20) DEFAULT ''",
+        "shift_team": "VARCHAR(10) DEFAULT ''",
         "created_at": "DATETIME",
         "excluded_at": "DATETIME",
         "excluded_spans": "TEXT DEFAULT ''",
@@ -708,6 +716,7 @@ _ADDED_COLUMNS = {
         "answers_json": "TEXT DEFAULT '{}'",
         "comment": "TEXT DEFAULT ''",
         "work_pattern": "VARCHAR(20) DEFAULT ''",
+        "shift_team": "VARCHAR(10) DEFAULT ''",
     },
     "tasks": {
         "actors": "TEXT DEFAULT ''",
@@ -820,7 +829,7 @@ def init_id_seq():
 # ===== ユーザーID照会の控え（ldap_auth の結果を employees に残し、足りない氏名を補う） =====
 EMP_NOT_FOUND = "このユーザーIDは見つかりません。IDを確かめてください（初めて回答する人で見つからないときは、改善チームに連絡してください）"
 EMP_EXCLUDED = "このユーザーIDは対象外になっています。管理者に連絡してください"
-PREFILL_NOTE = "前回の回答のGr・役割と勤務形態を入れました。変わっていたら、今の所属・勤務形態に合わせてプルダウンで選び直してください。"
+PREFILL_NOTE = "前回の回答のGr・役割と勤務形態（交代勤務の人は班も）を入れました。変わっていたら、今の所属・勤務形態・班に合わせてプルダウンで選び直してください。"
 
 
 def norm_emp_id(value):
@@ -856,7 +865,11 @@ def emp_key(emp_id):
 def same_emp_id(column, emp_id):
     return db.func.lower(column) == emp_key(emp_id)
 
-def remember_person(emp_id, name=None, workplace_id=None, work_pattern=None):
+def clean_team(pattern, team):
+    team = str(team or "").strip()
+    return team if pattern == C.SHIFT_PATTERN and team in C.SHIFT_TEAMS else ""
+
+def remember_person(emp_id, name=None, workplace_id=None, work_pattern=None, shift_team=None):
     emp = find_employee(emp_id)
     if emp is None:
         return False
@@ -866,15 +879,16 @@ def remember_person(emp_id, name=None, workplace_id=None, work_pattern=None):
         emp.workplace_id = workplace_id
     if work_pattern in C.WORK_PATTERNS:
         emp.work_pattern = work_pattern
+        emp.shift_team = clean_team(work_pattern, shift_team)
     return True
 
-def register_member(emp_id, name="", workplace_id=None, work_pattern=""):
+def register_member(emp_id, name="", workplace_id=None, work_pattern="", shift_team=""):
     if not norm_emp_id(emp_id):
         return False
     if find_employee(emp_id) is None:
         db.session.add(Employee(emp_id=norm_emp_id(emp_id), name=name or "", source="answer"))
         db.session.flush()
-    return remember_person(emp_id, name, workplace_id, work_pattern)
+    return remember_person(emp_id, name, workplace_id, work_pattern, shift_team)
 
 def newest_period(emp_id):
     if not emp_key(emp_id):
@@ -888,19 +902,19 @@ def current_place(emp_id, fallback=None):
     r = Respondent.query.filter(same_emp_id(Respondent.emp_id, emp_id)).order_by(Respondent.id).first()
     for x in (r, find_employee(emp_id), fallback):
         if x is not None and x.workplace_id:
-            return x.workplace_id, x.work_pattern or ""
-    return None, ""
+            return x.workplace_id, x.work_pattern or "", x.shift_team or ""
+    return None, "", ""
 
 def previous_choice(emp_id):
     if not newest_period(emp_id):
         return None
-    workplace_id, pattern = current_place(emp_id)
+    workplace_id, pattern, team = current_place(emp_id)
     if workplace_id and db.session.get(Workplace, workplace_id) is None:
         workplace_id = None
     pattern = pattern if pattern in C.WORK_PATTERNS else ""
     if not workplace_id and not pattern:
         return None
-    return {"workplace_id": workplace_id, "work_pattern": pattern}
+    return {"workplace_id": workplace_id, "work_pattern": pattern, "shift_team": clean_team(pattern, team)}
 
 # ===== 集計・KPI・分析不足領域の判定・次アクション提案 =====
 # ----- KPI・ダッシュボードのグラフ -----
@@ -1238,6 +1252,7 @@ def dx_people(workplace_id=None, wish=None, include_excluded=False):
             name=(r.name if r is not None else "") or (latest.name if latest else "") or p["name"] or names.get(p["key"][1], ""),
             workplace=places.get(p["workplace_id"]) or (r.workplace if r is not None else None),
             work_pattern=(r.work_pattern if r is not None else "") or next((m.work_pattern for m in monthly if m.work_pattern), ""),
+            shift_team=(clean_team(r.work_pattern, r.shift_team) if r is not None else "") or next((clean_team(m.work_pattern, m.shift_team) for m in monthly if clean_team(m.work_pattern, m.shift_team)), ""),
             wish=C.SELF_IMPROVE_YES if checked else (C.SELF_IMPROVE_UNCHECKED if tasks else ""),
             wish_note=C.SELF_IMPROVE_LATER_ASK if later_ask or review else "",
             wish_hint=C.ASSIGNMENT_REVIEW if review else "",
@@ -1400,7 +1415,8 @@ def member_rows():
         place = resp if resp is not None and resp.workplace_id else e
         rows.append({"emp": e, "answered": periods, "since": min(starts) if starts else None, "considered": considered.get(key, 0),
                      "deletable": not periods and not considered.get(key),
-                     "workplace": place.workplace.name if place.workplace is not None else "", "work_pattern": place.work_pattern or ""})
+                     "workplace": place.workplace.name if place.workplace is not None else "", "work_pattern": place.work_pattern or "",
+                     "shift_team": clean_team(place.work_pattern, place.shift_team)})
     return rows
 
 def member_periods():
@@ -1549,7 +1565,15 @@ def monthly_workplace_trends():
     return _trend_table("workplace", Workplace.query.order_by(Workplace.sort, Workplace.id).all(), lambda r, wp: r.workplace_id == wp.id)
 
 def monthly_pattern_trends():
-    return _trend_table("pattern", list(C.WORK_PATTERNS) + ["未設定"], lambda r, pattern: (r.work_pattern or "未設定") == pattern)
+    items = list(C.WORK_PATTERNS) + [f"{C.SHIFT_PATTERN} {t}" for t in C.SHIFT_TEAMS] + ["未設定"]
+
+    def match(r, item):
+        if item in C.WORK_PATTERNS or item == "未設定":
+            return (r.work_pattern or "未設定") == item
+        team = clean_team(r.work_pattern, r.shift_team)
+        return bool(team) and f"{C.SHIFT_PATTERN} {team}" == item
+
+    return _trend_table("pattern", items, match)
 
 def monthly_question_stats(survey, responses):
     stats = []
@@ -5266,7 +5290,7 @@ def seed_demo():
         if r is None:
             r = Respondent(
                 emp_id=emp_id,
-                name=name, workplace=workplace, is_demo=True, work_pattern=("交代勤務" if i % 2 else "普通勤務"),
+                name=name, workplace=workplace, is_demo=True, work_pattern=("交代勤務" if i % 2 else "普通勤務"), shift_team=(C.SHIFT_TEAMS[(i // 2) % len(C.SHIFT_TEAMS)] if i % 2 else ""),
                 c2_skills=C.join_list(skills), c3_learn=C.join_list(learn),
                 created_at=base + timedelta(days=i),
             )
@@ -5318,14 +5342,15 @@ def recent_periods(n=4):
     return [shift_period(cur, -k) for k in range(n - 1, -1, -1)]
 
 def _seed_employees_and_monthly(resp_by_name, wp_by_name, created):
-    rows = [(r.emp_id, name, r.workplace, r.work_pattern or "") for name, r in resp_by_name.items()]
-    rows += [(emp_id, name, wp_by_name.get(wp), "交代勤務" if j % 2 else "普通勤務") for j, (emp_id, name, wp) in enumerate(DEMO_EXTRA_EMPLOYEES)]
+    rows = [(r.emp_id, name, r.workplace, r.work_pattern or "", r.shift_team or "") for name, r in resp_by_name.items()]
+    rows += [(emp_id, name, wp_by_name.get(wp), "交代勤務" if j % 2 else "普通勤務", C.SHIFT_TEAMS[(j // 2) % len(C.SHIFT_TEAMS)] if j % 2 else "")
+             for j, (emp_id, name, wp) in enumerate(DEMO_EXTRA_EMPLOYEES)]
     employees = []
-    for emp_id, name, workplace, pattern in rows:
+    for emp_id, name, workplace, pattern, team in rows:
         emp = find_employee(emp_id)
         if emp is None:
             emp = Employee(
-                emp_id=emp_id, name=name, work_pattern=pattern,
+                emp_id=emp_id, name=name, work_pattern=pattern, shift_team=team,
                 workplace_id=workplace.id if workplace else None, active=True, source="csv", is_demo=True,
             )
             db.session.add(emp)
@@ -5386,7 +5411,7 @@ def _seed_employees_and_monthly(resp_by_name, wp_by_name, created):
             yy, mm = (int(x) for x in period.split("-"))
             db.session.add(
                 MonthlyResponse(
-                    period=period, emp_id=emp.emp_id, name=emp.name, workplace_id=emp.workplace_id, work_pattern=emp.work_pattern or "",
+                    period=period, emp_id=emp.emp_id, name=emp.name, workplace_id=emp.workplace_id, work_pattern=emp.work_pattern or "", shift_team=emp.shift_team or "",
                     respondent_id=r.id if r else None, survey_id=surveys[period].id,
                     answers_json=json.dumps(answers, ensure_ascii=False), comment=comment,
                     is_demo=True, created_at=datetime(yy, mm, 5, 9, 0),
@@ -5783,9 +5808,9 @@ def _monthly_context(emp, src, m=None):
     if not wants:
         return None
     stance = row.answer("stance")
-    wp, pattern = (row.workplace_id, row.work_pattern or "") if row.period >= newest_period(row.emp_id) else current_place(row.emp_id, row)
+    wp, pattern, team = (row.workplace_id, row.work_pattern or "", row.shift_team or "") if row.period >= newest_period(row.emp_id) else current_place(row.emp_id, row)
     return {"id": row.id, "period": row.period, "period_label": period_label(row.period), "wants_tasks": wants, "stance": stance,
-            "self_improve": stance in C.MONTHLY_KPI["self_positive"] and row.period >= stance_since(), "workplace_id": wp, "work_pattern": pattern}
+            "self_improve": stance in C.MONTHLY_KPI["self_positive"] and row.period >= stance_since(), "workplace_id": wp, "work_pattern": pattern, "shift_team": clean_team(pattern, team)}
 
 def _options():
     return {
@@ -5796,6 +5821,8 @@ def _options():
         "durations": C.DURATIONS,
         "wishes": C.WISHES,
         "work_patterns": C.WORK_PATTERNS,
+        "shift_pattern": C.SHIFT_PATTERN,
+        "shift_teams": C.SHIFT_TEAMS,
         "shift_options": C.SHIFT_OPTIONS,
         "frequency_hints": C.FREQUENCY_HINTS,
         "self_improve_yes": C.SELF_IMPROVE_YES,
@@ -5835,8 +5862,11 @@ def api_respondent():
         errors["workplace_id"] = "選択してください"
     elif db.session.get(Workplace, workplace_id) is None:
         errors["workplace_id"] = "Gr・役割を選んでください"
+    shift_team = clean_team(work_pattern, f.get("shift_team"))
     if work_pattern not in C.WORK_PATTERNS:
         errors["work_pattern"] = "選択してください"
+    elif work_pattern == C.SHIFT_PATTERN and not shift_team:
+        errors["shift_team"] = "選択してください"
     if errors:
         return jsonify({"success": False, "errors": errors}), 400
     newest = current_period() >= newest_period(emp_id)
@@ -5849,7 +5879,8 @@ def api_respondent():
     if newest or not r.workplace_id:
         r.workplace_id = workplace_id
         r.work_pattern = work_pattern
-    remember_person(emp_id, name, workplace_id if newest else None, work_pattern if newest else None)
+        r.shift_team = shift_team
+    remember_person(emp_id, name, workplace_id if newest else None, work_pattern if newest else None, shift_team if newest else None)
     db.session.commit()
     session["respondent_id"] = r.id
     return jsonify({"success": True, **_state(r)})
@@ -7127,11 +7158,14 @@ def submit():
     survey = get_or_create_survey(period)
     workplace_id = _int_or(data.get("workplace_id") or 0, 0) or None
     work_pattern = (data.get("work_pattern") or "").strip()
+    shift_team = clean_team(work_pattern, data.get("shift_team"))
     emp_id, name, errors = _check_emp_id(data.get("emp_id"), "ユーザーIDを入力してください")
     if not workplace_id or db.session.get(Workplace, workplace_id) is None:
         errors["workplace_id"] = "Gr・役割を選んでください"
     if work_pattern not in C.WORK_PATTERNS:
         errors["work_pattern"] = "勤務形態を選んでください（普通勤務／交代勤務）"
+    elif work_pattern == C.SHIFT_PATTERN and not shift_team:
+        errors["shift_team"] = "班を選んでください（" + "・".join(C.SHIFT_TEAMS) + "）"
     raw = data.get("answers") if request.is_json else None
     answers = {}
     for q in survey.questions:
@@ -7179,7 +7213,7 @@ def submit():
 
     newest = period >= newest_period(emp_id)
     row = MonthlyResponse(
-        period=period, emp_id=emp_id, name=name, workplace_id=workplace_id, work_pattern=work_pattern, survey_id=survey.id,
+        period=period, emp_id=emp_id, name=name, workplace_id=workplace_id, work_pattern=work_pattern, shift_team=shift_team, survey_id=survey.id,
         answers_json=json.dumps(answers, ensure_ascii=False), comment=comment,
     )
     respondent = _respondent_for(emp_id)
@@ -7187,7 +7221,8 @@ def submit():
     if respondent is not None and newest:
         respondent.workplace_id = workplace_id
         respondent.work_pattern = work_pattern
-    register_member(emp_id, name, workplace_id if newest else None, work_pattern if newest else "")
+        respondent.shift_team = shift_team
+    register_member(emp_id, name, workplace_id if newest else None, work_pattern if newest else "", shift_team if newest else "")
     db.session.add(row)
     db.session.commit()
     wants = answers.get("wants") == "ある"
@@ -7493,23 +7528,23 @@ MEMBER_STATUS_TEXT = {"yes": "回答", "no": "未回答", "out": "対象外", "b
 
 def export_members():
     rows_m, periods, _stats, _active = _member_payload()
-    header = ["ユーザーID", "氏名", "Gr・役割", "勤務形態", "対象", "対象外にした日", "人財一覧に載った日", "自動化アイテム（件）"] + [f"{p[:4]}年{int(p[5:])}月" for p in periods]
+    header = ["ユーザーID", "氏名", "Gr・役割", "勤務形態", "班", "対象", "対象外にした日", "人財一覧に載った日", "自動化アイテム（件）"] + [f"{p[:4]}年{int(p[5:])}月" for p in periods]
     rows = []
     for r in rows_m:
         e = r["emp"]
-        rows.append([e.emp_id, e.name or "", r["workplace"], r["work_pattern"], "対象外" if e.active is False else "対象",
+        rows.append([e.emp_id, e.name or "", r["workplace"], r["work_pattern"], r["shift_team"], "対象外" if e.active is False else "対象",
                      e.excluded_at.strftime("%Y-%m-%d") if e.active is False and e.excluded_at else "", e.created_at.strftime("%Y-%m-%d") if e.created_at else "",
                      r["considered"]] + [MEMBER_STATUS_TEXT.get(st, "") for _p, st in r["cells"]])
     return header, rows
 
 
 def export_respondents():
-    header = ["ユーザーID", "氏名", "Gr・役割", "勤務形態", "自分で改善したい", "意欲（自動化アイテム登録）", "月次の進め方（空でない直近の答え）", "その月度", "月次で自分で・一緒にと答えた回数",
+    header = ["ユーザーID", "氏名", "Gr・役割", "勤務形態", "班", "自分で改善したい", "意欲（自動化アイテム登録）", "月次の進め方（空でない直近の答え）", "その月度", "月次で自分で・一緒にと答えた回数",
               "使える技術", "学びたい技術", "登録業務数", "月間時間(分)", "一緒にやってみたい業務数", "伴走・希望の業務"]
     rows = []
     for p in dx_people():
         rows.append([
-            p["emp_id"], p["name"], p["workplace"].name if p["workplace"] else "", p["work_pattern"], "○" if p["positive"] else "", wish_text(p),
+            p["emp_id"], p["name"], p["workplace"].name if p["workplace"] else "", p["work_pattern"], p["shift_team"], "○" if p["positive"] else "", wish_text(p),
             p["stance_latest"], stance_period_text(p), p["self_positive_count"] if p["monthly"] else "",
             "・".join(p["skills"]) or (C.SKILL_NONE if p["skills_none"] else ""), "・".join(p["learn"]) or (C.SKILL_NONE if p["learn_none"] else ""),
             p["task_count"], p["minutes"], p["checked_count"], "・".join(f"{x['task'].name}（{x['label']}）" for x in p["target_tasks"]),
@@ -7524,11 +7559,11 @@ def export_monthly():
             if q["key"] not in texts:
                 keys.append(q["key"])
                 texts[q["key"]] = q["text"]
-    header = ["月度", "ユーザーID", "氏名", "Gr・役割", "勤務形態"] + [texts[k] for k in keys] + ["コメント", "回答日時"]
+    header = ["月度", "ユーザーID", "氏名", "Gr・役割", "勤務形態", "班"] + [texts[k] for k in keys] + ["コメント", "回答日時"]
     rows = []
     for r in MonthlyResponse.query.order_by(MonthlyResponse.period, MonthlyResponse.workplace_id, MonthlyResponse.name).all():
         a = r.answers
-        rows.append([r.period, r.emp_id, r.name, r.workplace.name if r.workplace else "", r.work_pattern or ""] + [a.get(k, "") for k in keys]
+        rows.append([r.period, r.emp_id, r.name, r.workplace.name if r.workplace else "", r.work_pattern or "", clean_team(r.work_pattern, r.shift_team)] + [a.get(k, "") for k in keys]
                     + [r.comment or "", r.created_at.strftime("%Y-%m-%d %H:%M") if r.created_at else ""])
     return header, rows
 
@@ -7683,7 +7718,7 @@ TEMPLATES = {
       <th><input type="search" class="form-control form-control-sm" data-filter="id" placeholder="含む" aria-label="ユーザーIDで絞り込む"></th>
       <th><input type="search" class="form-control form-control-sm" data-filter="name" placeholder="含む" aria-label="氏名で絞り込む"></th>
       <th><select class="form-select form-select-sm" data-filter="wp" aria-label="Gr・役割で絞り込む"><option value="">すべて</option>{% for w in member_workplaces %}<option value="{{ w }}" {% if initial.wp == w %}selected{% endif %}>{{ w }}</option>{% endfor %}<option value="-">（未設定）</option></select></th>
-      <th><select class="form-select form-select-sm" data-filter="pat" aria-label="勤務形態で絞り込む"><option value="">すべて</option>{% for w in C.WORK_PATTERNS %}<option value="{{ w }}">{{ w }}</option>{% endfor %}<option value="-">（未設定）</option></select></th>
+      <th><select class="form-select form-select-sm" data-filter="pat" aria-label="勤務形態で絞り込む"><option value="">すべて</option>{% for w in C.WORK_PATTERNS %}<option value="{{ w }}">{{ w }}</option>{% endfor %}{% for t in C.SHIFT_TEAMS %}<option value="{{ C.SHIFT_PATTERN }}|{{ t }}">{{ C.SHIFT_PATTERN }}（{{ t }}）</option>{% endfor %}<option value="-">（未設定）</option></select></th>
       <th><select class="form-select form-select-sm" data-filter="wish" aria-label="意欲で絞り込む"><option value="">すべて</option><option value="positive" {% if initial.wish == 'positive' %}selected{% endif %}>自分で改善したい人</option>{% for opt in C.DX_WISH_OPTIONS %}<option value="{{ opt }}" {% if initial.wish == opt %}selected{% endif %}>{{ opt }}</option>{% endfor %}<option value="-">（なし）</option></select></th>
       <th><select class="form-select form-select-sm" data-filter="stance" aria-label="改善の進め方で絞り込む"><option value="">すべて</option>{% for opt in stance_options %}<option value="{{ opt }}">{{ opt }}</option>{% endfor %}<option value="old">{{ C.STANCE_MONTHS }}か月より前</option><option value="-">（回答なし）</option></select></th>
       <th><select class="form-select form-select-sm" data-filter="skills" aria-label="使える技術で絞り込む"><option value="">すべて</option>{% for s in skill_options %}<option value="{{ s }}">{{ s }}</option>{% endfor %}<option value="-">（なし）</option></select></th>
@@ -7700,7 +7735,7 @@ TEMPLATES = {
       <td data-sort="{{ r.emp.name or '' }}">{{ r.emp.name or '' }}{% if r.deletable %}
         <form method="post" action="{{ url_for('admin.delete_employee', employee_id=r.emp.id) }}" class="d-inline" data-confirm="{{ r.emp.emp_id }} を人財一覧から削除しますか？（まだ回答のない人だけ削除できます）"><button class="btn btn-link btn-sm text-danger p-0 ms-1">削除</button></form>{% endif %}</td>
       <td class="small" data-sort="{{ r.workplace }}">{{ r.workplace or '－' }}</td>
-      <td class="small" data-sort="{{ r.work_pattern }}">{{ r.work_pattern or '－' }}</td>
+      <td class="small" data-sort="{{ r.work_pattern }}" data-team="{{ r.shift_team }}">{{ r.work_pattern or '－' }}{% if r.shift_team %}（{{ r.shift_team }}）{% endif %}</td>
       {% set wr = (0 if d.wish_positive else (1 if d.wish == C.SELF_IMPROVE_YES else (2 if d.wish else 9))) if d else 9 %}
       <td class="small" data-sort="{{ wr }}" data-wish="{{ d.wish if d else '' }}" data-positive="{{ '1' if d and d.positive else '0' }}">
         {% if d and d.wish %}<span class="badge {{ 'text-bg-success' if d.wish_positive else ('text-bg-secondary' if d.wish_note else 'text-bg-light border') }}">{{ d.wish }}</span>{% if d.wish_note %}<div class="text-muted">{{ d.wish_note }}{% if d.wish_hint %} <span class="badge bg-warning-subtle text-warning-emphasis">{{ d.wish_hint }}</span>{% endif %}</div>{% endif %}{% else %}<span class="text-muted">－</span>{% endif %}
@@ -7844,6 +7879,7 @@ TEMPLATES = {
     if (col.charAt(0) === "m") return td.dataset.st === v;
     if (col === "excluded") return tr.dataset.excluded === v;
     if (col === "id" || col === "name") return (td.dataset.sort || "").toLowerCase().indexOf(v.toLowerCase()) >= 0;
+    if (col === "pat" && v.indexOf("|") > 0) { var pt = v.split("|"); return td.dataset.sort === pt[0] && td.dataset.team === pt[1]; }
     if (col === "wp" || col === "pat") return v === "-" ? !td.dataset.sort : td.dataset.sort === v;
     if (col === "wish") return v === "positive" ? td.dataset.positive === "1" : (v === "-" ? !td.dataset.wish : td.dataset.wish === v);
     if (col === "stance") return v === "old" ? td.dataset.old === "1" : (v === "-" ? !td.dataset.stance : td.dataset.stance === v);
@@ -10011,6 +10047,13 @@ TEMPLATES = {
               {% for w in C.WORK_PATTERNS %}<option value="{{ w }}">{{ w }}</option>{% endfor %}
             </select>
           </div>
+          <div class="col-sm-6 d-none" id="shift-team-col">
+            <label class="form-label" for="shift_team">班</label>
+            <select name="shift_team" id="shift_team" class="form-select">
+              <option value="">選択</option>
+              {% for t in C.SHIFT_TEAMS %}<option value="{{ t }}">{{ t }}</option>{% endfor %}
+            </select>
+          </div>
         </div>
         <div id="emp-msg" class="form-text"></div>
         <div id="emp-prefill" class="form-text mq-prefill-note"></div>
@@ -10089,12 +10132,19 @@ TEMPLATES = {
   var empInput = document.getElementById("emp_id");
   var wpSelect = document.getElementById("workplace_id");
   var patSelect = document.getElementById("work_pattern");
+  var teamSelect = document.getElementById("shift_team"), teamCol = document.getElementById("shift-team-col"), SHIFT = {{ C.SHIFT_PATTERN|tojson }};
+  function syncTeam() {
+    var on = patSelect.value === SHIFT;
+    teamCol.classList.toggle("d-none", !on);
+    if (!on) teamSelect.value = "";
+  }
+  patSelect.addEventListener("change", syncTeam);
   var msg = document.getElementById("emp-msg");
   var prefillNote = document.getElementById("emp-prefill");
   var lookupTimer = null, empFound = null, prefilledFor = "";
   var PREFILL_NOTE = {{ C.PREFILL_NOTE|tojson }};
   function clearPrefill() {
-    if (prefilledFor) { wpSelect.value = ""; patSelect.value = ""; }
+    if (prefilledFor) { wpSelect.value = ""; patSelect.value = ""; teamSelect.value = ""; syncTeam(); }
     prefilledFor = "";
     prefillNote.textContent = "";
   }
@@ -10103,10 +10153,12 @@ TEMPLATES = {
     if (!prefill || (prefilledFor !== key && (wpSelect.value || patSelect.value))) return;
     if (prefill.workplace_id) wpSelect.value = String(prefill.workplace_id);
     if (prefill.work_pattern) patSelect.value = prefill.work_pattern;
+    syncTeam();
+    if (prefill.shift_team) teamSelect.value = prefill.shift_team;
     prefilledFor = key;
     prefillNote.textContent = PREFILL_NOTE;
   }
-  [wpSelect, patSelect].forEach(function (s) { s.addEventListener("change", function () { prefilledFor = ""; }); });
+  [wpSelect, patSelect, teamSelect].forEach(function (s) { s.addEventListener("change", function () { prefilledFor = ""; }); });
   var NOT_FOUND = {{ C.EMP_NOT_FOUND|tojson }}, empProblem = NOT_FOUND;
   function setMsg(text, state) { msg.textContent = text || ""; msg.classList.toggle("mq-emp-ok", state === "ok"); msg.classList.toggle("mq-emp-ng", state === "ng"); }
   async function lookupEmp() {
@@ -10143,7 +10195,7 @@ TEMPLATES = {
     return !!(t && t.value.trim());
   }
   function updateReady() {
-    var items = [!!(empInput.value.trim() && empFound !== false && wpSelect.value && patSelect.value)];
+    var items = [!!(empInput.value.trim() && empFound !== false && wpSelect.value && patSelect.value && (patSelect.value !== SHIFT || teamSelect.value))];
     form.querySelectorAll(".mq-q[data-key]").forEach(function (q) {
       if (!q.classList.contains("d-none") && q.dataset.required === "1") items.push(answeredOf(q));
     });
@@ -10242,14 +10294,14 @@ TEMPLATES = {
       if (q.dataset.required === "1" && !val) { err.textContent = q.dataset.type === "choice" ? "選択してください" : "入力してください"; if (!firstMissing) firstMissing = q; }
       answers[key] = val;
     });
-    var missing = !form.emp_id.value.trim() ? "ユーザーIDを入力してください" : empFound === false ? empProblem : !form.workplace_id.value ? "Gr・役割を選んでください" : !form.work_pattern.value ? "勤務形態を選んでください" : "";
+    var missing = !form.emp_id.value.trim() ? "ユーザーIDを入力してください" : empFound === false ? empProblem : !form.workplace_id.value ? "Gr・役割を選んでください" : !form.work_pattern.value ? "勤務形態を選んでください" : (form.work_pattern.value === SHIFT && !form.shift_team.value) ? "班を選んでください" : "";
     if (missing) {
       errBox.textContent = missing; errBox.classList.remove("d-none");
       document.querySelector(".mq-identity").scrollIntoView({ behavior: "smooth", block: "center" });
       return;
     }
     if (firstMissing) { firstMissing.scrollIntoView({ behavior: "smooth", block: "center" }); return; }
-    var payload = { period: form.period.value, emp_id: form.emp_id.value.trim(), workplace_id: form.workplace_id.value, work_pattern: form.work_pattern.value, answers: answers, comment: form.comment.value.trim() };
+    var payload = { period: form.period.value, emp_id: form.emp_id.value.trim(), workplace_id: form.workplace_id.value, work_pattern: form.work_pattern.value, shift_team: form.shift_team.value, answers: answers, comment: form.comment.value.trim() };
     submitBtn.disabled = true; submitBtn.textContent = "送信中…";
     try {
       var r = await fetch(form.action, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify(payload) });
@@ -13086,7 +13138,9 @@ summary { transition: color 0.15s ease; }
       var first = el("option", null, "選択");
       first.value = "";
       sel.appendChild(first);
-      var opts = f.options === "work_patterns" ? O.work_patterns.map(function (w) { return { value: w, label: w }; }) : O.workplaces.map(function (w) { return { value: String(w.id), label: w.name }; });
+      var opts = f.options === "work_patterns" ? O.work_patterns.map(function (w) { return { value: w, label: w }; })
+        : f.options === "shift_teams" ? O.shift_teams.map(function (w) { return { value: w, label: w }; })
+        : O.workplaces.map(function (w) { return { value: String(w.id), label: w.name }; });
       opts.forEach(function (o) { var op = el("option", null, o.label); op.value = o.value; sel.appendChild(op); });
       wrap.appendChild(sel);
     } else {
@@ -13132,7 +13186,16 @@ summary { transition: color 0.15s ease; }
   var idWrap = renderField(personField("emp_id"), null);
   idRow.appendChild(idWrap);
   idRow.appendChild(renderField(personField("workplace_id"), savePersonSoon));
-  idRow.appendChild(renderField(personField("work_pattern"), savePersonSoon));
+  var patWrap = renderField(personField("work_pattern"), savePersonSoon), teamWrap = renderField(personField("shift_team"), savePersonSoon);
+  idRow.appendChild(patWrap);
+  idRow.appendChild(teamWrap);
+  function syncTeam() {
+    var on = patWrap.querySelector("select").value === O.shift_pattern;
+    teamWrap.classList.toggle("d-none", !on);
+    if (!on) { teamWrap.querySelector("select").value = ""; clearError(teamWrap); }
+  }
+  patWrap.querySelector("select").addEventListener("change", syncTeam);
+  syncTeam();
   var identity = el("div", "rq-identity");
   idRow.appendChild(identity);
   personBox.appendChild(idRow);
@@ -13141,16 +13204,19 @@ summary { transition: color 0.15s ease; }
   var empInput = idWrap.querySelector("input");
   var found = null, idProblem = "", confirmedId = "";
   var ID_OK = "ユーザーIDを確認しました";
-  var NOT_FOUND = "このユーザーIDは見つかりません。IDを確かめてください";
+  var NOT_FOUND = "このユーザーIDは見つかりません。IDを確かめてください（初めて回答する人で見つからないときは、改善チームに連絡してください）";
   function normId(v) { return (v || "").normalize("NFKC").trim().toLowerCase(); }
   function setIdentity(text, ng) { identity.textContent = text || ""; identity.classList.toggle("is-ng", !!ng); }
-  function fillSelects(workplaceId, pattern) {
+  function fillSelects(workplaceId, pattern, team) {
     var ws = personBox.querySelector('select[name="workplace_id"]');
     if (ws && workplaceId) { ws.value = String(workplaceId); if (ws.value) clearError(ws.closest(".rq-field")); }
     var ps = personBox.querySelector('select[name="work_pattern"]');
     if (ps && pattern) { ps.value = pattern; if (ps.value) clearError(ps.closest(".rq-field")); }
+    syncTeam();
+    var ts = teamWrap.querySelector("select");
+    if (team) { ts.value = team; if (ts.value) clearError(teamWrap); }
   }
-  function clearSelects() { personBox.querySelectorAll("select").forEach(function (s) { s.value = ""; }); }
+  function clearSelects() { personBox.querySelectorAll("select").forEach(function (s) { s.value = ""; }); syncTeam(); }
   function forgetPerson() {
     confirmedId = "";
     addedIds = [];
@@ -13185,11 +13251,11 @@ summary { transition: color 0.15s ease; }
       setIdentity(ID_OK);
       var before = getValues(personBox);
       if (j.prefill && !before.workplace_id && !before.work_pattern) {
-        fillSelects(j.prefill.workplace_id, j.prefill.work_pattern);
+        fillSelects(j.prefill.workplace_id, j.prefill.work_pattern, j.prefill.shift_team);
         prefillNote.textContent = O.prefill_note;
       }
       var v = getValues(personBox);
-      if (v.workplace_id && v.work_pattern) debounce("person", function () { savePerson(false); }, 200);
+      if (v.workplace_id && v.work_pattern && (v.work_pattern !== O.shift_pattern || v.shift_team)) debounce("person", function () { savePerson(false); }, 200);
     } else {
       found = false;
       idProblem = j.excluded ? (j.message || NOT_FOUND) : NOT_FOUND;
@@ -13208,12 +13274,13 @@ summary { transition: color 0.15s ease; }
     else if (found === false) errors.emp_id = idProblem || "見つかりません";
     if (!v.workplace_id) errors.workplace_id = "選んでください";
     if (!v.work_pattern) errors.work_pattern = "選んでください";
+    else if (v.work_pattern === O.shift_pattern && !v.shift_team) errors.shift_team = "選んでください";
     if (Object.keys(errors).length) {
       if (showErr) showErrors(personBox, errors);
       else if (found && !errors.emp_id) showErrors(personBox, errors);
       return Promise.resolve(false);
     }
-    personSaving = api("POST", CFG.api.respondent, { emp_id: v.emp_id, workplace_id: v.workplace_id, work_pattern: v.work_pattern }).then(function (j) {
+    personSaving = api("POST", CFG.api.respondent, { emp_id: v.emp_id, workplace_id: v.workplace_id, work_pattern: v.work_pattern, shift_team: v.shift_team }).then(function (j) {
       personSaving = null;
       if (!j._ok) {
         if (j.errors && j.errors.emp_id && v.emp_id) { found = false; idProblem = j.errors.emp_id; setIdentity(j.errors.emp_id, true); }
@@ -13321,7 +13388,7 @@ summary { transition: color 0.15s ease; }
     renderMonthlyBanner();
     titleInput.value = nextMonthlyTask();
     if (!S.respondent) {
-      fillSelects(CFG.monthly.workplace_id, CFG.monthly.work_pattern);
+      fillSelects(CFG.monthly.workplace_id, CFG.monthly.work_pattern, CFG.monthly.shift_team);
       await lookupEmp();
       var ok = await savePerson(false);
       if (!ok) { toast("「基本情報」の空欄を選ぶと始められます"); return; }
