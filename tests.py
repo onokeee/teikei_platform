@@ -777,7 +777,9 @@ def smoke_board():
         dom_del = app_module.Domain.query.filter_by(name="人員・労務管理").first().id
     client.post(f"/admin/workplace/{wp_del}/delete")
     client.post(f"/admin/domain/{dom_del}/delete")
-    client.post("/admin/demo/load")
+    html_demo = client.post("/admin/demo/load", follow_redirects=True).data.decode("utf-8")
+    check("人財一覧のデモの12人" in html_demo and "社員マスタ" not in html_demo, "デモ投入の知らせに古い言葉（社員マスタ）を使わない")
+    check("'業務を追加' if q.key in ('task_names', 'wants_tasks') else 'もう1つ追加'" in app_module.TEMPLATES["monthly/form.html"], "記述（複数）の追加ボタンは、業務名の設問だけ「業務を追加」、ほかは「もう1つ追加」")
     with app.app_context():
         made = json.loads(app_module.Setting.get("demo_masters", "{}"))
         check(len(made.get("workplaces", [])) == 1 and len(made.get("domains", [])) == 1 and len(made.get("surveys", [])) == 3 and own_survey not in made["surveys"],
@@ -1853,6 +1855,19 @@ def smoke_login_monthly():
     code, html_e, r = get("/admin/employees")
     check(f"回答した人 {answered_n} 人／業務" in html and "一度でも回答した人）" not in html + html_e and 'kpi-label">回答した人' not in html_e,
           f"P9: 管理の人数は「回答した人」（対象外とまだ回答のない人を除く）: {answered_n} 人。人財一覧には人数のカードを置かない")
+    check("LDAP は未設定です。人財一覧に載っている人だけが回答できます" in html and "LDAP_API_URL" in html and 'name="catchphrase"' not in html and 'name="sub_message"' not in html,
+          "管理: LDAP の設定の有無と、未設定なら新しい人は回答できないことを出す。どこにも出ないキャッチコピー・サブメッセージの設定はない")
+    with app.app_context():
+        dom = app_module.Domain.query.order_by(app_module.Domain.id).first()
+        dom_id, dom_name = dom.id, dom.name
+    client.post(f"/admin/domain/{dom_id}/update", data={"name": dom_name, "description": dom.description or "", "sort": "0"})
+    with app.app_context():
+        check(db.session.get(app_module.Domain, dom_id).sort == 0, "業務領域の並び順に 0 を入れると 0 になる（無視しない）")
+    html_mr = client.get("/monthly/results").data.decode("utf-8")
+    check('line("自分で取り組みたい", d.self_only_rate, "#00a99d")' in html_mr and '"self_rate"' not in html_mr.split('id="monthly-chart"', 1)[-1][:400],
+          "月次集計のグラフで「自動化したい」と「自分で取り組みたい」を別の色にする")
+    check("月次の進め方: 自分で取り組みたい" in html_e and "月次: 自分で取り組みたい" not in html_e, "人財一覧の意欲の分布の月次は、表と同じ「直近の進め方」で数える")
+    check("改善チームに連絡してください" in app_module.EMP_NOT_FOUND, "見つからないユーザーIDの知らせに、初めての人の連絡先を添える")
     html_d = client.get("/").data.decode("utf-8")
     check(all(h.count('href="/monthly/results"') == 1 for h in (html, html_e, html_d)) and "月次集計へ" not in html_d,
           "管理・人財一覧・ダッシュボードに月次集計へのボタンやリンクはない（ヘッダーのタブだけ）")
@@ -1952,13 +1967,14 @@ def smoke_login_monthly():
         n001 = Employee.query.filter_by(emp_id="N001").first().id
         r001 = Employee.query.filter_by(emp_id="R001").first().id
     code, html, r = get("/admin/employees")
-    check(f"/admin/employees/{n001}/delete" in html and f"/admin/employees/{e009}/delete" not in html and f"/admin/employees/{r001}/delete" not in html, "P10: 人財一覧の削除ボタンは、まだ回答も登録もない人だけに出す")
+    check(f"/admin/employees/{n001}/delete" in html and f"/admin/employees/{e009}/delete" not in html and f"/admin/employees/{r001}/delete" in html,
+          "P10: 人財一覧の削除ボタンは、月次の回答も登録した業務もない人に出す（「基本情報」を保存しただけの人や、業務をすべて取り消した人も消せる）")
     html_x = client.post(f"/admin/employees/{e009}/delete", follow_redirects=True).data.decode("utf-8")
     html_y = client.post(f"/admin/employees/{r001}/delete", follow_redirects=True).data.decode("utf-8")
     client.post(f"/admin/employees/{n001}/delete")
     with app.app_context():
-        check(db.session.get(Employee, e009) is not None and db.session.get(Employee, r001) is not None and "削除できません" in html_x and "「対象外」にチェック" in html_x and "削除できません" in html_y and db.session.get(Employee, n001) is None,
-              "P10: 月次の回答・業務・「あなたのこと」の記録がある人は削除せず「対象外」を案内する。まだ何もない人は削除できる")
+        check(db.session.get(Employee, e009) is not None and db.session.get(Employee, r001) is None and "削除できません" in html_x and "「対象外」にチェック" in html_x and "人財一覧から削除しました" in html_y and db.session.get(Employee, n001) is None,
+              "P10: 月次の回答・登録した業務がある人は削除せず「対象外」を案内する。どちらもない人は削除できる")
 
     _people_checks(check)
     _people_round2_checks(check)

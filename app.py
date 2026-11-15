@@ -837,7 +837,7 @@ def init_id_seq():
     db.session.commit()
 
 # ===== ユーザーID照会の控え（ldap_auth の結果を employees に残し、足りない氏名を補う） =====
-EMP_NOT_FOUND = "このユーザーIDは見つかりません。IDを確かめてください"
+EMP_NOT_FOUND = "このユーザーIDは見つかりません。IDを確かめてください（初めて回答する人で見つからないときは、改善チームに連絡してください）"
 EMP_EXCLUDED = "このユーザーIDは対象外になっています。管理者に連絡してください"
 PREFILL_NOTE = "前回の回答のGr・役割と勤務形態を入れました。変わっていたら、今の所属・勤務形態に合わせてプルダウンで選び直してください。"
 
@@ -1424,7 +1424,7 @@ def member_rows():
         resp = first_resp.get(key)
         place = resp if resp is not None and resp.workplace_id else e
         rows.append({"emp": e, "answered": periods, "since": min(starts) if starts else None, "considered": considered.get(key, 0),
-                     "deletable": not periods and key not in first_resp,
+                     "deletable": not periods and not considered.get(key),
                      "workplace": place.workplace.name if place.workplace is not None else "", "work_pattern": place.work_pattern or ""})
     return rows
 
@@ -4632,8 +4632,6 @@ DEFAULT_DOMAINS = [
 
 DEFAULT_SETTINGS = {
     "project_name": "PC定型業務ゼロ化プロジェクト",
-    "catchphrase": "なくすのは作業。増やすのは人の可能性。",
-    "sub_message": "業務をなくす。自ら改善する。みんなで進化する。",
     "ai_suggestions": "[]",
     "board_show_names": "1",
     "openai_api_url": "",
@@ -4645,7 +4643,7 @@ RENAMED_DEFAULTS = {
     "project_name": ("製造部 繰り返しPC業務ゼロ化ポータル", "製造部 PC定型業務ゼロ化ポータル"),
 }
 
-REMOVED_SETTINGS = ("survey_deadline", "contact", "portal_base_url", "monthly_deadline", "mail_subject", "mail_body", "board_message", "target_respondents", "deadline")
+REMOVED_SETTINGS = ("survey_deadline", "contact", "portal_base_url", "monthly_deadline", "mail_subject", "mail_body", "board_message", "target_respondents", "deadline", "catchphrase", "sub_message")
 
 def seed_masters():
     changed = _backfill_excluded_at()
@@ -5520,6 +5518,12 @@ def authenticate(user_id, password):
     if ok_id and ok_pw:
         return {"emp_id": admin_id, "name": "管理者"}
     return None
+
+def ldap_status_text():
+    api, server = ldap_auth.api_config()["url"], ldap_auth.ldap_config()["server"]
+    if api or server:
+        return ("LDAP（API）" if api else "LDAP（サーバー）") + "でユーザーIDを確かめます。人財一覧にない人も、見つかれば回答できます。"
+    return "LDAP は未設定です。人財一覧に載っている人だけが回答できます。新しい人が回答できるようにするには、config.py の LDAP_API_URL か LDAP_SERVER を設定してください。"
 
 def auth_status_text():
     admin_id, admin_password = admin_credentials()
@@ -6763,10 +6767,10 @@ def people_summary(everyone):
     }
     positive_counts = Counter((p["work_pattern"] or "未設定") for p in everyone if p["positive"])
     summary["positive_by_pattern"] = {k: positive_counts[k] for k in list(C.WORK_PATTERNS) + ["未設定"] if positive_counts.get(k)}
-    latest_stances = Counter(m.answer("stance") for m in in_latest if m.answer("stance"))
+    latest_stances = Counter(p["stance_latest"] for p in everyone if p["stance_latest"] and not p["stance_old"])
     stance_options = next((q["options"] for q in C.MONTHLY_CORE_QUESTIONS if q["key"] == "stance"), [])
     wish_counts = [("登録: " + opt, len([p for p in everyone if p["wish"] == opt])) for opt in C.DX_WISH_OPTIONS]
-    wish_counts += [("月次: " + opt, latest_stances.get(opt, 0)) for opt in stance_options]
+    wish_counts += [("月次の進め方: " + opt, latest_stances.get(opt, 0)) for opt in stance_options]
     return summary, wish_counts, have, learn, stance_options
 
 # ===== 画面: 管理 =====
@@ -6785,6 +6789,7 @@ def index():
         answered_count=len(answered_people()),
         task_count=Task.query.count(),
         auth_status=auth_status_text(),
+        ldap_status=ldap_status_text(),
         skill_rows=_skill_rows(),
     )
 
@@ -6830,7 +6835,7 @@ def save_skills():
 
 @bp_admin.post("/settings")
 def save_settings():
-    for key in ("project_name", "catchphrase", "sub_message"):
+    for key in ("project_name",):
         Setting.set(key, (request.form.get(key) or "").strip())
     Setting.set("board_show_names", "1" if request.form.get("board_show_names") else "0")
     db.session.commit()
@@ -6952,7 +6957,9 @@ def update_domain(domain_id):
         Task.query.filter_by(ai_domain=d.name).update({"ai_domain": name}, synchronize_session=False)
         d.name = name
     d.description = (request.form.get("description") or "").strip()
-    d.sort = request.form.get("sort", type=int) or d.sort
+    sort = request.form.get("sort", type=int)
+    if sort is not None:
+        d.sort = sort
     db.session.commit()
     flash("業務領域を更新しました。", "success")
     return redirect(url_for("admin.index"))
@@ -7024,12 +7031,13 @@ def toggle_employee(employee_id):
 def delete_employee(employee_id):
     e = _get_or_404(Employee, employee_id)
     key = emp_key(e.emp_id)
-    if any(emp_key(x) == key for model in (MonthlyResponse, Respondent) for (x,) in db.session.query(model.emp_id).distinct().all()):
+    has_tasks = any(emp_key(r.emp_id) == key and r.tasks for r in Respondent.query.all())
+    if has_tasks or any(emp_key(x) == key for (x,) in db.session.query(MonthlyResponse.emp_id).distinct().all()):
         flash(f"{e.emp_id} は月次アンケートの回答か自動化アイテムの登録があるため削除できません（削除しても次の起動で一覧に戻ります）。回答率の分母から外すときは「対象外」にチェックしてください。", "warning")
         return redirect(url_for("admin.employees"))
     db.session.delete(e)
     db.session.commit()
-    flash("社員を削除しました。", "info")
+    flash(f"{e.emp_id} を人財一覧から削除しました。", "info")
     return redirect(url_for("admin.employees"))
 
 # ----- 業務マップの区分 -----
@@ -7073,7 +7081,7 @@ def map_vocab_try():
 @bp_admin.post("/demo/load")
 def load_demo():
     n = seed_demo()
-    flash(f"デモデータを投入しました（業務 {n} 件、社員マスタと月次アンケート4か月分を含む）。", "success")
+    flash(f"デモデータを投入しました（業務 {n} 件、人財一覧のデモの12人と月次アンケート4か月分を含む）。", "success")
     return redirect(url_for("main.index"))
 
 @bp_admin.post("/demo/clear")
@@ -7323,7 +7331,7 @@ def results():
     chart = {
         "labels": [r["label"] for r in rows],
         "n": [r["n"] for r in rows],
-        **_rounded_series(rows, "hours_month", "has_rate", "decreased_rate", "wants_rate", "ask_rate", "self_rate", "together_rate", "self_only_rate"),
+        **_rounded_series(rows, "hours_month", "has_rate", "decreased_rate", "wants_rate", "ask_rate", "together_rate", "self_only_rate"),
     }
     return render_template(
         "monthly/results.html",
@@ -8192,8 +8200,6 @@ TEMPLATES = {
     <form method="post" action="{{ url_for('admin.save_settings') }}" class="card mb-3"><div class="card-body">
       <h5 class="card-title">プロジェクト設定</h5>
       <div class="mb-2"><label class="form-label small mb-0">ポータル名</label><input type="text" name="project_name" class="form-control form-control-sm" value="{{ settings.project_name }}"></div>
-      <div class="mb-2"><label class="form-label small mb-0">キャッチコピー</label><input type="text" name="catchphrase" class="form-control form-control-sm" value="{{ settings.catchphrase }}"></div>
-      <div class="mb-2"><label class="form-label small mb-0">サブメッセージ</label><input type="text" name="sub_message" class="form-control form-control-sm" value="{{ settings.sub_message }}"></div>
       <div class="form-check mb-2">
         <input class="form-check-input" type="checkbox" name="board_show_names" value="1" id="board-show-names" {% if settings.board_show_names != '0' %}checked{% endif %}>
         <label class="form-check-label small" for="board-show-names">活動状況に登録者の氏名を表示する（外すとGr・役割名のみ）</label>
@@ -8202,8 +8208,9 @@ TEMPLATES = {
     </div></form>
 
     <div class="card mb-3"><div class="card-body">
-      <h5 class="card-title">ログイン</h5>
-      <p class="small mb-0">{{ auth_status }}</p>
+      <h5 class="card-title">ログインとユーザーIDの照会</h5>
+      <p class="small mb-1">{{ auth_status }}</p>
+      <p class="small mb-0">{{ ldap_status }}</p>
     </div></div>
 
     <div class="card mb-3"><div class="card-body">
@@ -10125,7 +10132,7 @@ TEMPLATES = {
           <div class="mq-list-row"><input type="text" name="ans-{{ q.key }}" class="form-control" data-list-item maxlength="100" placeholder="{{ q.placeholder or '' }}"><button type="button" class="mq-list-del" aria-label="この行を消す">×</button></div>
           <div class="mq-list-row"><input type="text" name="ans-{{ q.key }}" class="form-control" data-list-item maxlength="100" placeholder="2つ目（あれば）"><button type="button" class="mq-list-del" aria-label="この行を消す">×</button></div>
           <div class="mq-list-actions">
-            <button type="button" class="btn btn-sm btn-outline-primary mq-list-add"><i class="bi bi-plus-lg"></i> 業務を追加</button>
+            <button type="button" class="btn btn-sm btn-outline-primary mq-list-add"><i class="bi bi-plus-lg"></i> {{ '業務を追加' if q.key in ('task_names', 'wants_tasks') else 'もう1つ追加' }}</button>
             {% if copy_from and qnos.get(copy_from) %}<button type="button" class="btn btn-sm btn-outline-secondary mq-list-copy" data-from="{{ copy_from }}"><i class="bi bi-arrow-down-short"></i> {{ qnos[copy_from] }} で答えた業務名を転記</button>{% endif %}
           </div>
         </div>
@@ -10618,7 +10625,7 @@ TEMPLATES = {
     type: "line",
     data: { labels: d.labels, datasets: [
       line("PCの定型・定期業務あり", d.has_rate, "#ff453a"), line("減った", d.decreased_rate, "#30d158"), line("自動化したい", d.wants_rate, "#ff9f0a"),
-      line("改善チームに依頼したい", d.ask_rate, "#bf5af2"), line("一緒に取り組みたい", d.together_rate, "#0a84ff"), line("自分で取り組みたい", d.self_only_rate, "#ff9f0a")
+      line("改善チームに依頼したい", d.ask_rate, "#bf5af2"), line("一緒に取り組みたい", d.together_rate, "#0a84ff"), line("自分で取り組みたい", d.self_only_rate, "#00a99d")
     ] },
     options: { responsive: true, maintainAspectRatio: false, scales: { x: { grid: { display: false }, border: { display: false } }, y: { beginAtZero: true, max: 100, grid: { color: "#ececf0" }, border: { display: false }, ticks: { callback: function (v) { return v + "%"; } } } }, plugins: { legend: { position: "bottom" } } }
   });
