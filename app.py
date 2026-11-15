@@ -1631,7 +1631,7 @@ USER_CHOICES = OrderedDict([("職場内", "職場内"), ("上司", "上司"), ("
 ICON_CHOICES = [
     "bi-file-earmark-excel-fill", "bi-file-earmark-word-fill", "bi-file-earmark-ppt-fill", "bi-file-earmark-pdf-fill", "bi-filetype-csv",
     "bi-file-earmark-text-fill", "bi-file-earmark", "bi-file-earmark-image-fill", "bi-database-fill", "bi-globe2", "bi-envelope-fill",
-    "bi-chat-dots-fill", "bi-chat-quote-fill", "bi-easel-fill", "bi-telephone-fill", "bi-person-fill", "bi-person-badge-fill",
+    "bi-chat-dots-fill", "bi-chat-quote-fill", "bi-easel-fill", "bi-telephone-fill", "bi-phone-fill", "bi-person-fill", "bi-person-walking", "bi-person-badge-fill",
     "bi-people-fill", "bi-building", "bi-briefcase-fill", "bi-truck", "bi-cpu-fill", "bi-question-circle-fill", "bi-question-square",
     "bi-folder-fill", "bi-printer-fill", "bi-clipboard-check-fill", "bi-camera-fill", "bi-usb-drive-fill", "bi-shop",
 ]
@@ -1662,18 +1662,18 @@ DEFAULT_MAP_VOCAB = {
         {"key": "unknown", "label": "不明", "words": "", "exclude": "", "icon": "bi-question-square", "shape": "doc"},
     ],
     "methods": [
-        {"key": "phs", "label": "PHS", "words": "PHS、ピッチ", "exclude": "", "kind": "channel", "direction": "", "medium": "verbal"},
-        {"key": "phone", "label": "電話", "words": "電話、TEL、内線、携帯", "exclude": "", "kind": "channel", "direction": "", "medium": "verbal"},
-        {"key": "mail", "label": "メール", "words": "メール、mail、Outlook", "exclude": "", "kind": "channel", "direction": "push", "medium": "mail"},
-        {"key": "chat", "label": "チャット（Teams）", "words": "Teams、チャット、Slack", "exclude": "", "kind": "channel", "direction": "push", "medium": "chat"},
-        {"key": "fax", "label": "FAX", "words": "FAX、ファックス、ファクス", "exclude": "", "kind": "channel", "direction": "push", "medium": "paper"},
-        {"key": "meeting", "label": "会議・朝礼", "words": "会議、朝礼、朝会、ミーティング、打ち合わせ、打合せ、MTG", "exclude": "", "kind": "channel", "direction": "", "medium": "verbal"},
-        {"key": "board", "label": "掲示", "words": "掲示、ホワイトボード、貼り出、アンドン", "exclude": "", "kind": "channel", "direction": "pull", "medium": "board"},
-        {"key": "hand", "label": "手渡し", "words": "手渡し、手で渡、持っていく、持参、回覧、社内便、郵送、紙で届、紙で渡、紙で受け取", "exclude": "", "kind": "channel", "direction": "push", "medium": "paper"},
-        {"key": "folder", "label": "共有フォルダ", "words": "共有フォルダ、フォルダ、ファイルサーバ、共有ドライブ、SharePoint、OneDrive、NAS", "exclude": "", "kind": "place", "direction": "pull", "medium": "doc"},
-        {"key": "system", "label": "システム（登録・参照）", "words": "システム、DB、データベース、SAP、基幹、MES、ERP", "exclude": "", "kind": "place", "direction": "pull", "medium": "system"},
-        {"key": "verbal", "label": "口頭", "words": "口頭、対面、声をかけ、直接伝え、聞く、人に聞、聞いて", "exclude": "", "kind": "channel", "direction": "", "medium": "verbal"},
-        {"key": "other", "label": "その他", "words": "その他", "exclude": "", "kind": "channel", "direction": "", "medium": "unknown"},
+        {"key": "phs", "label": "PHS", "words": "PHS、ピッチ", "exclude": "", "kind": "channel", "direction": "", "medium": "verbal", "icon": "bi-phone-fill"},
+        {"key": "phone", "label": "電話", "words": "電話、TEL、内線、携帯", "exclude": "", "kind": "channel", "direction": "", "medium": "verbal", "icon": "bi-telephone-fill"},
+        {"key": "mail", "label": "メール", "words": "メール、mail、Outlook", "exclude": "", "kind": "channel", "direction": "push", "medium": "mail", "icon": "bi-envelope-fill"},
+        {"key": "chat", "label": "チャット（Teams）", "words": "Teams、チャット、Slack", "exclude": "", "kind": "channel", "direction": "push", "medium": "chat", "icon": "bi-chat-dots-fill"},
+        {"key": "fax", "label": "FAX", "words": "FAX、ファックス、ファクス", "exclude": "", "kind": "channel", "direction": "push", "medium": "paper", "icon": "bi-printer-fill"},
+        {"key": "meeting", "label": "会議・朝礼", "words": "会議、朝礼、朝会、ミーティング、打ち合わせ、打合せ、MTG", "exclude": "", "kind": "channel", "direction": "", "medium": "verbal", "icon": "bi-people-fill"},
+        {"key": "board", "label": "掲示", "words": "掲示、ホワイトボード、貼り出、アンドン", "exclude": "", "kind": "channel", "direction": "pull", "medium": "board", "icon": "bi-easel-fill"},
+        {"key": "hand", "label": "手渡し", "words": "手渡し、手で渡、持っていく、持参、回覧、社内便、郵送、紙で届、紙で渡、紙で受け取", "exclude": "", "kind": "channel", "direction": "push", "medium": "paper", "icon": "bi-person-walking"},
+        {"key": "folder", "label": "共有フォルダ", "words": "共有フォルダ、フォルダ、ファイルサーバ、共有ドライブ、SharePoint、OneDrive、NAS", "exclude": "", "kind": "place", "direction": "pull", "medium": "doc", "icon": "bi-folder-fill"},
+        {"key": "system", "label": "システム（登録・参照）", "words": "システム、DB、データベース、SAP、基幹、MES、ERP", "exclude": "", "kind": "place", "direction": "pull", "medium": "system", "icon": "bi-database-fill"},
+        {"key": "verbal", "label": "口頭", "words": "口頭、対面、声をかけ、直接伝え、聞く、人に聞、聞いて", "exclude": "", "kind": "channel", "direction": "", "medium": "verbal", "icon": "bi-chat-quote-fill"},
+        {"key": "other", "label": "その他", "words": "その他", "exclude": "", "kind": "channel", "direction": "", "medium": "unknown", "icon": ""},
     ],
     "handoff": {
         "push": {"label": "前が伝えに行く", "words": "渡す、渡し、送る、送付、届ける、配る、配布、提出、報告、連絡、知らせる、伝える、共有する、掲示する、回覧する、届く、来る、送られて、もらう、受ける、受け取る、連絡が入る"},
@@ -1750,6 +1750,8 @@ def _clean_vocab(data):
             row = {"key": key, "label": label, "words": "、".join(_split_words(r.get("words")))[:600], "exclude": "、".join(_split_words(r.get("exclude")))[:300]}
             if group != "methods":
                 row["icon"] = r.get("icon") if r.get("icon") in ICON_CHOICES else (defaults[key]["icon"] if key in defaults else "bi-question-square")
+            else:
+                row["icon"] = r.get("icon") if r.get("icon") in ICON_CHOICES or r.get("icon") == "" else (defaults[key].get("icon", "") if key in defaults else "")
             if group == "actors":
                 row["user"] = r.get("user") if r.get("user") in USER_CHOICES else (defaults[key]["user"] if key in defaults else "")
             if group == "media":
@@ -2203,6 +2205,14 @@ def edge_label(e):
     method = vocab_label("methods", e["method"]) if e.get("show_method") and e.get("method") else ""
     return "／".join(v for v in ((e.get("note") or "").strip(), method) if v)
 
+def edge_label_html(e):
+    shown = e.get("type") != "work" and not (e.get("label") or "").strip() and e.get("show_method") and e.get("method")
+    row = vocab_row("methods", e["method"]) if shown else None
+    if not row or not row.get("icon"):
+        return esc(edge_label(e))
+    method = f"<i class='bi {row['icon']} fl'></i> " + esc(row["label"])
+    return "／".join(v for v in (esc(e.get("note")), method) if v)
+
 def show_method_for(method, medium):
     row = vocab_row("methods", method) if method else None
     return bool(row) and row.get("medium") != (medium or "unknown")
@@ -2299,7 +2309,7 @@ class Diagram:
                 lines.append(f"  style {i} fill:{NODE_COLORS[n['color']]}")
         work_links = []
         for idx, ((a, b), e) in enumerate(self.edges.items()):
-            lab = esc(edge_label(e))
+            lab = edge_label_html(e)
             if e.get("inferred"):
                 lines.append(f'  {a} -. "{lab}" .-> {b}' if lab else f"  {a} -.-> {b}")
             elif e["type"] == "work":
@@ -3749,6 +3759,11 @@ def map_legend_html(d):
     if media:
         parts.append('<div class="kind-legend"><span class="legend-title">媒体</span>' + "".join(
             f'<span class="kind-chip">{shape_glyph(r["shape"])}<i class="bi {r["icon"]} fi m-{r["key"]}"></i>{esc(r["label"])}</span>' for r in media) + "</div>")
+    used = {e["method"] for e in edges if e["type"] == "info" and e.get("show_method") and e.get("method") and not (e.get("label") or "").strip()}
+    methods = [r for r in vocab["methods"] if r["key"] in used and r.get("icon")]
+    if methods:
+        parts.append('<div class="kind-legend"><span class="legend-title">方法</span>' + "".join(
+            f'<span class="kind-chip"><i class="bi {r["icon"]} fi fl"></i>{esc(r["label"])}</span>' for r in methods) + "</div>")
     actors = [r for r in vocab["actors"] if any((n["type"] == "work" and n["cls"] in ("work", "warn") and n["actor"] == r["key"] and n["who_state"] != "unconfirmed") or person_source_actor(n) == r["key"] for n in nodes)]
     unconfirmed = any(n["type"] == "work" and n["cls"] == "work" and n["who_state"] == "unconfirmed" for n in nodes)
     if actors or unconfirmed:
@@ -8031,8 +8046,8 @@ TEMPLATES = {
     <button type="button" class="btn btn-sm btn-outline-primary mv-add" data-group="media"><i class="bi bi-plus-lg"></i> 媒体を追加</button>
   </div></div>
   <div class="card mb-3 mv-card"><div class="card-body">
-    <h5 class="card-title">情報の流れの方法{{ C.tip("情報の線のラベルになる「どうやって渡すか」。「渡し方」は線だけ、「置き場」（システム・共有フォルダ）は情報の箱を置いたうえで線の方法にもなります。既定の向きは仕事の流れの引き継ぎ方を決めるのに、箱がないときの媒体は口頭のやりとりなどで置く情報の箱に使います。") }}</h5>
-    <div class="table-responsive"><table class="table table-sm align-middle mv-table" data-group="methods"><thead><tr><th></th><th>名前</th><th>判定に使う語</th><th>除く語</th><th>種類</th><th>既定の向き</th><th>箱がないときの媒体</th><th></th></tr></thead><tbody></tbody></table></div>
+    <h5 class="card-title">情報の流れの方法{{ C.tip("情報の線のラベルになる「どうやって渡すか」。「渡し方」は線だけ、「置き場」（システム・共有フォルダ）は情報の箱を置いたうえで線の方法にもなります。アイコンを選ぶと、線のラベルの方法の名前の前に出ます（「なし」なら名前だけ）。既定の向きは仕事の流れの引き継ぎ方を決めるのに、箱がないときの媒体は口頭のやりとりなどで置く情報の箱に使います。") }}</h5>
+    <div class="table-responsive"><table class="table table-sm align-middle mv-table" data-group="methods"><thead><tr><th></th><th>名前</th><th>判定に使う語</th><th>除く語</th><th>アイコン</th><th>種類</th><th>既定の向き</th><th>箱がないときの媒体</th><th></th></tr></thead><tbody></tbody></table></div>
     <button type="button" class="btn btn-sm btn-outline-primary mv-add" data-group="methods"><i class="bi bi-plus-lg"></i> 方法を追加</button>
   </div></div>
   <div class="card mb-3 mv-card"><div class="card-body">
@@ -8096,14 +8111,13 @@ TEMPLATES = {
       cell(tr, nameBox);
       cell(tr, input(r.words, "例: Excel、エクセル、xlsx", function (v) { r.words = v; }), "mv-words");
       cell(tr, input(r.exclude, "", function (v) { r.exclude = v; }));
-      if (group !== "methods") {
-        var wrap = el("div", "d-flex align-items-center gap-1");
-        var icons = {}; CH.icons.forEach(function (k) { icons[k] = k.replace(/^bi-/, ""); });
-        var prev = el("i", "bi " + r.icon + " mv-icon");
-        wrap.appendChild(select(icons, r.icon, function (v) { r.icon = v; prev.className = "bi " + v + " mv-icon"; }));
-        wrap.appendChild(prev);
-        cell(tr, wrap);
-      }
+      var wrap = el("div", "d-flex align-items-center gap-1");
+      var icons = group === "methods" ? { "": "なし" } : {};
+      CH.icons.forEach(function (k) { icons[k] = k.replace(/^bi-/, ""); });
+      var prev = el("i", "bi " + (r.icon || "") + " mv-icon");
+      wrap.appendChild(select(icons, r.icon || "", function (v) { r.icon = v; prev.className = "bi " + v + " mv-icon"; }));
+      wrap.appendChild(prev);
+      cell(tr, wrap);
       if (group === "actors") cell(tr, select(CH.users, r.user, function (v) { r.user = v; }));
       if (group === "media") cell(tr, select(CH.shapes, r.shape, function (v) { r.shape = v; }));
       if (group === "methods") {
@@ -8136,7 +8150,7 @@ TEMPLATES = {
       var row = { key: "", label: "", words: "", exclude: "" };
       if (g === "actors") { row.icon = "bi-person-fill"; row.user = ""; }
       if (g === "media") { row.icon = "bi-file-earmark"; row.shape = "doc"; }
-      if (g === "methods") { row.kind = "channel"; row.direction = ""; row.medium = "unknown"; }
+      if (g === "methods") { row.icon = ""; row.kind = "channel"; row.direction = ""; row.medium = "unknown"; }
       V[g].push(row);
       touch();
       render(g);
@@ -11086,6 +11100,24 @@ document.addEventListener("DOMContentLoaded", function () {
   function showWho(n) {
     return typeOf(n) === "work" && (n.cls === "work" || n.cls === "warn") && (n.who_state === "ok" || n.who_state === "unknown") && n.who && normText(n.who) !== normText(n.text);
   }
+  function edgeMethodRow(e) {
+    return !e.label && e.type !== "work" && e.show_method && e.method ? vrow("methods", e.method) : null;
+  }
+  var GLYPHS = {};
+  function iconGlyph(icon) {
+    if (!icon) return "";
+    if (GLYPHS[icon]) return GLYPHS[icon];
+    var i = document.createElement("i");
+    i.className = "bi " + icon;
+    i.style.position = "absolute";
+    i.style.visibility = "hidden";
+    document.body.appendChild(i);
+    var c = getComputedStyle(i, "::before").content || "";
+    i.remove();
+    c = /^["'].+["']$/.test(c) ? c.slice(1, -1) : "";
+    if (c) GLYPHS[icon] = c;
+    return c;
+  }
   function edgeLabel(e) {
     if (e.label) return e.label;
     if (e.type === "work") return (e.handoff === "push" || e.handoff === "pull") && KC.vocab.handoff[e.handoff] ? KC.vocab.handoff[e.handoff].label : "";
@@ -11112,6 +11144,12 @@ document.addEventListener("DOMContentLoaded", function () {
     var media = (KC.vocab.media || []).filter(function (r) { return G.nodes.some(function (n) { return typeOf(n) === "info" && (n.medium || "unknown") === r.key; }); });
     if (media.length) html += '<div class="kind-legend"><span class="legend-title">媒体</span>' + media.map(function (r) {
       return '<span class="kind-chip">' + glyph(r.shape) + '<i class="bi ' + r.icon + " fi m-" + r.key + '"></i>' + escHtml(r.label) + "</span>";
+    }).join("") + "</div>";
+    var usedMethods = {};
+    G.edges.forEach(function (e) { var r = edgeMethodRow(e); if (r && r.icon) usedMethods[r.key] = true; });
+    var methods = (KC.vocab.methods || []).filter(function (r) { return usedMethods[r.key]; });
+    if (methods.length) html += '<div class="kind-legend"><span class="legend-title">方法</span>' + methods.map(function (r) {
+      return '<span class="kind-chip"><i class="bi ' + r.icon + ' fi fl"></i>' + escHtml(r.label) + "</span>";
     }).join("") + "</div>";
     var actors = (KC.vocab.actors || []).filter(function (r) { return G.nodes.some(function (n) { return typeOf(n) === "work" && (n.cls === "work" || n.cls === "warn") && n.actor === r.key && n.who_state !== "unconfirmed"; }); });
     var unconf = G.nodes.some(function (n) { return typeOf(n) === "work" && n.cls === "work" && (n.who_state === "unconfirmed" || !n.actor); });
@@ -11348,7 +11386,19 @@ document.addEventListener("DOMContentLoaded", function () {
       var lab = edgeLabel(e);
       if (lab) {
         var t = svgEl("text", { x: c.mx, y: c.my - 4, "class": "fe-edge-label", "text-anchor": "middle" });
-        t.textContent = lab;
+        var mr = edgeMethodRow(e), glyph = mr && mr.icon ? iconGlyph(mr.icon) : "";
+        if (glyph) {
+          var before = lab.slice(0, lab.length - mr.label.length);
+          if (before) { var bt = svgEl("tspan", {}); bt.textContent = before; t.appendChild(bt); }
+          var it = svgEl("tspan", { "class": "fe-edge-icon" });
+          it.textContent = glyph;
+          t.appendChild(it);
+          var mt = svgEl("tspan", { dx: 2 });
+          mt.textContent = mr.label;
+          t.appendChild(mt);
+        } else {
+          t.textContent = lab;
+        }
         g.appendChild(t);
       }
       g.addEventListener("click", function (ev) { ev.stopPropagation(); openEdgePopover(e.id, ev); });
@@ -12310,6 +12360,8 @@ body.flow-max-open { overflow: hidden; }
 .fe-node.fe-manual::after { content: "手"; position: absolute; left: -7px; top: -8px; font-size: 9px; line-height: 1.4; padding: 0 4px; border-radius: 6px; background: #6f42c1; color: #fff; }
 .fe-shape-rect { border-radius: 2px; }
 .fe-edge-label { font-size: 11px; fill: #343a40; paint-order: stroke; stroke: #fff; stroke-width: 3px; pointer-events: none; }
+.fe-edge-label .fe-edge-icon { font-family: "bootstrap-icons"; fill: #5b8def; }
+.fl { color: #5b8def; }
 .fe-temp-line { fill: none; stroke: #60a5fa; stroke-width: 2px; stroke-dasharray: 4 4; }
 #fe-nodes { position: absolute; left: 0; top: 0; }
 .fe-node { position: absolute; width: max-content; min-width: 90px; max-width: 150px; padding: 6px 10px; border: 2px solid var(--fe-stroke, #0d6efd); border-radius: 8px; background: var(--fe-fill, #fff);

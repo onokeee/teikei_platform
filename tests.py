@@ -68,8 +68,11 @@ def smoke_bizmap_edit():
               f"どの取り出し元からどの情報を受け取るかを線に書く（手順の文の「〇〇から△△」から読む）: {labels(fd, 'st1')}")
         paired = app_module.build_steps_flow([{"no": 1, "action": "情報を集める", "system": "PMK、ライン管理", "input": "トラブル装置の対応状況、生産状況", "how_from": "システムで見る"}], "製造1課")
         rendered = paired.render()
-        check(labels(paired, "st1") == {"PMK": "トラブル装置の対応状況／システム（登録・参照）", "ライン管理": "生産状況／システム（登録・参照）"} and "トラブル装置の対応状況、生産状況" not in rendered and '"生産状況／システム（登録・参照）"' in rendered,
-              f"元になる情報を取り出し元と同じ順に並べていれば、その対応で線に書く（受け取り方も添える）: {labels(paired, 'st1')}")
+        check(labels(paired, "st1") == {"PMK": "トラブル装置の対応状況／システム（登録・参照）", "ライン管理": "生産状況／システム（登録・参照）"} and "トラブル装置の対応状況、生産状況" not in rendered and "\"生産状況／<i class='bi bi-database-fill fl'></i> システム（登録・参照）\"" in rendered,
+              f"元になる情報を取り出し元と同じ順に並べていれば、その対応で線に書く（受け取り方も添える。方法の名前の前にアイコン）: {labels(paired, 'st1')}")
+        legend = app_module.map_legend_html(paired)
+        check('<span class="legend-title">方法</span>' in legend and '<i class="bi bi-database-fill fi fl"></i>システム（登録・参照）' in legend,
+              "線の方法にアイコンがあれば、凡例の「方法」にアイコンと名前を並べる")
         check(app_module.source_infos(["生産管理システム"], "前日の実績", "生産管理システムから前日の実績を出す") == {} and app_module.source_infos(["A", "B"], "x", "AとBを見る") == {},
               "取り出し元が1つのとき・対応が読めないときは、線に情報を書かない（いままでどおり）")
         t_multi = app_module.Task(id=99901, name="朝会資料準備", steps_json=json.dumps(multi, ensure_ascii=False))
@@ -175,6 +178,10 @@ def smoke_bizmap_edit():
           f"編集画面: 図の領域とポップアップは #fe-app の中（閉じタグの数が合っている）: {tree.inside.get('fe-container')}")
     check("auto_method" in fe and "classifySeq" in fe and "history[historyIndex] = snapshot()" in fe and "SELECT" in fe and "pop.offsetHeight" in fe,
           "編集: 「自動」で元の方法に戻す、判定の結果は履歴に入れ古い応答は捨てる、選択欄で Delete しても箱を消さない、ポップアップは実際の高さで収める")
+    css_fe = client.get("/static/style.css").data.decode("utf-8")
+    check("function iconGlyph(icon)" in fe and 'getComputedStyle(i, "::before").content' in fe and '"class": "fe-edge-icon"' in fe and "function edgeMethodRow(e)" in fe
+          and '<span class="legend-title">方法</span>' in fe and '.fe-edge-label .fe-edge-icon { font-family: "bootstrap-icons"; fill: #5b8def; }' in css_fe and ".fl { color: #5b8def; }" in css_fe,
+          "編集画面: 線のラベルの方法の名前の前にアイコン（bootstrap-icons の字・情報の線と同じ色）を出し、凡例に「方法」を並べる")
 
     # ---- 区分のキー: 追加した行のキーは保存し直しても変わらず、消したキーは使い回さない ----
     with app.app_context():
@@ -192,6 +199,29 @@ def smoke_bizmap_edit():
     r4 = client.post("/admin/map-vocab", json={"vocab": dict(v0, media=v0["media"] + [row("写真台帳")])}).get_json()["vocab"]
     check(next(x["key"] for x in r4["media"] if x["label"] == "写真台帳") not in (k_zumen, keys2["動画"], keys3["音声"]), "既定に戻しても、前に使ったキーは使い回さない")
     client.post("/admin/map-vocab", json={"reset": True})
+
+    # ---- 方法のアイコン: 管理で選べ（なしも選べる）、線のラベルの名前の前に出す ----
+    html_mv = client.get("/admin/map-vocab").data.decode("utf-8")
+    check("<th>除く語</th><th>アイコン</th><th>種類</th>" in html_mv and 'var icons = group === "methods" ? { "": "なし" } : {};' in html_mv and 'row.icon = "";' in html_mv
+          and 'if (group !== "methods")' not in html_mv and "アイコンを選ぶと、線のラベルの方法の名前の前に出ます" in html_mv,
+          "管理 → 業務マップの区分: 情報の流れの方法にもアイコンの欄（「なし」も選べる）")
+    with app.app_context():
+        v_now = app_module.vocab_public()
+    icons0 = {x["key"]: x["icon"] for x in v_now["methods"]}
+    posted = [dict(x, icon="") if x["key"] == "mail" else (dict(x, icon="bi-not-allowed") if x["key"] == "phone" else x) for x in v_now["methods"]]
+    icons5 = {x["key"]: x["icon"] for x in client.post("/admin/map-vocab", json={"vocab": dict(v_now, methods=posted)}).get_json()["vocab"]["methods"]}
+    check((icons0["phone"], icons0["mail"], icons0["system"], icons0["hand"], icons0["other"]) == ("bi-telephone-fill", "bi-envelope-fill", "bi-database-fill", "bi-person-walking", "")
+          and (icons5["mail"], icons5["phone"], icons5["system"]) == ("", "bi-telephone-fill", "bi-database-fill"),
+          f"方法の既定のアイコン（電話＝受話器、メール＝封筒、システム＝データベース、手渡し＝歩く人、その他＝なし）。「なし」は空のまま保存し、一覧にないアイコンは既定に戻す: {icons5}")
+    e_mail = {"type": "info", "label": "", "method": "mail", "show_method": True, "note": "日報"}
+    e_other = {"type": "info", "label": "", "method": "other", "show_method": True, "note": ""}
+    with app.app_context():
+        got_none = (app_module.edge_label_html(e_mail), app_module.edge_label_html(e_other))
+    client.post("/admin/map-vocab", json={"reset": True})
+    with app.app_context():
+        got_default = (app_module.edge_label_html(e_mail), app_module.edge_label_html(dict(e_mail, label="手で書いたラベル")), app_module.edge_label_html(dict(e_mail, show_method=False)))
+    check(got_none == ("日報／メール", "その他") and got_default == ("日報／<i class='bi bi-envelope-fill fl'></i> メール", "手で書いたラベル", "日報"),
+          f"線のラベル: アイコンのある方法は「アイコン＋名前」、「なし」やアイコンのない方法・手で書いたラベル・方法を出さない線は文字だけ: {got_none} {got_default}")
 
     with app.app_context():
         # ---- 氏名・方法・手順図（実装レビューの指摘） ----
