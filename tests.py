@@ -652,8 +652,8 @@ def smoke_bizmap_edit():
         stored = json.loads(FlowMap.query.filter_by(scope=f"wp:{wp1}|dom:0").first().data)
         m_who = next(n for n in stored["nodes"] if n["id"] == "m_who")
         e_who = next(e for e in stored["edges"] if e["to"] == "m_who")
-    check(r.status_code == 200 and m_who["who"] == "山田さん" and m_who["text"] == "課長に確認" and e_who["label"] == "担当者に電話",
-          f"保存するときにサーバーで箱の名前・線のラベルの氏名を置き換える（作業のだれは氏名・班のまま残す）: {m_who['who']} / {m_who['text']} / {e_who['label']}")
+    check(r.status_code == 200 and m_who["who"] == "山田さん" and m_who["text"] == "佐藤課長に確認" and e_who["label"] == "鈴木さんに電話",
+          f"業務マップの編集画面で保存するだれ・箱の名前・線のラベルは、氏名のまま残す（業務マップだけに出るため）: {m_who['who']} / {m_who['text']} / {e_who['label']}")
     with app.app_context():
         db.session.add(Task(name="日報の集計・確認", respondent_id=Respondent.query.filter_by(emp_id="DEMO-001").first().id, workplace_id=wp1, frequency="毎日", duration="15分未満"))
         db.session.commit()
@@ -1234,6 +1234,38 @@ def smoke_board():
     r = client.post("/survey/api/tasks", json={"name": "本物の業務", "state": {"title": "本物の業務", "steps": [{"no": 1, "action": "紙の日報を集める", "system": "紙の日報"}], "sources": ["紙の日報"]},
                                                "messages": [], "frequency": "毎週", "duration": "15分未満", "wish": "減らしたい", "shift": "昼勤"})
     check(r.status_code == 200, "デモの社員IDでも本物の業務を登録できる")
+    named_state = {"title": "氏名つきの業務", "steps": [
+        {"no": 1, "action": "鈴木さんから日報を受け取る", "who": "", "receive": [{"from": "鈴木さん", "what": "日報", "how": "手渡し"}], "system": "", "output": "日報の集計表", "to": ""},
+        {"no": 2, "action": "集計表を確認してもらう", "who": "山田さん", "system": "", "output": "", "to": "佐藤さん", "how": "メール"}], "sources": ["鈴木さん"], "recipients": ["佐藤さん"]}
+    r_n = client.post("/survey/api/tasks", json={"name": "氏名つきの業務", "state": named_state, "messages": [], "frequency": "毎週", "duration": "15分未満", "wish": "減らしたい", "shift": "昼勤"})
+    with app.app_context():
+        tn = Task.query.filter_by(name="氏名つきの業務").first()
+        names_n = tn.names_dict if tn else {}
+        masked_n = json.dumps(tn.steps if tn else [], ensure_ascii=False)
+        tn_id = tn.id if tn else 0
+        note_n = (tn.output_users_note or "") if tn else ""
+        with app_module.show_names():
+            raw_note = (tn.output_users_note or "") if tn else ""
+    check(r_n.status_code == 200 and not any(x in masked_n for x in ("鈴木さん", "佐藤さん", "山田さん")) and (names_n.get("steps") or [{}, {}])[1].get("to") == "佐藤さん"
+          and (names_n.get("fields") or {}).get("output_users_note") == "佐藤さん" and "佐藤" not in note_n and raw_note == "佐藤さん",
+          f"登録: 手順・受け取り元・渡す相手は氏名を置き換えて保存し、氏名つきの答えは別の欄（names_json）に控える（図を描くときだけ使う）: {note_n} / {raw_note}")
+    code, html_case = page(f"/cases/{tn_id}")
+    flow_n = html_case.split('id="def-task">', 1)[1].split("</script>", 1)[0] if 'id="def-task">' in html_case else ""
+    rest_n = html_case.replace(flow_n, "")
+    check(all(x in flow_n for x in ("佐藤さん", "山田さん", "鈴木さん")) and not any(x in rest_n for x in ("佐藤さん", "山田さん", "鈴木さん")),
+          "案件詳細: 流れ図にだけ氏名を出し（渡す相手・手順のだれ・受け取り元）、手順の表やほかの欄には出さない")
+    code, html_map = page("/bizmap/")
+    steps_csv_n = client.get("/export/steps.csv").data.decode("utf-8-sig")
+    check("佐藤さん" in html_map and "鈴木さん" in html_map and not any(x in steps_csv_n for x in ("佐藤さん", "山田さん", "鈴木さん")),
+          "業務マップには氏名を出し、CSV出力の手順には出さない")
+    client.post(f"/cases/{tn_id}/update", data={"actors": "高橋さん、課長"})
+    with app.app_context():
+        tn = db.session.get(Task, tn_id)
+        actors_masked = tn.actors or ""
+        with app_module.show_names():
+            actors_raw = tn.actors or ""
+    check("高橋" not in actors_masked and actors_raw == "高橋さん、課長", f"案件詳細で直した欄の氏名も控え、図を描くときだけ使う: {actors_masked} / {actors_raw}")
+    client.post(f"/cases/{tn_id}/delete")
     r = client.post("/admin/demo/load")
     with app.app_context():
         real = Task.query.filter_by(name="本物の業務").first()
@@ -2775,6 +2807,14 @@ def smoke_request():
         r = client.post("/survey/api/intake", json={"title": "日報の集計", "messages": [], "state": {}, "origin": "monthly"})
         check(r.status_code == 200 and "月次アンケートで「なくしたい・自動化したい」と答えた業務" in calls[-1]["body"]["input"][0]["content"], "アンケートから来たときは、AI がそのことにふれてから聞き始める")
 
+        script.append(message({"reply": "佐藤さんに渡すのですね。", "chips": [], "done": False, "remaining": 2, "state": state(steps=[dict(step4, to="佐藤さん")])}))
+        r_v = client.post("/survey/api/intake", json={"title": "日報の集計", "messages": [{"role": "user", "text": "佐藤さんにメールで送る"}], "state": state(steps=[dict(step4, to="佐藤さん")])})
+        j_v = r_v.get_json()
+        check(r_v.status_code == 200 and j_v["state"]["steps"][0]["to"] == "佐藤さん" and "佐藤さん" in calls[-1]["body"]["instructions"] and j_v["view"]["steps"][0]["to"] == "担当者"
+              and "佐藤" not in j_v["diagram"] and "佐藤" not in "".join(j_v["frames"]),
+              "聞き取り: AI とのやりとり（state）は氏名つきのまま、本人の画面に出す図と手順の一覧（view）は氏名を置き換える")
+        check("conv.view = j.view || conv.view;" in client.get("/static/survey.js").data.decode("utf-8") and "playFrames(j.frames || [], conv.finalDef, conv.view)" in client.get("/static/survey.js").data.decode("utf-8"),
+              "聞き取りの画面は、手順の一覧を置き換えたもの（view）から出す")
         r = client.post("/survey/api/tasks", json={"name": "", "state": {}, "messages": [], "frequency": "", "duration": "", "wish": ""})
         e = r.get_json()["errors"]
         check(r.status_code == 400 and "name" in e and "steps" in e and "frequency" in e and "duration" in e and "wish" in e, "登録: 業務名・手順・頻度・時間・希望がないとエラー")

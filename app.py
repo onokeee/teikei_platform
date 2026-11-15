@@ -11,10 +11,12 @@ import re
 import secrets
 import sys
 import unicodedata
+import contextvars
 import urllib.error
 import urllib.request
 import zipfile
 from collections import Counter, OrderedDict, defaultdict
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 
 from flask import Blueprint, Flask, Response, abort, flash, g, has_request_context, jsonify, redirect, render_template, request, session, url_for
@@ -288,6 +290,31 @@ class Respondent(db.Model):
     def learn(self):
         return C.split_list(self.c3_learn)
 
+_SHOW_NAMES = contextvars.ContextVar("show_names", default=False)
+NAME_FIELDS = ("prev_task", "next_task", "actors", "info_from", "output_users_note", "inputs_note")
+
+
+@contextmanager
+def show_names():
+    token = _SHOW_NAMES.set(True)
+    try:
+        yield
+    finally:
+        _SHOW_NAMES.reset(token)
+
+def _name_field(name):
+    def get(self):
+        value = getattr(self, "_" + name)
+        if _SHOW_NAMES.get():
+            raw = (self.names_dict.get("fields") or {}).get(name)
+            if isinstance(raw, str) and mask_person_names(raw)[:500] == (value or ""):
+                return raw
+        return value
+
+    def put(self, value):
+        setattr(self, "_" + name, value)
+    return property(get, put)
+
 class Task(db.Model):
     __tablename__ = "tasks"
     id = db.Column(db.Integer, primary_key=True)
@@ -300,11 +327,15 @@ class Task(db.Model):
     purpose = db.Column(db.Text, default="")
     output = db.Column(db.Text, default="")
     output_users = db.Column(db.Text, default="")
-    output_users_note = db.Column(db.Text, default="")
+    _output_users_note = db.Column("output_users_note", db.Text, default="")
+    output_users_note = _name_field("output_users_note")
     inputs = db.Column(db.Text, default="")
-    inputs_note = db.Column(db.Text, default="")
-    prev_task = db.Column(db.Text, default="")
-    next_task = db.Column(db.Text, default="")
+    _inputs_note = db.Column("inputs_note", db.Text, default="")
+    inputs_note = _name_field("inputs_note")
+    _prev_task = db.Column("prev_task", db.Text, default="")
+    prev_task = _name_field("prev_task")
+    _next_task = db.Column("next_task", db.Text, default="")
+    next_task = _name_field("next_task")
     frequency = db.Column(db.String(30))
     duration = db.Column(db.String(30))
     headcount = db.Column(db.Integer, default=1)
@@ -316,9 +347,12 @@ class Task(db.Model):
     self_improve = db.Column(db.String(50))
     note = db.Column(db.Text, default="")
 
-    actors = db.Column(db.Text, default="")
-    info_from = db.Column(db.Text, default="")
+    _actors = db.Column("actors", db.Text, default="")
+    actors = _name_field("actors")
+    _info_from = db.Column("info_from", db.Text, default="")
+    info_from = _name_field("info_from")
     steps_json = db.Column(db.Text, default="[]")
+    names_json = db.Column(db.Text, default="{}")
     intake_json = db.Column(db.Text, default="[]")
     ai_fields = db.Column(db.Text, default="")
     ai_extra = db.Column(db.Text, default="{}")
@@ -529,7 +563,37 @@ class Task(db.Model):
 
     @property
     def steps(self):
-        return [x for x in _json_typed(self.steps_json, []) if isinstance(x, dict) and x.get("action")]
+        masked = [x for x in _json_typed(self.steps_json, []) if isinstance(x, dict) and x.get("action")]
+        if _SHOW_NAMES.get():
+            raw = [x for x in (self.names_dict.get("steps") or []) if isinstance(x, dict) and x.get("action")]
+            if raw and [x.get("no") for x in raw] == [x.get("no") for x in masked]:
+                return raw
+        return masked
+
+    @property
+    def names_dict(self):
+        data = _json_typed(self.names_json, {})
+        return data if isinstance(data, dict) else {}
+
+    def set_names(self, steps=None, fields=None):
+        data = self.names_dict
+        if steps is not None:
+            if steps:
+                data["steps"] = steps
+            else:
+                data.pop("steps", None)
+        kept = data.get("fields") if isinstance(data.get("fields"), dict) else {}
+        for key, value in (fields or {}).items():
+            value = str(value or "").strip()[:500]
+            if value and mask_person_names(value) != value:
+                kept[key] = value
+            else:
+                kept.pop(key, None)
+        if kept:
+            data["fields"] = kept
+        else:
+            data.pop("fields", None)
+        self.names_json = json.dumps(data, ensure_ascii=False)
 
     @property
     def intake(self):
@@ -719,6 +783,7 @@ _ADDED_COLUMNS = {
         "shift_team": "VARCHAR(10) DEFAULT ''",
     },
     "tasks": {
+        "names_json": "TEXT DEFAULT '{}'",
         "actors": "TEXT DEFAULT ''",
         "info_from": "TEXT DEFAULT ''",
         "stage": "VARCHAR(20)",
@@ -2209,7 +2274,7 @@ PERSON_ACTORS = ("external", "dept", "boss", "team")
 def person_source_actor(n):
     if n.get("type") != "info" or (n.get("medium") or "unknown") != "unknown":
         return ""
-    w = who_of(n.get("text"))
+    w = (doer_who if _SHOW_NAMES.get() else who_of)(n.get("text"))
     return w["actor"] if w["state"] == "ok" and w["actor"] in PERSON_ACTORS else ""
 
 def node_label(n):
@@ -2659,8 +2724,6 @@ def _key(v):
 def sanitize_graph(data):
     if not isinstance(data, dict):
         raise ValueError("graph must be an object")
-    vocab = map_vocab()
-    mask = lambda v: mask_person_names(str(v or ""), vocab)
     nodes, edges = [], []
     for n in (data.get("nodes") or [])[:2000]:
         if not isinstance(n, dict) or not n.get("id"):
@@ -2668,7 +2731,7 @@ def sanitize_graph(data):
         ntype = _node_type(n)
         nodes.append(
             {
-                "id": str(n["id"])[:80], "text": mask(n.get("text"))[:200], "type": ntype,
+                "id": str(n["id"])[:80], "text": str(n.get("text") or "").strip()[:200], "type": ntype,
                 "cls": _cls_for(n.get("cls"), ntype),
                 "medium": _key(n.get("medium")), "actor": _key(n.get("actor")), "who": str(n.get("who") or "").strip()[:100],
                 "who_state": n.get("who_state") if n.get("who_state") in ("ok", "unconfirmed", "unknown") else "",
@@ -2687,7 +2750,7 @@ def sanitize_graph(data):
                 "id": str(e.get("id") or f"{e['from']}->{e['to']}")[:170], "from": str(e["from"])[:80], "to": str(e["to"])[:80],
                 "type": e.get("type") if e.get("type") in ("work", "info") else "info", "method": _key(e.get("method")),
                 "handoff": e.get("handoff") if e.get("handoff") in ("push", "pull", "none") else "", "show_method": bool(e.get("show_method")),
-                "inferred": bool(e.get("inferred")), "label": mask(e.get("label"))[:120], "source": "manual" if e.get("source") == "manual" else "auto",
+                "inferred": bool(e.get("inferred")), "label": str(e.get("label") or "").strip()[:120], "source": "manual" if e.get("source") == "manual" else "auto",
                 "reversed": bool(e.get("reversed")), "label_edited": bool(e.get("label_edited")),
                 "method_edited": bool(e.get("method_edited")), "handoff_edited": bool(e.get("handoff_edited")),
             }
@@ -3311,6 +3374,8 @@ def recipient_who(name, own_wp="", vocab=None):
     w = who_of(base, own_wp, vocab)
     if actor and actor != w["actor"]:
         w = {"actor": actor, "label": w["label"] or base, "state": "unknown" if actor == "unknown" else "ok"}
+    if _SHOW_NAMES.get() and base and mask_person_names(base, vocab) != base:
+        w = {"actor": w["actor"] if w["actor"] and w["state"] == "ok" else "team", "label": base, "state": "ok"}
     return w
 
 def dept_in_text(text, own_wp="", actor="dept"):
@@ -3503,7 +3568,7 @@ def pending_task_names(workplace_id=None):
         if key in excluded or (workplace_id and m.workplace_id != workplace_id):
             continue
         for raw in task_names(m.answer("task_names")) + task_names(m.answer("wants_tasks")):
-            name = mask_person_names(raw, vocab).strip()
+            name = (raw if _SHOW_NAMES.get() else mask_person_names(raw, vocab)).strip()
             k = name_key(name)
             if len(k) < 2 or k in registered[m.workplace_id]:
                 continue
@@ -3611,7 +3676,7 @@ def build_steps_flow(steps, own_wp="", purpose="", me_label=""):
 
     for x in steps:
         sid = f"st{x['no']}"
-        action = mask_person_names(x.get("action") or "")
+        action = (x.get("action") or "") if _SHOW_NAMES.get() else mask_person_names(x.get("action") or "")
         doer = (x.get("who") or "").strip()
         d.node(sid, f"{_circled(x['no'])} {action}", "task", who=doer_who(doer, own_wp) if doer and doer not in _SELF_WHO else me)
         system, inp, to, how, out = [(x.get(k) or "").strip() for k in ("system", "input", "to", "how", "output")]
@@ -4164,7 +4229,7 @@ INTAKE_PROMPT = """あなたは製造部「PC定型業務ゼロ化プロジェ�
 - 相手が「違う」「直したい」と言ったら、state を直して done は false のまま確認し直す。
 - 写真が読めないときは、そう伝えて文字で教えてほしいと頼む。
 - 推測で手順を作らない。相手が言ったことだけを入れる。
-- 人の名前（氏名・〇〇さん）は state にも返事にも書かない。Gr・役割・役職・部署で書く（例: 製造1課の担当者、品質保証課 課長）。
+- 人の名前（氏名・〇〇さん）は返事の文には書かない。state の steps の who・receive の from・to には、本人が人の名前で答えたらその名前をそのまま書く（管理者が見る図だけに出る）。名前が分からないとき、本人が名前で答えなかったときは、Gr・役割・役職・部署で書く（例: 製造1課の担当者、品質保証課 課長）。
 - 渡す手順（送る・渡す・提出する）の output には、渡したものの名前を入れる。
 - sources・outputs と steps の receive の what・output には情報の名前だけを書く（「〜をメール送付」「〜を印刷」のような渡し方・作業は how や action に書く）。
 - 引き継ぎの話が出たら、前の勤務からの引き継ぎは情報の取り出し元（sources と steps の receive）、次の勤務への引き継ぎは渡す相手（recipients と steps の to）として扱う。
@@ -4172,7 +4237,7 @@ INTAKE_PROMPT = """あなたは製造部「PC定型業務ゼロ化プロジェ�
 state は次の形（必ず全部のキーを返す。不明は "" か [] か null）:
 {
   "title": "<業務名。『〜を〜する』で短く>",
-  "steps": [{"no": 1, "action": "<その手順でやること（何を・どこから・どうする）>", "who": "<その手順をやる人。本人なら空。上司・他部署・システム（自動）など本人以外のときだけ（氏名は書かない）>", "receive": [{"from": "<受け取り元（システム・ファイル・紙・所属・部署・役職。氏名は書かない）>", "what": "<そこから受け取る情報・物の名前>", "how": "<受け取り方（システムで見る・共有フォルダ・メールで届く・紙で届く・電話で聞く・口頭など）。分からなければ空>"}], "system": "<作業に使う・入力する・書き込むシステムやファイル（受け取り元は receive に書く）。なければ空>", "output": "<その手順でできるもの。なければ空>", "to": "<渡す相手（Gr・役割・役職・部署。氏名は書かない）。なければ空>", "how": "<to がある手順の渡し方（メール・手渡し・共有フォルダなど）。なければ空>", "use": "<渡す相手がそれを何に使うか。分からなければ空>"}],
+  "steps": [{"no": 1, "action": "<その手順でやること（何を・どこから・どうする）>", "who": "<その手順をやる人。本人なら空。上司・他部署・システム（自動）など本人以外のときだけ（本人が名前で答えたらそのまま）>", "receive": [{"from": "<受け取り元（システム・ファイル・紙・所属・部署・役職・人。人は本人が名前で答えたらそのまま）>", "what": "<そこから受け取る情報・物の名前>", "how": "<受け取り方（システムで見る・共有フォルダ・メールで届く・紙で届く・電話で聞く・口頭など）。分からなければ空>"}], "system": "<作業に使う・入力する・書き込むシステムやファイル（受け取り元は receive に書く）。なければ空>", "output": "<その手順でできるもの。なければ空>", "to": "<渡す相手（Gr・役割・役職・部署・人。人は本人が名前で答えたらそのまま）。なければ空>", "how": "<to がある手順の渡し方（メール・手渡し・共有フォルダなど）。なければ空>", "use": "<渡す相手がそれを何に使うか。分からなければ空>"}],
   "sources": ["<情報の取り出し元（システム名・帳票名・人）>"],
   "outputs": ["<最終的にできるもの>"],
   "recipients": ["<最終的に渡す相手。人・部署を1つずつ>"],
@@ -4257,21 +4322,25 @@ def _intake_state_default():
 def _masked_clip(value, limit):
     return mask_person_names(str(value).strip())[:limit]
 
+def _plain_clip(value, limit):
+    return str(value).strip()[:limit]
 
-def _clean_state(data):
+
+def _clean_state(data, mask=True):
     base = _intake_state_default()
     if not isinstance(data, dict):
         return base
-    base["title"] = _masked_clip(data.get("title") or "", 200)
+    clip = _masked_clip if mask else _plain_clip
+    base["title"] = clip(data.get("title") or "", 200)
     steps = []
     for x in data.get("steps") or []:
         if not isinstance(x, dict) or not str(x.get("action") or "").strip():
             continue
-        field = lambda key, n: _masked_clip(x.get(key) or "", n)
+        field = lambda key, n: clip(x.get(key) or "", n)
         receive = []
         for r in x.get("receive") or []:
             if isinstance(r, dict):
-                item = {"from": _masked_clip(r.get("from") or "", 60), "what": _masked_clip(r.get("what") or "", 100), "how": _masked_clip(r.get("how") or "", 40)}
+                item = {"from": clip(r.get("from") or "", 60), "what": clip(r.get("what") or "", 100), "how": clip(r.get("how") or "", 40)}
                 if item["from"] or item["what"]:
                     receive.append(item)
         receive = receive[:6]
@@ -4286,12 +4355,12 @@ def _clean_state(data):
             break
     base["steps"] = steps
     for key in ("sources", "outputs", "recipients", "pains", "unknowns"):
-        base[key] = [_masked_clip(v, 100) for v in (data.get(key) or []) if str(v).strip()][:10]
-    base["purpose"] = _masked_clip(data.get("purpose") or "", 300)
+        base[key] = [clip(v, 100) for v in (data.get(key) or []) if str(v).strip()][:10]
+    base["purpose"] = clip(data.get("purpose") or "", 300)
     base["frequency"] = data.get("frequency") if data.get("frequency") in C.FREQUENCIES else None
     base["duration"] = data.get("duration") if data.get("duration") in C.DURATIONS else None
     base["shift"] = data.get("shift") if data.get("shift") in C.SHIFT_OPTIONS + ["普通勤務"] else None
-    base["notes"] = [_masked_clip(v, 200) for v in (data.get("notes") or []) if str(v).strip()][-12:]
+    base["notes"] = [clip(v, 200) for v in (data.get("notes") or []) if str(v).strip()][-12:]
     base["checked"] = [str(v)[:120] for v in (data.get("checked") or []) if str(v).strip()][:20]
     return base
 
@@ -4333,7 +4402,7 @@ def ai_intake(messages, state, image=None, work_pattern="", handlers=None, tools
         "chips": [str(c).strip()[:40] for c in (data.get("chips") or []) if str(c).strip()][:6],
         "done": bool(data.get("done")),
         "remaining": remaining,
-        "state": _clean_state(data.get("state") or state),
+        "state": _clean_state(data.get("state") or state, mask=False),
     }
 
 
@@ -6127,7 +6196,7 @@ def api_intake():
     if err:
         return err
     messages = _clean_messages(data.get("messages"))
-    state = _clean_state(data.get("state") or {})
+    state = _clean_state(data.get("state") or {}, mask=False)
     if not state["title"] and data.get("title"):
         state["title"] = mask_person_names(str(data.get("title")).strip())[:200]
     image = data.get("image") or None
@@ -6141,10 +6210,12 @@ def api_intake():
     if result is None:
         return jsonify({"success": False, "message": "AI から応答がありませんでした。もう一度送ってください（" + (_LAST_ERROR["text"] or "原因不明") + "）"}), 502
     result["state"]["checked"] = sorted(set(state["checked"]) | used)[:20]
-    steps = result["state"]["steps"]
+    view = _clean_state(result["state"])
+    result["view"] = {"title": view["title"], "steps": view["steps"]}
+    steps = view["steps"]
     shown = max(0, min(_int_or(data.get("shown") or 0, 0), len(steps)))
     own = r.workplace.name if r.workplace else ""
-    purpose = result["state"].get("purpose") or ""
+    purpose = view.get("purpose") or ""
     result["frames"] = [build_steps_flow(steps[:i], own, purpose).render() for i in range(shown + 1, len(steps) + 1)]
     result["diagram"] = build_steps_flow(steps, own, purpose).render() if steps else ""
     return jsonify({"success": True, **result})
@@ -6285,6 +6356,7 @@ def api_task_create():
     if err:
         return err
     state = _clean_state(data.get("state") or {})
+    raw_state = _clean_state(data.get("state") or {}, mask=False)
     messages = [dict(m, text=mask_person_names(m["text"])) for m in _clean_messages(data.get("messages"))]
     errors = {}
     name = mask_person_names(str(data.get("name") or "").strip() or state["title"])[:200]
@@ -6329,6 +6401,8 @@ def api_task_create():
     db.session.flush()
     task.compute_minutes()
     _finalize_task(task, state, messages)
+    task.set_names(steps=raw_state["steps"] if raw_state["steps"] != state["steps"] else [],
+                   fields={"inputs_note": "、".join(raw_state["sources"]), "output_users_note": "、".join(raw_state["recipients"])})
     if find_employee(r.emp_id) is None:
         register_member(r.emp_id, r.name, r.workplace_id, r.work_pattern)
     db.session.commit()
@@ -6404,7 +6478,8 @@ def detail(task_id):
     names = set(task.ai_related_list)
     if names:
         related_by_ai = Task.query.filter(Task.name.in_(list(names)), Task.id != task.id).all()
-    task_flow, task_legend = flow_view(build_task_flow(task))
+    with show_names():
+        task_flow, task_legend = flow_view(build_task_flow(task))
     return render_template(
         "cases/detail.html",
         task=task,
@@ -6443,9 +6518,12 @@ def _update_task_info(task, f):
         changed = True
     for key in ("purpose", "output", "output_users_note", "inputs_note", "prev_task", "next_task", "actors", "info_from", "pains_note"):
         if key in f:
-            value = mask_person_names((f.get(key) or "").replace("\r\n", "\n").strip())[:500]
+            typed = (f.get(key) or "").replace("\r\n", "\n").strip()
+            value = mask_person_names(typed)[:500]
             if value != (getattr(task, key) or "").strip():
                 setattr(task, key, value)
+                if key in NAME_FIELDS:
+                    task.set_names(fields={key: typed})
                 unmark_estimate(task, key)
                 changed = True
     for key, choices in (("output_users", C.OUTPUT_USERS), ("inputs", C.INPUT_SOURCES), ("tools", C.TOOLS), ("nature", C.NATURES), ("pains", C.PAINS)):
@@ -6622,7 +6700,8 @@ def _graph_data(row):
 
 def _merged_graph(kind, workplace_id, domain_id):
     tasks, truncated = _filtered_tasks(domain_id, workplace_id)
-    auto = _build(tasks, workplace_id, domain_id).to_graph()
+    with show_names():
+        auto = _build(tasks, workplace_id, domain_id).to_graph()
     scope = scope_key(workplace_id, domain_id)
     row = _flow_row(kind, scope)
     merged = merge_graph(auto, _graph_data(row))
@@ -6635,7 +6714,8 @@ def _merged_graph(kind, workplace_id, domain_id):
     return merged
 
 def _graph_view(merged):
-    return flow_view(graph_to_diagram(merged) if merged["nodes"] else None)
+    with show_names():
+        return flow_view(graph_to_diagram(merged) if merged["nodes"] else None)
 
 @bp_bizmap.route("/")
 def index():
@@ -8657,7 +8737,7 @@ TEMPLATES = {
         <div class="btn-group btn-group-sm" role="group"><button type="button" class="btn btn-outline-secondary" data-type="work"><i class="bi bi-square"></i> 作業</button><button type="button" class="btn btn-outline-secondary" data-type="info"><i class="bi bi-file-earmark"></i> 情報</button></div>
       </div>
       <div class="mt-2" id="fe-who-row">
-        <label class="small mb-0" for="fe-who-input">だれ（Gr・役割・役職・部署。氏名は書かない）</label>
+        <label class="small mb-0" for="fe-who-input">だれ（Gr・役割・役職・部署・氏名・班）</label>
         <input type="text" class="form-control form-control-sm mb-1" id="fe-who-input" placeholder="例: 製造1課 課長、生産管理課">
         <select class="form-select form-select-sm" id="fe-actor-select" aria-label="だれの区分"></select>
       </div>
@@ -9274,7 +9354,7 @@ TEMPLATES = {
           <div class="form-label small mb-0">利用者{{ need('利用者') }}</div>
           <input type="hidden" name="output_users" value="">
           {% for u in C.OUTPUT_USERS %}<div class="form-check form-check-inline small mb-0"><input class="form-check-input" type="checkbox" name="output_users" value="{{ u }}" id="f-ou-{{ loop.index }}" {% if u in task.output_users_list %}checked{% endif %}><label class="form-check-label" for="f-ou-{{ loop.index }}">{{ u }}</label></div>{% endfor %}
-          <input type="text" name="output_users_note" class="form-control form-control-sm mt-1" value="{{ task.output_users_note or '' }}" maxlength="500" placeholder="渡す相手のGr・役割・部署・役職（「、」区切り。氏名は書かない）" aria-label="利用者の補足">
+          <input type="text" name="output_users_note" class="form-control form-control-sm mt-1" value="{{ task.output_users_note or '' }}" maxlength="500" placeholder="渡す相手のGr・役割・部署・役職・氏名（「、」区切り。氏名は業務マップと流れ図だけに出ます）" aria-label="利用者の補足">
         </div>
         <div class="col-12" id="f-inputs">
           <div class="form-label small mb-0">入力元（情報のもと）{{ need('入力元') }}</div>
@@ -9305,7 +9385,7 @@ TEMPLATES = {
           <input type="text" name="next_task" id="f-next_task" class="form-control form-control-sm" value="{{ task.next_task or '' }}" maxlength="500">
         </div>
         <div class="col-12">
-          <label class="form-label small mb-0" for="f-actors">関わる人・部署（「、」区切り。氏名は書かない）</label>
+          <label class="form-label small mb-0" for="f-actors">関わる人・部署（「、」区切り。氏名は業務マップと流れ図だけに出ます）</label>
           <input type="text" name="actors" id="f-actors" class="form-control form-control-sm" value="{{ task.actors or '' }}" maxlength="500" placeholder="例：課長、生産管理課">
         </div>
         <div class="col-12">
@@ -13724,14 +13804,15 @@ summary { transition: color 0.15s ease; }
       return;
     }
     conv.state = j.state || conv.state;
+    conv.view = j.view || conv.view;
     conv.messages.push({ role: "ai", text: j.reply });
     addMsg("ai", j.reply, true);
     renderChips(j.chips);
-    if (conv.state.title) $("rq-flow-title").textContent = conv.state.title;
+    if (conv.view.title) $("rq-flow-title").textContent = conv.view.title;
     var before = conv.shownSteps;
     conv.frames = conv.frames.concat(j.frames || []);
     conv.finalDef = j.diagram || "";
-    await playFrames(j.frames || [], conv.finalDef, conv.state);
+    await playFrames(j.frames || [], conv.finalDef, conv.view);
     if (conv.shownSteps > before) addNote("＋ 手順" + circled(before + 1) + (conv.shownSteps > before + 1 ? "〜" + circled(conv.shownSteps) : "") + " を流れ図に追加しました");
     if (j.done) addNote("✓ 流れができました。右上の「最初から見る」で育つ様子を再生できます");
     $("rq-progress").textContent = j.done ? "流れができました！" : (j.remaining > 0 ? "あと " + j.remaining + " 問くらい" : "もう少しです");
@@ -13788,7 +13869,7 @@ summary { transition: color 0.15s ease; }
       if (dupTask) { showDupNote(dupTask, origin, monthlyName); return; }
     }
     $("rq-dup-note").classList.add("d-none");
-    conv = { title: title, messages: [], state: { title: title, steps: [], sources: [], outputs: [], recipients: [], purpose: "", frequency: null, duration: null, shift: null, pains: [], unknowns: [] }, done: false, lastNodes: [], shownSteps: 0, frames: [], finalDef: "", allowDup: skipDup ? normName(title) : "", origin: origin || "", monthlyName: monthlyName || "" };
+    conv = { title: title, messages: [], state: { title: title, steps: [], sources: [], outputs: [], recipients: [], purpose: "", frequency: null, duration: null, shift: null, pains: [], unknowns: [] }, view: { title: title, steps: [] }, done: false, lastNodes: [], shownSteps: 0, frames: [], finalDef: "", allowDup: skipDup ? normName(title) : "", origin: origin || "", monthlyName: monthlyName || "" };
     renderMonthlyBanner();
     $("rq-replay").classList.add("d-none");
     msgBox.innerHTML = "";
@@ -13974,7 +14055,7 @@ summary { transition: color 0.15s ease; }
     conv.lastNodes = [];
     await renderDef("");
     await sleep(300);
-    await playFrames(conv.frames.slice(), conv.finalDef, conv.state);
+    await playFrames(conv.frames.slice(), conv.finalDef, conv.view);
     btn.disabled = false;
   });
 
