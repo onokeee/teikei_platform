@@ -16,8 +16,6 @@ LDAP_API_TOKEN = ""
 LDAP_API_ID_PARAM = "employee_id"
 LDAP_API_FIELD_ID = "employee_id"
 LDAP_API_FIELD_NAME = "display_name"
-LDAP_API_FIELD_DEPT = "department"
-LDAP_API_FIELD_MAIL = "mail"
 LDAP_API_FIELD_EXISTS = "exists"
 LDAP_API_TIMEOUT = 5
 
@@ -28,8 +26,6 @@ LDAP_BIND_PASSWORD = ""
 LDAP_BASE_DN = ""
 LDAP_ID_ATTR = "employeeID"
 LDAP_NAME_ATTR = "displayName"
-LDAP_DEPT_ATTR = "department"
-LDAP_MAIL_ATTR = "mail"
 
 # ---- AI連携: 社内 Azure OpenAI の ChatGPT API（Responses API）。URL・API キー・モデル名は管理画面で設定する。temperature / top_p は送らない ----
 OPENAI_REASONING_EFFORT = "low"  # "" なら送らない

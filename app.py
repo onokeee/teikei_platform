@@ -135,7 +135,7 @@ STAGE_STEPS = {"request": (1, 2), "spec": (3,)}
 BUILD_STAGE_SELF = "伴走"
 
 # ---- 案件候補・改善意欲の判定 ----
-CANDIDATE_WISHES = {"なくしたい", "減らしたい", "自動化したい"}
+CANDIDATE_WISHES = {"なくしたい", "減らしたい"}
 UNKNOWN_ANSWERS = {"不明", "分からない", "わからない", "未確認", "未定"}
 SELF_IMPROVE_POSITIVE = {SELF_IMPROVE_YES, "取り組みたい", "教えてもらえれば取り組みたい"}
 STANCE_MONTHS = 6
@@ -154,11 +154,10 @@ AI_PLAN_KEYS = ("tobe_steps", "saving_minutes_per_month", "hearing_questions")
 
 # ---- 月次アンケート（voiceloop 方式: 月度ごとの設問セット。基本設問は毎月同じで KPI につなぐ） ----
 SHIFTS_PER_MONTH = 20
-SHIFTS_PER_MONTH_BY_PATTERN = {"普通勤務": 20, "交代勤務": 20}
 
 
 def shifts_per_month(pattern=None):
-    return SHIFTS_PER_MONTH_BY_PATTERN.get(pattern or "", SHIFTS_PER_MONTH)
+    return SHIFTS_PER_MONTH
 
 MONTHLY_HOURS_OPTIONS = {
     "15分未満": 0.125, "15〜30分": 0.375, "30〜45分": 0.625, "45分〜1時間": 0.875, "1〜1.5時間": 1.25,
@@ -271,19 +270,8 @@ class Respondent(db.Model):
     is_demo = db.Column(db.Boolean, default=False)
     work_pattern = db.Column(db.String(20), default="")
 
-    c1_wish = db.Column(db.String(50))
     c2_skills = db.Column(db.Text, default="")
     c3_learn = db.Column(db.Text, default="")
-    c4_hours = db.Column(db.String(50))
-    c5_targets = db.Column(db.Text, default="")
-    c6_share = db.Column(db.String(50))
-    part_c_done = db.Column(db.Boolean, default=False)
-
-    d1 = db.Column(db.Text, default="")
-    d2 = db.Column(db.Text, default="")
-    d3 = db.Column(db.Text, default="")
-    d4 = db.Column(db.Text, default="")
-    part_d_done = db.Column(db.Boolean, default=False)
 
     workplace = db.relationship("Workplace", back_populates="respondents")
     tasks = db.relationship("Task", back_populates="respondent", cascade="all, delete-orphan")
@@ -295,10 +283,6 @@ class Respondent(db.Model):
     @property
     def learn(self):
         return C.split_list(self.c3_learn)
-
-    @property
-    def wants_to_improve(self):
-        return any(t.self_improve in C.SELF_IMPROVE_POSITIVE for t in self.tasks)
 
 class Task(db.Model):
     __tablename__ = "tasks"
@@ -627,10 +611,8 @@ class Employee(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     emp_id = db.Column(db.String(50), unique=True, nullable=False)
     name = db.Column(db.String(100), nullable=False)
-    department = db.Column(db.String(100), default="")
     work_pattern = db.Column(db.String(20), default="")
     workplace_id = db.Column(db.Integer, db.ForeignKey("workplaces.id"), nullable=True)
-    email = db.Column(db.String(200), default="")
     active = db.Column(db.Boolean, default=True)
     excluded_at = db.Column(db.DateTime, nullable=True)
     excluded_spans = db.Column(db.Text, default="")
@@ -708,7 +690,6 @@ class FlowMap(db.Model):
     kind = db.Column(db.String(20), nullable=False)
     scope = db.Column(db.String(60), nullable=False)
     data = db.Column(db.Text, default="{}")
-    updated_by = db.Column(db.String(100), default="")
     updated_at = db.Column(db.DateTime, default=datetime.now, onupdate=datetime.now)
 
 _ADDED_COLUMNS = {
@@ -965,18 +946,12 @@ def kpis():
     }
 
 def dashboard_chart_data():
-    wp = workplace_stats()
     tasks = Task.query.all()
     wish_counter = Counter(t.wish or "未回答" for t in tasks)
     pain_counter = Counter(p for t in tasks for p in t.pains_list if p != "特になし")
     wish_labels = [w for w in C.WISHES + ["未回答"] if wish_counter.get(w)]
     pain_counts = pain_counter.most_common()
     return {
-        "workplace": {
-            "labels": [w["workplace"].name for w in wp],
-            "tasks": [w["tasks"] for w in wp],
-            "hours": [round(w["minutes"] / 60.0, 1) for w in wp],
-        },
         "wish": {
             "labels": wish_labels,
             "values": [wish_counter[w] for w in wish_labels],
@@ -4723,7 +4698,7 @@ def _sync_members():
     return changed
 
 _SOURCE_RANK = {"manual": 0, "csv": 1, "answer": 2, "ldap": 3}
-_RESPONDENT_FIELDS = ("name", "workplace_id", "work_pattern", "c1_wish", "c2_skills", "c3_learn", "c4_hours", "c5_targets", "c6_share", "d1", "d2", "d3", "d4")
+_RESPONDENT_FIELDS = ("name", "workplace_id", "work_pattern", "c2_skills", "c3_learn")
 
 
 def _merge_employees():
@@ -4760,7 +4735,7 @@ def _merge_employee_rows(rows, spelling):
         closed = [x for e in rows for x in exclusion_spans(e) if x[1] is not None]
         keep.excluded_spans = json.dumps(_merge_spans(closed)) if closed else ""
         keep.is_demo = all(e.is_demo for e in rows)
-        for field in ("department", "email", "work_pattern", "workplace_id"):
+        for field in ("work_pattern", "workplace_id"):
             if not getattr(keep, field):
                 setattr(keep, field, next((getattr(e, field) for e in others if getattr(e, field)), getattr(keep, field)))
         keep.created_at = min((e.created_at for e in rows if e.created_at), default=keep.created_at)
@@ -4795,7 +4770,6 @@ def _merge_answer_rows(monthly_rows, resp_rows, spelling):
         for field in _RESPONDENT_FIELDS:
             if not getattr(keep, field) and getattr(r, field):
                 setattr(keep, field, getattr(r, field))
-        keep.part_c_done, keep.part_d_done = bool(keep.part_c_done or r.part_c_done), bool(keep.part_d_done or r.part_d_done)
         keep.is_demo = bool(keep.is_demo and r.is_demo)
         keep.created_at = min((x for x in (keep.created_at, r.created_at) if x), default=None)
         db.session.flush()
@@ -4984,14 +4958,14 @@ def _migrate_monthly_questions():
 
 # ----- デモデータ -----
 DEMO_RESPONDENTS = [
-    ("田中 一郎", "製造1課", "教えてもらえれば取り組みたい", ["Excel関数"], ["Excel VBA", "RPA"], "1〜2時間", "できる"),
-    ("佐藤 花子", "製造1課", "ぜひ取り組みたい", ["Excel関数", "ピボットテーブル", "Excel VBA"], ["Python", "Power BI"], "2〜4時間", "できる"),
-    ("鈴木 健", "製造2課", "興味はあるが時間がない", ["Excel関数"], ["Excel VBA"], "1時間未満", "内容による"),
-    ("高橋 美咲", "組立課", "教えてもらえれば取り組みたい", ["Excel関数"], ["Power Query", "RPA"], "1〜2時間", "できる"),
-    ("伊藤 大輔", "検査・品質保証課", "ぜひ取り組みたい", ["Excel関数", "ピボットテーブル", "Access"], ["Python", "生成AI"], "2〜4時間", "できる"),
-    ("渡辺 由美", "生産管理課", "今は考えていない", ["Excel関数", "ピボットテーブル"], [], "1時間未満", "難しい"),
-    ("山本 剛", "設備保全課", "教えてもらえれば取り組みたい", ["特になし"], ["Excel関数", "Excel VBA"], "1〜2時間", "内容による"),
-    ("中村 翔太", "製造2課", "興味はあるが時間がない", ["Excel関数", "ピボットテーブル"], ["Power BI"], "1時間未満", "内容による"),
+    ("田中 一郎", "製造1課", ["Excel関数"], ["Excel VBA", "RPA"]),
+    ("佐藤 花子", "製造1課", ["Excel関数", "ピボットテーブル", "Excel VBA"], ["Python", "Power BI"]),
+    ("鈴木 健", "製造2課", ["Excel関数"], ["Excel VBA"]),
+    ("高橋 美咲", "組立課", ["Excel関数"], ["Power Query", "RPA"]),
+    ("伊藤 大輔", "検査・品質保証課", ["Excel関数", "ピボットテーブル", "Access"], ["Python", "生成AI"]),
+    ("渡辺 由美", "生産管理課", ["Excel関数", "ピボットテーブル"], []),
+    ("山本 剛", "設備保全課", ["特になし"], ["Excel関数", "Excel VBA"]),
+    ("中村 翔太", "製造2課", ["Excel関数", "ピボットテーブル"], ["Power BI"]),
 ]
 
 DEMO_TASKS = [
@@ -5229,13 +5203,6 @@ DEMO_FLOWS = {
     "保全部品の発注依頼書作成": dict(actors="購買、保全担当", info_from="保全担当のメモ"),
 }
 
-DEMO_D = {
-    "田中 一郎": ("毎月、生産管理課へ実績を送っている", "日報の数字を日次表・週報・月報に3回入れている", "", "紙の日報をなくしてほしい"),
-    "佐藤 花子": ("総務への勤怠提出", "不良報告は品質システムとメールの二重入力", "掲示用グラフの一部", "自動化したい業務が多い"),
-    "渡辺 由美": ("営業からの受注連絡がメールで来るので転記が必要", "受注情報を受注一覧と計画表の両方に入れている", "", ""),
-}
-
-
 DEMO_INTAKE = {
     "日報の実績をExcelの集計表に転記する": [
         {"role": "ai", "text": "「日報の実績をExcelの集計表に転記する」ですね。最初に何をしますか？"},
@@ -5292,18 +5259,15 @@ def seed_demo():
     base = datetime.now() - timedelta(days=20)
 
     resp_by_name = {}
-    for i, (name, wp, c1, skills, learn, c4, c6) in enumerate(DEMO_RESPONDENTS):
+    for i, (name, wp, skills, learn) in enumerate(DEMO_RESPONDENTS):
         workplace = _demo_master(wp_by_name, Workplace, wp, 100 + i, created["workplaces"])
         emp_id = f"DEMO-{i + 1:03d}"
         r = _respondent_for(emp_id)
         if r is None:
-            d = DEMO_D.get(name, ("", "", "", ""))
             r = Respondent(
                 emp_id=emp_id,
                 name=name, workplace=workplace, is_demo=True, work_pattern=("交代勤務" if i % 2 else "普通勤務"),
-                c1_wish=c1, c2_skills=C.join_list(skills), c3_learn=C.join_list(learn), c4_hours=c4, c6_share=c6,
-                part_c_done=True, part_d_done=any(d),
-                d1=d[0], d2=d[1], d3=d[2], d4=d[3],
+                c2_skills=C.join_list(skills), c3_learn=C.join_list(learn),
                 created_at=base + timedelta(days=i),
             )
             db.session.add(r)
@@ -5357,12 +5321,12 @@ def _seed_employees_and_monthly(resp_by_name, wp_by_name, created):
     rows = [(r.emp_id, name, r.workplace, r.work_pattern or "") for name, r in resp_by_name.items()]
     rows += [(emp_id, name, wp_by_name.get(wp), "交代勤務" if j % 2 else "普通勤務") for j, (emp_id, name, wp) in enumerate(DEMO_EXTRA_EMPLOYEES)]
     employees = []
-    for i, (emp_id, name, workplace, pattern) in enumerate(rows):
+    for emp_id, name, workplace, pattern in rows:
         emp = find_employee(emp_id)
         if emp is None:
             emp = Employee(
-                emp_id=emp_id, name=name, department=workplace.name if workplace else "", work_pattern=pattern,
-                workplace_id=workplace.id if workplace else None, email=f"user{i + 1:02d}@example.local", active=True, source="csv", is_demo=True,
+                emp_id=emp_id, name=name, work_pattern=pattern,
+                workplace_id=workplace.id if workplace else None, active=True, source="csv", is_demo=True,
             )
             db.session.add(emp)
         employees.append(emp)
@@ -5740,54 +5704,19 @@ def _respondent_json(r):
     return {
         "id": r.id,
         "emp_id": r.emp_id or "",
-        "name": r.name,
         "workplace_id": r.workplace_id,
-        "workplace": r.workplace.name if r.workplace else "",
         "work_pattern": r.work_pattern or "",
-        "c1_wish": r.c1_wish or "",
         "c2_skills": r.skills,
         "c3_learn": r.learn,
-        "c4_hours": r.c4_hours or "",
-        "c5_targets": r.c5_targets or "",
-        "c6_share": r.c6_share or "",
-        "d1": r.d1 or "",
-        "d2": r.d2 or "",
-        "d3": r.d3 or "",
-        "d4": r.d4 or "",
-        "part_c_done": bool(r.part_c_done),
-        "part_d_done": bool(r.part_d_done),
     }
 
 def _task_json(t):
     return {
         "id": t.id,
         "name": t.name,
-        "domain_id": t.domain_id,
-        "purpose": t.purpose or "",
-        "output": t.output or "",
-        "output_users": t.output_users_list,
-        "output_users_note": t.output_users_note or "",
-        "inputs": t.inputs_list,
-        "inputs_note": t.inputs_note or "",
-        "prev_task": t.prev_task or "",
-        "next_task": t.next_task or "",
-        "frequency": t.frequency or "",
-        "duration": t.duration or "",
-        "headcount": t.headcount or 1,
-        "tools": t.tools_list,
-        "nature": t.nature_list,
-        "pains": t.pains_list,
-        "pains_note": t.pains_note or "",
         "wish": t.wish or "",
-        "self_improve": t.self_improve or "",
-        "note": t.note or "",
-        "actors": t.actors or "",
-        "info_from": t.info_from or "",
         "monthly_minutes": t.monthly_minutes or 0,
         "hours": round((t.monthly_minutes or 0) / 60.0, 1),
-        "ai_flags": t.ai_flags_list,
-        "steps": t.steps,
-        "shift": t.shift or "",
         "monthly_name": t.monthly_name or "",
         "stage": t.stage_name + ("（保留中）" if t.is_on_hold else ""),
     }
@@ -5872,7 +5801,6 @@ def _options():
         "self_improve_yes": C.SELF_IMPROVE_YES,
         "skills": skill_options(),
         "skill_none": C.SKILL_NONE,
-        "max_questions": C.INTAKE_MAX_QUESTIONS,
     }
 
 def _entry_args():
@@ -6283,7 +6211,6 @@ def api_task_create():
     if data.get("self_improve"):
         r.c2_skills = C.join_list(_skill_list(data.get("skills")))
         r.c3_learn = C.join_list(_skill_list(data.get("learn")))
-        r.part_c_done = True
         task.assignment = "自主改善"
     db.session.add(task)
     db.session.flush()
@@ -6587,18 +6514,10 @@ def _merged_graph(kind, workplace_id, domain_id):
     row = _flow_row(kind, scope)
     merged = merge_graph(auto, _graph_data(row))
     merged["meta"] = {
-        "kind": kind,
-        "kind_label": KIND_LABELS.get(kind, kind),
-        "scope": scope,
-        "scope_label": _scope_label(workplace_id, domain_id),
-        "workplace_id": workplace_id,
-        "domain_id": domain_id,
         "saved_at": row.updated_at.strftime("%Y/%m/%d %H:%M") if row else None,
         "edited": bool(merged.get("edited")),
         "task_count": len(tasks),
         "truncated": truncated,
-        "auto_node_count": len(auto["nodes"]),
-        "auto_edge_count": len(auto["edges"]),
     }
     return merged
 
@@ -6690,7 +6609,6 @@ def api_graph_save():
         row = FlowMap(kind=kind, scope=scope)
         db.session.add(row)
     row.data = json.dumps(data, ensure_ascii=False)
-    row.updated_by = (payload.get("updated_by") or "")[:100]
     row.updated_at = datetime.now()
     db.session.commit()
     return jsonify({"ok": True, "saved_at": row.updated_at.strftime("%Y/%m/%d %H:%M")})
@@ -6745,7 +6663,7 @@ def domain(domain_id):
         info_legend=info_legend,
     )
 
-# ===== 画面: DX人財情報 =====
+# ===== 画面: 人財一覧の集計（以前の DX人財情報のアドレス /people/ は人財一覧へ送る） =====
 bp_people = Blueprint("people", __name__, url_prefix="/people")
 
 
@@ -7066,7 +6984,7 @@ def map_vocab_try():
     vocab = _compile_vocab(_clean_vocab(data.get("vocab"))) if isinstance(data.get("vocab"), dict) else map_vocab()
     text = str(data.get("text") or "")[:200]
     medium = medium_of(text, vocab=vocab)
-    who = who_of(text, str(data.get("workplace") or ""), vocab)
+    who = who_of(text, "", vocab)
     role, method = field_role(text, vocab)
     handoff = handoff_of(text, vocab=vocab)
     name = lambda g, k: next((r["label"] for r in vocab[g] if r["key"] == k), "")
@@ -7241,11 +7159,11 @@ def submit():
             continue
         parent = answers.get(dep["key"], "")
         show_if = dep.get("show_if")
-        shown = (parent in show_if) if show_if is not None else (parent not in (dep.get("hidden_if") or []))
+        shown = True if show_if is None else parent in show_if
         if not shown:
             answers[q["key"]] = ""
             errors.pop(q["key"], None)
-        elif (dep.get("required") or parent in (dep.get("required_if") or [])) and not answers.get(q["key"]):
+        elif dep.get("required") and not answers.get(q["key"]):
             errors[q["key"]] = "選択してください" if q["type"] == "choice" else "入力してください"
     comment = (data.get("comment") or "").strip()[:500]
     if not survey.is_active:
@@ -8550,7 +8468,7 @@ TEMPLATES = {
 {% block content %}
 <div id="fe-app" class="fe-wrap"
      data-kind="{{ kind }}" data-workplace="{{ workplace_id or '' }}" data-domain="{{ domain_id or '' }}"
-     data-api="{{ url_for('bizmap.api_graph_get') }}" data-back="{{ url_for('bizmap.index', workplace_id=workplace_id, domain_id=domain_id) }}">
+     data-api="{{ url_for('bizmap.api_graph_get') }}">
   <div class="fe-toolbar">
     <div class="fe-title">
       <strong>{{ kind_label }}</strong> <span class="text-muted">— {{ scope_label }}</span>{{ C.tip("操作:\nドラッグで移動\n文字をダブルクリックで名前を編集\n🔗 で線を引く（相手をクリック。作業どうしは仕事の流れ、作業と情報は情報の流れ。情報どうしは結べません）\n線をクリックで方法・引き継ぎ方・向き・削除\n🎨 で種類・だれ・媒体・色\nShift+ドラッグで範囲選択\n空白をドラッグで画面移動\nホイールで拡大縮小\nDelete で選択を削除") }}
@@ -8705,7 +8623,7 @@ TEMPLATES = {
 {% endif %}
 
 <div class="bizmap-sections">
-  <div id="tab-info">
+  <div>
     {{ flow_panel('info', '業務マップ',
        '取り出し元の情報 → 業務 → できるもの → 渡す相手の作業。箱は作業（四角・だれつき）と情報（媒体の形とアイコン）の2種類、線は仕事の流れ（太い灰）と情報の流れ（細い青）の2種類です。聞き取りで答えた名前で描き、同じ名前は1つの箱にまとめます。Gr・役割ごとの枠に業務を置き、点線は名前から推定したつながり（ある業務のできるものを別の業務が使っている、前後の業務）です。灰色の点線の箱は、月次アンケートで挙がったものの、まだ流れを登録していない業務です。保留中の業務は点線の枠に「（保留）」、廃止した業務は薄い色に「（廃止済み）」を付けます。',
        flows.info, '業務が登録されると図が描かれます。') }}
@@ -9342,7 +9260,7 @@ TEMPLATES = {
       {% endif %}
     </div></form>
 
-    <form method="post" action="{{ url_for('cases.withdraw_task', task_id=task.id) }}" class="card mt-3 case-withdraw" data-confirm="「{{ task.name }}」の登録を取り消しますか？AI の聞き取りの記録・流れ図・段階の記録も消え、元に戻せません。"><div class="card-body">
+    <form method="post" action="{{ url_for('cases.withdraw_task', task_id=task.id) }}" class="card mt-3" data-confirm="「{{ task.name }}」の登録を取り消しますか？AI の聞き取りの記録・流れ図・段階の記録も消え、元に戻せません。"><div class="card-body">
       <h5 class="card-title">登録の取り消し（管理者）{{ C.tip("間違えて登録された業務や、同じ業務の二重登録を消します。本人は「自動化アイテム登録」の画面から取り消せません。") }}</h5>
       <p class="small text-muted">取り消すと活動状況・ダッシュボード・業務マップからも消え、元に戻せません。続けるか迷うときは「保留」にしてください。</p>
       <button class="btn btn-outline-danger btn-sm w-100">この登録を取り消す</button>
@@ -9695,7 +9613,7 @@ TEMPLATES = {
 <script>
 (function () {
   var data = JSON.parse(document.getElementById("chart-data").textContent);
-  var C = { blue: "#0a84ff", green: "#30d158", orange: "#ff9f0a", purple: "#bf5af2", red: "#ff453a", teal: "#5ac8fa", indigo: "#5e5ce6", pink: "#ff375f", yellow: "#ffd60a", gray: "#8e8e93" };
+  var C = { blue: "#0a84ff", green: "#30d158", orange: "#ff9f0a", purple: "#bf5af2", red: "#ff453a", teal: "#5ac8fa", indigo: "#5e5ce6", yellow: "#ffd60a" };
   var palette = [C.blue, C.green, C.orange, C.purple, C.red, C.teal, C.indigo, C.yellow];
   Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
   Chart.defaults.font.size = 12;
@@ -10113,7 +10031,7 @@ TEMPLATES = {
       {% for q in questions %}
       {% set is_sub = q.depends and not q.depends.main %}
       {% set label = qnos[q.key] %}
-      <div class="mq-q{% if is_sub %} mq-sub{% endif %}{% if q.depends %} d-none{% endif %}" data-key="{{ q.key }}" data-type="{{ q.type }}" data-required="{{ 1 if q.required else 0 }}"{% if q.depends %} data-dep-key="{{ q.depends.key }}" data-dep-show='{{ (q.depends.show_if or q.depends.required_if or [])|tojson }}' data-dep-required="{{ 1 if (q.depends.required or q.depends.required_if) else 0 }}"{% endif %}>
+      <div class="mq-q{% if is_sub %} mq-sub{% endif %}{% if q.depends %} d-none{% endif %}" data-key="{{ q.key }}" data-type="{{ q.type }}" data-required="{{ 1 if q.required else 0 }}"{% if q.depends %} data-dep-key="{{ q.depends.key }}" data-dep-show='{{ (q.depends.show_if or [])|tojson }}' data-dep-required="{{ 1 if q.depends.required else 0 }}"{% endif %}>
         <div class="mq-q-head">
           <span class="mq-no">{{ label }}</span>
           <span class="mq-text">{{ q.text }}</span>
@@ -13007,7 +12925,6 @@ summary { transition: color 0.15s ease; }
 
 /* ---- 自動化アイテム登録: 業務の選択・月次アンケートからの続き・AI との聞き取り ---- */
 .rq-lead { color: var(--ui-text-2); margin: 0.25rem 0 0; max-width: 46rem; }
-.rq-sec-sub { margin-left: auto; font-size: 0.85rem; color: var(--ui-text-2); }
 .rq-registered { display: flex; flex-direction: column; gap: 0.25rem; margin-bottom: 0.75rem; }
 .rq-reg { display: flex; align-items: center; gap: 0.5rem; padding: 0.35rem 0.6rem; background: var(--ui-fill); border-radius: var(--ui-radius-sm); }
 .rq-reg-name { font-weight: 600; }
@@ -13832,13 +13749,7 @@ summary { transition: color 0.15s ease; }
   renderSuggest();
   updateActions();
   if (CFG.prefill) titleInput.value = CFG.prefill;
-  if (S.respondent) {
-    empInput.value = S.respondent.emp_id || "";
-    confirmedId = normId(S.respondent.emp_id);
-    found = { workplace_id: S.respondent.workplace_id };
-    fillSelects(S.respondent.workplace_id, S.respondent.work_pattern);
-    setIdentity(ID_OK);
-  } else if (CFG.emp) {
+  if (CFG.emp) {
     empInput.value = CFG.emp;
     if (!CFG.monthly) lookupEmp();
   }

@@ -2651,6 +2651,8 @@ def smoke_request():
         b = calls[-1]["body"]
         check(r.status_code == 200 and j["success"] and j["first_impression"] == finalize["first_impression"] and len(j["tasks"]) == 1 and j["suggested"] == ["出勤簿の転記"], "登録: AI の一言が返り、候補から登録した業務が消える")
         check(j["respondent"]["c2_skills"] == ["Excel関数"] and j["respondent"]["c3_learn"] == ["Python"], f"P18・P20: 登録の応答に新しい技術が入り、「特になし」は他の技術と一緒には残らない: {j['respondent']['c2_skills']}")
+        check(set(j["respondent"]) == {"id", "emp_id", "workplace_id", "work_pattern", "c2_skills", "c3_learn"} and set(j["tasks"][0]) == {"id", "name", "wish", "monthly_minutes", "hours", "monthly_name", "stage"},
+              f"回答者・業務の JSON は画面が使う項目だけを返す（氏名や使わなくなった旧パートC/Dは送らない）: {sorted(j['respondent'])}")
         check(j["tasks"][0]["stage"] == "開始" and "can_delete" not in j["tasks"][0], f"P15: 登録した業務に段階が付く（取り消せるかは返さない）: {j['tasks'][0].get('stage')}")
         with app.app_context():
             e_t1 = Employee.query.filter_by(emp_id="T001").first()
@@ -2667,7 +2669,7 @@ def smoke_request():
             check(set(t.ai_fields_list) >= {"purpose", "output", "inputs", "tools", "domain"} and "headcount" not in t.ai_fields_list and not t.ai_extra_dict.get("rule_fields") and t.ai_source == "openai" and t.ai_priority == "高" and "自動化候補" in t.ai_flags_list and t.ai_extra_dict["saving_minutes_per_month"] == 400 and t.ai_extra_dict["tobe_steps"][0].startswith("CSV"), "AI推定の印・分析結果・改善後の流れが保存される")
             check(len(t.intake) == len(msgs) and t.intake[-1]["text"] == "はい、合っています", "聞き取りの記録が保存される")
             r_ = Respondent.query.filter_by(emp_id="T001").first()
-            check(r_.c2_skills == "Excel関数" and r_.c3_learn == "Python" and r_.wants_to_improve, "一緒にやってみたい人の技術が残り、自主改善希望者になる")
+            check(r_.c2_skills == "Excel関数" and r_.c3_learn == "Python" and any(t_.self_improve in app_module.SELF_IMPROVE_POSITIVE for t_ in r_.tasks), "一緒にやってみたい人の技術が残り、自主改善希望者になる")
             tid = t.id
 
         r = client.post("/survey/api/tasks", json={"state": final_state, "messages": msgs, "frequency": "毎日", "duration": "15〜30分", "wish": "減らしたい", "shift": "夜勤"})
@@ -2691,7 +2693,7 @@ def smoke_request():
         with app.app_context():
             t2 = Task.query.filter_by(name="相談したい業務").first()
             check(t2 is not None and t2.is_candidate and t2.pains_list and len(t2.ai_extra_dict["hearing_questions"]) == 2, "相談の案件は困りごとがあれば候補に数え、ヒアリング質問が残る")
-            check(not Task(wish="まずは相談したい", pains="特になし").wants_change and Task(wish="まずは相談したい", pains="時間がかかる").wants_change and Task(wish="減らしたい").wants_change and Task(wish="自動化したい").wants_change
+            check(not Task(wish="まずは相談したい", pains="特になし").wants_change and Task(wish="まずは相談したい", pains="時間がかかる").wants_change and Task(wish="減らしたい").wants_change and not Task(wish="自動化したい", pains="特になし").wants_change
                   and Task(wish="減らしたい", status="受付").is_candidate and not Task(wish="減らしたい", status="対応中").is_candidate and not Task(wish="減らしたい", status="完了").is_candidate,
                   "案件候補は、まだ手を付けていない（受付の）業務のうち「なくしたい・減らしたい」か本当の困りごと（「まずは相談したい」だけでは候補にしない）")
             t2_id = t2.id

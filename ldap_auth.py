@@ -24,8 +24,6 @@ def api_config():
         "id_param": str(_cfg("LDAP_API_ID_PARAM", "employee_id") or "employee_id"),
         "field_id": str(_cfg("LDAP_API_FIELD_ID", "employee_id") or "employee_id"),
         "field_name": str(_cfg("LDAP_API_FIELD_NAME", "name") or "name"),
-        "field_dept": str(_cfg("LDAP_API_FIELD_DEPT", "department") or "department"),
-        "field_mail": str(_cfg("LDAP_API_FIELD_MAIL", "mail") or "mail"),
         "field_exists": str(_cfg("LDAP_API_FIELD_EXISTS", "exists") or "exists"),
         "timeout": float(_cfg("LDAP_API_TIMEOUT", 5) or 5),
     }
@@ -38,8 +36,6 @@ def ldap_config():
         "base_dn": str(_cfg("LDAP_BASE_DN", "") or ""),
         "id_attr": str(_cfg("LDAP_ID_ATTR", "employeeID") or "employeeID"),
         "name_attr": str(_cfg("LDAP_NAME_ATTR", "displayName") or "displayName"),
-        "dept_attr": str(_cfg("LDAP_DEPT_ATTR", "department") or "department"),
-        "mail_attr": str(_cfg("LDAP_MAIL_ATTR", "mail") or "mail"),
     }
 
 def _dig(data, path):
@@ -96,8 +92,6 @@ def _lookup_api(emp_id):
     return {
         "emp_id": str(_dig(data, cfg["field_id"]) or emp_id),
         "name": str(name or ""),
-        "department": str(_dig(data, cfg["field_dept"]) or ""),
-        "email": str(_dig(data, cfg["field_mail"]) or ""),
     }
 
 def _lookup_ldap3(emp_id):
@@ -111,7 +105,7 @@ def _lookup_ldap3(emp_id):
         server = ldap3.Server(cfg["server"], get_info=ldap3.NONE, connect_timeout=5)
         conn = ldap3.Connection(server, user=cfg["bind_dn"] or None, password=cfg["password"] or None, auto_bind=True, receive_timeout=5)
         safe_id = ldap3.utils.conv.escape_filter_chars(emp_id)
-        conn.search(cfg["base_dn"], f"(&(objectClass=person)({cfg['id_attr']}={safe_id}))", attributes=[cfg["name_attr"], cfg["dept_attr"], cfg["mail_attr"]])
+        conn.search(cfg["base_dn"], f"(&(objectClass=person)({cfg['id_attr']}={safe_id}))", attributes=[cfg["name_attr"]])
         if not conn.entries:
             return None
         entry = conn.entries[0]
@@ -128,7 +122,7 @@ def _lookup_ldap3(emp_id):
         name = attr(cfg["name_attr"])
         if not name:
             return None
-        return {"emp_id": emp_id, "name": name, "department": attr(cfg["dept_attr"]), "email": attr(cfg["mail_attr"])}
+        return {"emp_id": emp_id, "name": name}
     except Exception as e:
         log.warning("LDAP 直接照会に失敗しました: %s", e)
         return None
