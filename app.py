@@ -1079,8 +1079,8 @@ def duplicate_input_tasks():
     rows = defaultdict(list)
     for t in Task.query.all():
         if "同じ情報を何度も入力する" in t.pains_list:
-            key = "・".join(t.inputs_list) or "入力元不明"
-            rows[key].append(t)
+            for key in t.inputs_list or ["入力元不明"]:
+                rows[key].append(t)
     return sorted(rows.items(), key=lambda kv: -len(kv[1]))
 
 def flow_rows():
@@ -1340,7 +1340,7 @@ def suggest_actions(limit=10):
         )
 
     dup_inputs = duplicate_input_tasks()
-    total_dup = sum(len(v) for _, v in dup_inputs)
+    total_dup = len({t.id for _, v in dup_inputs for t in v})
     if total_dup:
         top_src = dup_inputs[0][0]
         suggestions.append(
@@ -2153,6 +2153,10 @@ def info_shape(medium):
     return shape if shape in ("doc", "cyl", "stadium") else "doc"
 
 def node_icon(n):
+    actor = person_source_actor(n)
+    if actor:
+        row = vocab_row("actors", actor)
+        return (row["icon"] if row else "bi-people-fill"), f"a-{actor}"
     if n.get("type") == "info":
         medium = n.get("medium") or "unknown"
         row = vocab_row("media", medium) or vocab_row("media", "unknown")
@@ -2173,6 +2177,16 @@ def show_who(n):
     who = (n.get("who") or "").strip()
     return n.get("type") == "work" and n.get("cls") in ("work", "warn") and n.get("who_state") in ("ok", "unknown") and who and normalize_text(who) != normalize_text(n.get("text"))
 
+NODE_COLORS = {"white": "#ffffff", "red": "#fee2e2", "orange": "#fed7aa", "yellow": "#fef3c7", "green": "#d1fae5", "blue": "#dbeafe", "purple": "#e9d5ff", "pink": "#fce7f3"}
+PERSON_ACTORS = ("external", "dept", "boss", "team")
+
+
+def person_source_actor(n):
+    if n.get("type") != "info" or (n.get("medium") or "unknown") != "unknown":
+        return ""
+    w = who_of(n.get("text"))
+    return w["actor"] if w["state"] == "ok" and w["actor"] in PERSON_ACTORS else ""
+
 def node_label(n):
     icon, mark = node_icon(n)
     head = f"<i class='bi {icon} fi {mark}'></i> " if icon else ""
@@ -2186,9 +2200,8 @@ def edge_label(e):
         return e["label"].strip()
     if e.get("type") == "work":
         return vocab_label("handoff", e.get("handoff")) if e.get("handoff") in ("push", "pull") else ""
-    if e.get("show_method") and e.get("method"):
-        return vocab_label("methods", e["method"])
-    return ""
+    method = vocab_label("methods", e["method"]) if e.get("show_method") and e.get("method") else ""
+    return "／".join(v for v in ((e.get("note") or "").strip(), method) if v)
 
 def show_method_for(method, medium):
     row = vocab_row("methods", method) if method else None
@@ -2203,7 +2216,7 @@ class Diagram:
         self.edges = OrderedDict()
         self.clicks = OrderedDict()
 
-    def node(self, node_id, text, cls="task", subgraph=None, width=14, hint=None, medium=None, who=None):
+    def node(self, node_id, text, cls="task", subgraph=None, width=14, hint=None, medium=None, who=None, color=None):
         if node_id not in self.nodes:
             ntype = CLS_TYPE.get(cls, "work")
             n = {"text": str(text or "").strip(), "cls": cls, "type": ntype, "hint": hint, "width": width, "group": None, "group_title": None,
@@ -2214,6 +2227,8 @@ class Diagram:
                 w = who or {"actor": "", "label": "", "state": "unconfirmed"}
                 n.update(actor=w.get("actor") or "", who=w.get("label") or "", who_state=w.get("state") or "unconfirmed")
             self.nodes[node_id] = n
+        if color in NODE_COLORS:
+            self.nodes[node_id]["color"] = color
         if subgraph is not None:
             key, title = subgraph
             self.subgraphs.setdefault(key, title)
@@ -2221,22 +2236,24 @@ class Diagram:
             self.nodes[node_id]["group_title"] = title
         return node_id
 
-    def edge(self, a, b, kind="info", label="", method="", handoff="", show_method=False, inferred=False):
+    def edge(self, a, b, kind="info", label="", method="", handoff="", show_method=False, inferred=False, note=""):
         if not a or not b or a == b:
             return
-        new = {"type": kind, "label": label, "method": method or "", "handoff": handoff or "", "show_method": bool(show_method), "inferred": bool(inferred)}
+        new = {"type": kind, "label": label, "method": method or "", "handoff": handoff or "", "show_method": bool(show_method), "inferred": bool(inferred), "note": (note or "").strip()}
         old = self.edges.get((a, b))
         if old is None:
             self.edges[(a, b)] = new
         elif old["inferred"] and not new["inferred"]:
-            self.edges[(a, b)] = dict(new, method=new["method"] or old["method"], show_method=new["show_method"] or old["show_method"])
-        elif not old["method"] and new["method"]:
-            old.update(method=new["method"], show_method=new["show_method"])
+            self.edges[(a, b)] = dict(new, method=new["method"] or old["method"], show_method=new["show_method"] or old["show_method"], note=new["note"] or old.get("note", ""))
+        else:
+            if not old["method"] and new["method"]:
+                old.update(method=new["method"], show_method=new["show_method"])
+            if new["note"] and not old.get("note"):
+                old["note"] = new["note"]
 
     def info_edge(self, a, b, method, info_node=None, inferred=False, note=""):
         show = show_method_for(method, self.nodes[info_node or a]["medium"])
-        label = "／".join(v for v in ((note or "").strip(), vocab_label("methods", method) if show and method else "") if v) if (note or "").strip() else ""
-        self.edge(a, b, "info", label=label, method=method, show_method=show, inferred=inferred)
+        self.edge(a, b, "info", method=method, show_method=show, inferred=inferred, note=note)
 
     def click(self, node_id, url, tooltip=""):
         self.clicks[node_id] = (url, tooltip)
@@ -2256,7 +2273,7 @@ class Diagram:
     def _node_line(self, node_id):
         n = self.nodes[node_id]
         label = node_label(n)
-        shape = info_shape(n["medium"]) if n["type"] == "info" else "rect"
+        shape = ("stadium" if person_source_actor(n) else info_shape(n["medium"])) if n["type"] == "info" else "rect"
         if shape == "doc":
             return f'{node_id}:::{n["cls"]}@{{ shape: doc, label: "{label}" }}'
         open_, close = SHAPES[shape]
@@ -2277,6 +2294,9 @@ class Diagram:
         for i, n in self.nodes.items():
             if not n.get("group"):
                 lines.append("  " + self._node_line(i))
+        for i, n in self.nodes.items():
+            if n.get("color") in NODE_COLORS:
+                lines.append(f"  style {i} fill:{NODE_COLORS[n['color']]}")
         work_links = []
         for idx, ((a, b), e) in enumerate(self.edges.items()):
             lab = esc(edge_label(e))
@@ -2313,7 +2333,7 @@ class Diagram:
             edges.append(
                 {
                     "id": f"{a}->{b}", "from": a, "to": b, "type": e["type"], "method": e["method"], "handoff": e["handoff"],
-                    "show_method": e["show_method"], "inferred": e["inferred"], "label": e["label"], "source": "auto", "reversed": False, "label_edited": False,
+                    "show_method": e["show_method"], "inferred": e["inferred"], "label": e["label"], "note": e.get("note", ""), "source": "auto", "reversed": False, "label_edited": False,
                 }
             )
         return {"schema": 2, "nodes": nodes, "edges": edges, "suppressed_nodes": [], "suppressed_edges": [], "view": None}
@@ -2331,7 +2351,7 @@ def graph_to_diagram(graph, direction="LR"):
         cls = _cls_for(n.get("cls"), ntype)
         sub = (n["group"], n.get("group_title") or n["group"]) if n.get("group") else None
         who = None if ntype == "info" else {"actor": n.get("actor") or "", "label": n.get("who") or "", "state": n.get("who_state") or ("ok" if n.get("actor") else "unconfirmed")}
-        d.node(n["id"], n.get("text") or "", cls, subgraph=sub, hint=n.get("hint"), medium=n.get("medium") or None, who=who)
+        d.node(n["id"], n.get("text") or "", cls, subgraph=sub, hint=n.get("hint"), medium=n.get("medium") or None, who=who, color=n.get("color"))
         if n.get("url"):
             d.click(n["id"], n["url"], "案件詳細を開く")
     types = {i: x["type"] for i, x in d.nodes.items()}
@@ -2340,7 +2360,7 @@ def graph_to_diagram(graph, direction="LR"):
         if a not in types or b not in types:
             continue
         kind = e.get("type") if e.get("type") in ("work", "info") else ("work" if types[a] == "work" and types[b] == "work" else "info")
-        d.edge(a, b, kind, e.get("label") or "", e.get("method") or "", e.get("handoff") or "", bool(e.get("show_method")), bool(e.get("inferred")) or (types[a] == "info" and types[b] == "info"))
+        d.edge(a, b, kind, e.get("label") or "", e.get("method") or "", e.get("handoff") or "", bool(e.get("show_method")), bool(e.get("inferred")) or (types[a] == "info" and types[b] == "info"), note=e.get("note") or "")
     return d.derive_roles()
 
 def upgrade_graph(saved):
@@ -2552,9 +2572,13 @@ def merge_graph(auto, saved):
         seen.add(m["id"])
         pairs.add((a, b))
 
+    node_marks = ("text_edited", "medium_edited", "who_edited", "color")
+    edge_marks = ("label_edited", "method_edited", "handoff_edited", "reversed")
+    edited = bool(sup_n or sup_e) or any(sn.get("source") == "manual" or any(sn.get(k) for k in node_marks) for sn in saved.get("nodes", [])) \
+        or any(se.get("source") == "manual" or any(se.get(k) for k in edge_marks) for se in saved_edges)
     result.update(
         nodes=nodes, edges=edges, suppressed_nodes=sorted(sup_n), suppressed_edges=sorted(sup_e),
-        view=saved.get("view"), needs_layout=False,
+        view=saved.get("view"), needs_layout=False, edited=edited,
     )
     return result
 
@@ -3441,14 +3465,26 @@ def add_pending_tasks(d, workplace_id=None, tasks=()):
     return d
 
 # ----- 図に添える表: 職場・部署の間の受け渡し、システム・情報源ごとの業務 -----
+def person_source(name, own=""):
+    if medium_of(name) != "unknown":
+        return None
+    w = who_of(name, own)
+    return w if w["state"] == "ok" and w["actor"] in PERSON_ACTORS else None
+
 def handoff_rows(tasks):
     agg = defaultdict(lambda: {"info": 0, "involve": 0})
     for t in tasks:
         wp, own = _wp_name(t), _own_wp(t)
-        if (t.info_from or "").strip():
-            for v in _names(t.info_from, dots=True):
-                agg[(who_of(v, own)["label"] or v, wp)]["info"] += 1
-        elif "人から聞く" in t.inputs_list:
+        froms = [r["from"] for x in t.steps for r in step_receives(x) if r["from"]] + _names(t.info_from, dots=True)
+        counted = set()
+        for v in froms:
+            w = person_source(v, own)
+            key = normalize_text(w["label"] or v) if w else ""
+            if not w or key in counted:
+                continue
+            counted.add(key)
+            agg[(w["label"] or v, wp)]["info"] += 1
+        if not counted and "人から聞く" in t.inputs_list:
             agg[("口頭での聞き取り", wp)]["info"] += 1
         for u in task_users(t):
             w = u["who"]
@@ -3470,6 +3506,8 @@ def source_rows(tasks):
     by = OrderedDict()
     for t in tasks:
         for s in task_sources(t):
+            if person_source(s["name"], _own_wp(t)):
+                continue
             medium = medium_of(s["name"], s["hint"])
             row = by.setdefault(normalize_text(s["name"]), {"name": s["name"], "cls": "system" if medium == "system" else "source", "hint": s["hint"], "tasks": [], "minutes": 0.0})
             if t not in row["tasks"]:
@@ -3707,11 +3745,11 @@ def map_legend_html(d):
     roles = [c for c in CLS_LABELS if any(n["cls"] == c for n in nodes)]
     if roles:
         parts.append('<div class="legend-row"><span class="legend-title">色</span>' + "".join(f'<span class="legend-chip lg-{c}">{CLS_LABELS[c]}</span>' for c in roles) + "</div>")
-    media = [r for r in vocab["media"] if any(n["type"] == "info" and n["medium"] == r["key"] for n in nodes)]
+    media = [r for r in vocab["media"] if any(n["type"] == "info" and n["medium"] == r["key"] and not person_source_actor(n) for n in nodes)]
     if media:
         parts.append('<div class="kind-legend"><span class="legend-title">媒体</span>' + "".join(
             f'<span class="kind-chip">{shape_glyph(r["shape"])}<i class="bi {r["icon"]} fi m-{r["key"]}"></i>{esc(r["label"])}</span>' for r in media) + "</div>")
-    actors = [r for r in vocab["actors"] if any(n["type"] == "work" and n["cls"] in ("work", "warn") and n["actor"] == r["key"] and n["who_state"] != "unconfirmed" for n in nodes)]
+    actors = [r for r in vocab["actors"] if any((n["type"] == "work" and n["cls"] in ("work", "warn") and n["actor"] == r["key"] and n["who_state"] != "unconfirmed") or person_source_actor(n) == r["key"] for n in nodes)]
     unconfirmed = any(n["type"] == "work" and n["cls"] == "work" and n["who_state"] == "unconfirmed" for n in nodes)
     if actors or unconfirmed:
         chips = "".join(f'<span class="kind-chip"><i class="bi {r["icon"]} fi a-{r["key"]}"></i>{esc(r["label"])}</span>' for r in actors)
@@ -6552,6 +6590,7 @@ def _merged_graph(kind, workplace_id, domain_id):
         "workplace_id": workplace_id,
         "domain_id": domain_id,
         "saved_at": row.updated_at.strftime("%Y/%m/%d %H:%M") if row else None,
+        "edited": bool(merged.get("edited")),
         "task_count": len(tasks),
         "truncated": truncated,
         "auto_node_count": len(auto["nodes"]),
@@ -6575,9 +6614,8 @@ def index():
         flows={"info": flow},
         kind_legends={"info": legend},
         pending_count=len([n for n in merged["nodes"] if n.get("cls") == "pending"]),
-        saved_at={"info": merged["meta"]["saved_at"]},
+        saved_at={"info": merged["meta"]["saved_at"] if merged["meta"]["edited"] else None},
         task_count=len(tasks),
-        flow_info_count=len([t for t in tasks if t.has_flow_info or t.steps]),
         source_rows=source_rows(tasks),
         handoff_rows=handoff_rows(tasks),
         truncated=truncated,
@@ -8432,7 +8470,7 @@ TEMPLATES = {
 <div class="card mb-3"><div class="card-body">
   <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
     <div>
-      <h5 class="mb-1">この領域の情報の流れ{{ C.tip("取り出し元の情報 → 業務 → できるもの → 渡す相手の作業。業務の箱をクリックすると案件詳細を開きます。") }}</h5>
+      <h5 class="mb-1">この領域の業務マップ{{ C.tip("取り出し元の情報 → 業務 → できるもの → 渡す相手の作業。業務の箱をクリックすると案件詳細を開きます。") }}</h5>
       {{ info_legend|safe }}
     </div>
     <div class="btn-group btn-group-sm flow-toolbar" data-target="info" role="group">
@@ -8608,7 +8646,7 @@ TEMPLATES = {
   <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
     <div>
       <h5 class="mb-1">{{ title }}{{ C.tip(desc ~ ("\n業務の箱をクリックすると案件詳細を開きます。" if definition else "")) }}
-        {% if saved_at[key] %}<span class="badge text-bg-warning align-middle" title="編集画面で直した配置・名前・追加・削除を反映しています">手修正あり（{{ saved_at[key] }}）</span>{% endif %}
+        {% if saved_at[key] %}<span class="badge text-bg-warning align-middle" title="編集画面で直した名前・だれ・媒体・色・線・追加・削除を反映しています（配置は編集画面だけで使います）">手修正あり（{{ saved_at[key] }}）</span>{% endif %}
       </h5>
       <div>{{ kind_legends.get(key, '')|safe }}</div>
     </div>
@@ -8651,7 +8689,7 @@ TEMPLATES = {
       </select>
     </div>
     <div class="col-12 col-md-6 small text-muted text-md-end">
-      図に載せた業務 {{ task_count }} 件（関わる人・情報の受け取り元の入力あり {{ flow_info_count }} 件）{% if pending_count %}・月次で挙がった未登録の業務 {{ pending_count }} 件{% endif %}
+      図に載せた業務 {{ task_count }} 件{% if pending_count %}・月次で挙がった未登録の業務 {{ pending_count }} 件{% endif %}
     </div>
   </div>
 </div></form>
@@ -8709,7 +8747,7 @@ TEMPLATES = {
   </div>
 
   <div id="tab-domains" class="mt-4">
-    <h2 class="section-title"><span>領域別の把握状況{{ C.tip("案件がない領域と、実態を把握できていない領域を区別する") }}</span></h2>
+    <h2 class="section-title">領域別の把握状況</h2>
     <div class="card"><div class="card-body">
       <h5 class="card-title">業務領域ごとの把握状況（ヒートマップ）{{ C.tip("案件がない領域と、業務実態を把握できていない領域を区別します。絞り込みに関係なく製造部全体で判定しています。") }} <span class="badge text-bg-light border align-middle">全体</span></h5>
       <div class="table-responsive">
@@ -11037,8 +11075,9 @@ document.addEventListener("DOMContentLoaded", function () {
   function edgeLabel(e) {
     if (e.label) return e.label;
     if (e.type === "work") return (e.handoff === "push" || e.handoff === "pull") && KC.vocab.handoff[e.handoff] ? KC.vocab.handoff[e.handoff].label : "";
-    if (e.show_method && e.method) { var r = vrow("methods", e.method); return r ? r.label : ""; }
-    return "";
+    var r = e.show_method && e.method ? vrow("methods", e.method) : null, m = r ? r.label : "";
+    if (e.note) return m ? e.note + "／" + m : e.note;
+    return m;
   }
   var SHAPE_PATHS = { doc: "M0 0H100V84C82 70 66 70 50 84S18 98 0 84Z" };
   function shapeBg(shape) {
@@ -12174,7 +12213,7 @@ document.addEventListener("DOMContentLoaded", function () {
   max-width: none !important;
   height: auto;
 }
-.flow-inner .node {
+.flow-inner .node.clickable {
   cursor: pointer;
 }
 .legend-chip {
@@ -12187,7 +12226,7 @@ document.addEventListener("DOMContentLoaded", function () {
 }
 .lg-task { background: #e7f1ff; border-color: #0d6efd; }
 .lg-done { background: #d1e7dd; border-color: #198754; }
-.lg-system { background: #f8f9fa; border-color: #6c757d; }
+.lg-system { background: #fff3cd; border-color: #e0a800; }
 .lg-warn { background: #f8d7da; border-color: #dc3545; }
 .lg-pending { background: #f8f9fa; border-color: #adb5bd; border-style: dashed; color: #6c757d; }
 .lg-hold { background: #e7f1ff; border-color: #0d6efd; border-style: dashed; }
@@ -12955,7 +12994,7 @@ summary { transition: color 0.15s ease; }
 .mq-q.mq-sub .mq-no { background: var(--ui-text-2); }
 
 /* ---- 業務マップ: 同じアウトプット（統合候補） ---- */
-.lg-dupout { background: #fff3cd; border-color: #fd7e14; border-style: dashed; border-width: 2px; }
+.lg-dupout { background: #ffe5d0; border-color: #fd7e14; border-style: dashed; border-width: 2px; }
 .fe-cls-dupout { --fe-fill: #ffe5d0; --fe-stroke: #fd7e14; background: #fff3cd; border-color: #fd7e14; border-style: dashed; color: #664d03; transform: skewX(-6deg); }
 .fe-cls-dupout .fe-text { transform: skewX(6deg); }
 

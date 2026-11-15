@@ -63,7 +63,7 @@ def smoke_bizmap_edit():
         into = lambda sid: sorted(fd.nodes[a]["text"] for (a, b), e in fd.edges.items() if b == sid and e["type"] == "info")
         check(into("st1") == ["PMK", "ライン管理"] and into("st2") == ["URA", "統合保全システム"] and not any("、" in n["text"] for n in fd.nodes.values() if n["cls"] == "source"),
               f"手順の取り出し元に「、」で並べた名前は、流れ図で1つずつ別の箱にする: {into('st1')} {into('st2')}")
-        labels = lambda g, sid: {g.nodes[a]["text"]: e["label"] for (a, b), e in g.edges.items() if b == sid and e["type"] == "info"}
+        labels = lambda g, sid: {g.nodes[a]["text"]: app_module.edge_label(e) for (a, b), e in g.edges.items() if b == sid and e["type"] == "info"}
         check(labels(fd, "st1") == {"PMK": "トラブル装置の対応状況", "ライン管理": "生産状況"} and labels(fd, "st2") == {"URA": "", "統合保全システム": ""},
               f"どの取り出し元からどの情報を受け取るかを線に書く（手順の文の「〇〇から△△」から読む）: {labels(fd, 'st1')}")
         paired = app_module.build_steps_flow([{"no": 1, "action": "情報を集める", "system": "PMK、ライン管理", "input": "トラブル装置の対応状況、生産状況", "how_from": "システムで見る"}], "製造1課")
@@ -75,7 +75,7 @@ def smoke_bizmap_edit():
         t_multi = app_module.Task(id=99901, name="朝会資料準備", steps_json=json.dumps(multi, ensure_ascii=False))
         with app.test_request_context():
             gm = app_module.build_info_flow([t_multi])
-        into_t = {gm.nodes[a]["text"]: e["label"] for (a, b), e in gm.edges.items() if b == "t99901" and e["type"] == "info"}
+        into_t = {gm.nodes[a]["text"]: app_module.edge_label(e) for (a, b), e in gm.edges.items() if b == "t99901" and e["type"] == "info"}
         check(into_t.get("PMK") == "トラブル装置の対応状況" and into_t.get("ライン管理") == "生産状況" and into_t.get("URA") == "",
               f"業務マップでも取り出し元を分け、受け取る情報を線に書く: {into_t}")
         dg = app_module.Diagram()
@@ -398,6 +398,25 @@ def smoke_bizmap_edit():
     html = r.data.decode("utf-8")
     check(r.status_code == 200 and "手で直した業務名" in html and "手で足した箱" in html, "index renders merged Mermaid")
     check("手修正あり" in html, "index shows saved badge")
+    with app.app_context():
+        auto_g = {"schema": 2, "nodes": [{"id": "s_a", "text": "生産管理課", "cls": "source", "type": "info", "medium": "unknown", "source": "auto"},
+                                         {"id": "t1", "text": "集計する", "cls": "task", "type": "work", "source": "auto", "actor": "team", "who": "製造1課", "who_state": "ok"}],
+                  "edges": [{"id": "s_a->t1", "from": "s_a", "to": "t1", "type": "info", "method": "mail", "show_method": True, "handoff": "", "inferred": False, "label": "", "note": "生産計画", "source": "auto"}],
+                  "suppressed_nodes": [], "suppressed_edges": []}
+        layout_only = app_module.merge_graph(auto_g, {"schema": 2, "nodes": [{"id": "s_a", "x": 10, "y": 20}], "edges": []})
+        colored = app_module.merge_graph(auto_g, {"schema": 2, "nodes": [{"id": "t1", "x": 0, "y": 0, "color": "green"}],
+                                                  "edges": [{"id": "s_a->t1", "from": "s_a", "to": "t1", "method": "phone", "method_edited": True}]})
+        g_col = app_module.graph_to_diagram(colored)
+        mer = g_col.render()
+        lab = app_module.edge_label(g_col.edges[("s_a", "t1")])
+        person_icon = app_module.node_icon(g_col.nodes["s_a"])
+    check(not layout_only["edited"] and colored["edited"], "「手修正あり」は配置だけの保存では付けず、色・線などを直したときに付ける（流れ図に出ない配置は数えない）")
+    check(f"style t1 fill:{app_module.NODE_COLORS['green']}" in mer and lab.startswith("生産計画／") and "メール" not in lab,
+          f"編集画面の色を流れ図にも出し、線の方法を手で直したら、受け取るもの＋直した方法で書く: {lab}")
+    check(person_icon[1].startswith("a-") and "bi-question" not in person_icon[0], f"受け取り元の所属の箱は、所属のアイコンで描く（不明の書類に見せない）: {person_icon}")
+    css = client.get("/static/style.css").data.decode("utf-8")
+    check(".flow-inner .node.clickable {" in css and ".flow-inner .node {\n  cursor: pointer;" not in css and ".lg-dupout { background: #ffe5d0;" in css,
+          "押せる箱（案件詳細を開く）だけポインタにし、統合候補の凡例の色を図に合わせる")
     r = client.get("/bizmap/edit?kind=info")
     check(r.status_code == 200 and "fe-app" in r.data.decode("utf-8"), "edit page renders")
     for kind in ("people", "goods"):
@@ -494,9 +513,15 @@ def smoke_bizmap_edit():
         rows = app_module.handoff_rows(tasks)
         pairs = {(r_["src"], r_["dst"]): r_ for r_ in rows}
         wp1_name = t_day.workplace.name
-        check(("オペレーターの故障連絡（口頭・メモ）", "設備保全課") in pairs and ("受注一覧（Excel）", "生産管理課") in pairs and ("生産管理システム", "生産管理課") in pairs
+        check(("受注一覧（Excel）", "生産管理課") not in pairs and ("生産管理システム", "生産管理課") not in pairs and ("オペレーターの故障連絡（口頭・メモ）", "設備保全課") not in pairs
               and (wp1_name, "総務") in pairs and (wp1_name, "課長") not in pairs and pairs[(wp1_name, f"{wp1_name} 課長")]["info"] >= 1,
-              "図の下の表も業務マップと同じ決まり（受け取り元は1つずつ、「他部署」は目的の部署名、「課長」は「製造1課 課長」にまとめる）")
+              "図の下の受け渡しの表は人・所属どうし（システム・書類・情報は「から」に置かない）。「他部署」は目的の部署名、「課長」は「製造1課 課長」にまとめる")
+        probe = Task(name="受け取りの確認", workplace=t_day.workplace, steps_json=json.dumps([{"no": 1, "action": "生産計画を受け取る", "receive": [{"from": "生産管理課", "what": "生産計画", "how": "メール"}, {"from": "生産管理システム", "what": "実績", "how": ""}]}], ensure_ascii=False))
+        probe_rows = {(r_["src"], r_["dst"]) for r_ in app_module.handoff_rows([probe])}
+        probe_src = {r_["name"] for r_ in app_module.source_rows([probe])}
+        check(("生産管理課", wp1_name) in probe_rows and not any(src == "生産管理システム" for src, _dst in probe_rows) and "生産管理課" not in probe_src,
+              f"受け渡しの表は手順の受け取り元（receive）の人・所属も数え、システム・情報源の表には人・所属を入れない: {probe_rows} {probe_src}")
+        db.session.expunge(probe) if probe in db.session else None
 
         db.session.add(MonthlyResponse(period=current_period(), emp_id="P201", name="", workplace_id=wp1,
                                        answers_json=json.dumps({"has": "ある", "task_names": "月報の作成\n週報の作成、日報の集計・確認\n佐藤さんの日報まとめ\n週報の作成"}, ensure_ascii=False)))
@@ -551,7 +576,7 @@ def smoke_bizmap_edit():
         db.session.commit()
         steps_wp = steps_only.id
     html = client.get(f"/bizmap/?workplace_id={steps_wp}").data.decode("utf-8")
-    check("図に載せた業務 1 件（関わる人・情報の受け取り元の入力あり 1 件）" in html, "見出しの件数: 聞き取りの手順がある業務は入力ありに数える")
+    check("図に載せた業務 1 件" in html and "情報の受け取り元の入力あり" not in html, "見出しの件数: いつも合計と同じになる「入力あり」の括弧は出さない")
     html = client.get(f"/bizmap/?workplace_id={wp1}").data.decode("utf-8")
     check(html.count('border align-middle">全体</span>') >= 4, "絞り込みに関係なく全体で数える表には「全体」と書く")
     html = client.get("/bizmap/edit?kind=info").data.decode("utf-8")
