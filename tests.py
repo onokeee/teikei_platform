@@ -138,6 +138,8 @@ def smoke_bizmap_edit():
           "管理に技術の選択肢の欄（使っている人数・上へ・下へ・削除）がある")
     html = client.get("/bizmap/").data.decode("utf-8")
     check("map-legend" in html and "箱と線" in html, "業務マップ: 箱と線・色・媒体・だれの凡例")
+    js_app = client.get("/static/app.js").data.decode("utf-8")
+    check('selector: "[data-tip]"' in js_app and "show: 1000" in js_app and 'customClass: "tip-balloon"' in js_app, "ⓘ（data-tip）にマウスを1秒ほど置くと説明の吹き出しが出る")
     js = client.get("/static/flows.js").data.decode("utf-8")
     check("最大表示" in js and "requestFullscreen" in js and "flow-max" in js and "bootstrap-icons" in js, "閲覧: 図の最大表示（Esc で戻る）とアイコンの読み込み待ち")
     html = client.get("/bizmap/edit?kind=info").data.decode("utf-8")
@@ -775,7 +777,7 @@ def smoke_board():
     code, html = page(f"/cases/{irregular_id}")
     check("不定期（月1回として計算）" in html, "案件詳細: 不定期は「月1回として計算」と出す")
     code, html = page(f"/cases/{sample_id}")
-    check(sample_note == "デモ" and '<span class="badge bg-warning-subtle text-warning-emphasis">デモ</span> デモ用の見本の案です' in html and "改善後の流れ（AI案）" in html and ">ルールベース</span>" in html,
+    check(sample_note == "デモ" and '<span class="badge bg-warning-subtle text-warning-emphasis">デモ</span><span class="tip"' in html and 'data-tip="デモ用の見本の案です' in html and "改善後の流れ（AI案）" in html and ">ルールベース</span>" in html,
           "デモ: ルールで分析した業務に付けた見本の改善案（AI案）には「デモ」の印を付ける")
 
     code, html = page("/board/")
@@ -1834,6 +1836,10 @@ def smoke_login_monthly():
     check(code == 200 and "DX人財情報" not in html and "人材育成" not in html and "田中 一郎" in html and "E777" in html, "人財一覧（DX人財情報をまとめた）: 自動化を検討の回答者と、月次だけ答えた人が並ぶ")
     check("kpi-card" not in html and "直近の月次で「自分で・一緒に取り組みたい」" not in html and all(f">{h}</button>" in html for h in ("Gr・役割", "勤務形態", "意欲（自動化アイテム登録）", "月次：改善の進め方", "使える技術", "学びたい技術")),
           "人財一覧: 上の人数のカードは置かず、Gr・役割・勤務形態・意欲・進め方・技術の列を並べる")
+    legend_tip = html.split('data-tip="月の欄の印', 1)[1][:400] if 'data-tip="月の欄の印' in html else ""
+    check(html.count('class="tip"') >= 4 and 'data-tip="月次アンケートか「自動化アイテム登録」に一度でも回答した人が' in html and "列名を押すと並べ替え" in legend_tip
+          and 'data-tip="この行の「回答 ／ 対象」は' in html and "下の行の「回答 ／ 対象」" not in html and '<span class="text-muted">列名を押すと' not in html,
+          "人財一覧の説明・月の印の凡例・並べ替えの案内・回答／対象の数え方は ⓘ の吹き出しにまとめ、画面には出さない")
     check('id="member-table"' in html and 'data-filter="wp"' in html and 'id="member-month"' in html and 'id="member-month-st"' in html and 'data-filter="m0"' not in html
           and "function applySort()" in html and "function applyFilter()" in html and 'aria-sort="none"' in html and "monthOk(tr)" in html,
           "人財一覧: 列名を押して並べ替え、見出しの下の欄で列ごとに絞り込める（月の回答は表の上の1か所で絞り込む）")
@@ -1969,7 +1975,7 @@ def _people_checks(check):
     check(set(by_id) == set(people) and "P004" in by_id and "自分で取り組みたい" in by_id["P004"] and period_label(prev) in by_id["P004"] and by_id["P003"][5] == "チェックなし",
           f"P19: 回答者CSVは DX人財情報と同じ人・同じ値（月次だけの人も入る）: {sorted(by_id)}")
     html = client.get("/").data.decode("utf-8")
-    check("自ら改善に取り組みたい人（回答した人 5 人中）" in html and "<th class=\"text-end\">回答した人</th>" in html and "（うち対象者 1 人）" in html,
+    check('自主改善者<span class="tip"' in html and 'data-tip="自ら改善に取り組みたい人"' in html and "回答した人 5 人中" in html and "<th class=\"text-end\">回答した人</th>" in html and "（うち対象者 1 人）" in html,
           "P9・P17・P7: ダッシュボードの自主改善者の分母・職場別の「回答した人」・月次カードの回答数（うち対象者）")
     rid = None
     with app.app_context():
@@ -2044,7 +2050,7 @@ def _people_round2_checks(check):
           f"R2-4: 職場別の回答した人・自主改善は1人1回、いまの職場で数える（業務は登録した職場）: {got}")
     check(quiet is not None and all(names[w] not in quiet["title"] for w in (w1, w2, w3)), f"R2-4: 「まだ回答のない職場」には前に回答があった職場を出さない: {quiet and quiet['title']}")
     html = client.get("/admin/employees").data.decode("utf-8")
-    check(later in html and 'text-bg-secondary">スキルを身につけながら、一緒にやってみたい' in html, "R2-5・R2-6: 人財一覧の意欲に灰色のバッジと「その後の月次で依頼したい」")
+    check(later in html and 'text-bg-secondary">スキルを身につけながら、一緒にやってみたい' in html and "直近6か月" in html, "R2-5・R2-6: 人財一覧の意欲に灰色のバッジと「その後の月次で依頼したい」、判断の説明（意欲の列の ⓘ）")
     html = client.get("/").data.decode("utf-8")
     check("いまのGr・役割" in html and "1人1回" in html, "R2-4: ダッシュボードのGr・役割別の注記")
     rows = list(csv.reader(io.StringIO(client.get("/export/respondents.csv").data.decode("utf-8-sig"))))
@@ -2369,7 +2375,7 @@ def smoke_request():
         return text in html or json.dumps(text)[1:-1] in html
 
     check(code == 200 and "聞き取りを始める" in html and "一気に書く" in html and "写真を貼る" in html and "最初から見る" in html and 'id="rq-dup-note"' in html and 'id="rq-dup"' in html and in_html("まずは相談したい") and in_html("スキルを身につけながら、一緒にやってみたい") and "mermaid" in html and in_html("日報の集計"), "依頼ページ: 聞き取り・一気に書く・写真・再生・3つの希望・一緒にやってみたい・業務名の引き継ぎ")
-    check("登録する業務" in html and '<div class="rq-label"><span>業務名</span></div>' in html and "どの業務を登録しますか" not in html and "改善への関わり方" not in html and "部全体について" not in html,
+    check("登録する業務" in html and '<div class="rq-label"><span>業務名</span><span class="tip"' in html and 'data-tip="業務名が決まっていなくても始められます。' in html and "どの業務を登録しますか" not in html and "改善への関わり方" not in html and "部全体について" not in html,
           "第3節・第4節は無くなっている（第2節は「登録する業務」、入力欄の見出しは「業務名」）")
     check(html.index('id="rq-pick"') < html.index('id="rq-actions"') < html.index('id="rq-start"') < html.index('id="rq-finish"')
           and 'class="btn btn-outline-primary btn-lg d-none" id="rq-finish"' in html and html.count('id="rq-start"') == 1,
@@ -3318,7 +3324,7 @@ def smoke_ai():
             t_fb = db.session.get(Task, task_id)
             note, src = t_fb.ai_plan_note, t_fb.ai_source
         check(plan_at.startswith("20") and src == "rules" and note == f"前回の AI 分析（{plan_at}）" and "AI から使える応答がなかったため、ルールベースで分析しました（HTTP 401" in html
-              and ">ルールベース</span>" in html and f'<span class="badge text-bg-light border">{note}</span> 前回の AI 分析で出た案です' in html and "新しい流れ1" in html
+              and ">ルールベース</span>" in html and f'<span class="badge text-bg-light border">{note}</span><span class="tip"' in html and 'data-tip="前回の AI 分析で出た案です' in html and "新しい流れ1" in html
               and '<span class="badge badge-flag">推定</span>' in html and '<span class="badge badge-flag">AI</span>' not in html,
               f"再分析がルールに落ちたら、そのことを知らせ、前回の AI の改善案は日付つきで分けて出す（いまの分析のように見せない。関連業務もルールの推定と出す）: {note}")
         csv_text = client.get("/export/tasks.csv").data.decode("utf-8-sig")

@@ -20,6 +20,7 @@ from datetime import datetime, timedelta
 from flask import Blueprint, Flask, Response, abort, flash, g, has_request_context, jsonify, redirect, render_template, request, session, url_for
 from flask_sqlalchemy import SQLAlchemy
 from jinja2 import DictLoader
+from markupsafe import Markup
 
 import config as _config
 import ldap_auth
@@ -3710,6 +3711,10 @@ def kind_icon_html(text, hint=None):
     medium = medium_of(text, hint)
     row = vocab_row("media", medium)
     return f'<i class="bi {row["icon"]} fi m-{medium}"></i>' if row else ""
+
+def tip(text):
+    body = re.sub(r"[ \t]*\n[ \t]*", "\n", str(text or "").strip())
+    return Markup('<span class="tip" tabindex="0" role="button" aria-label="説明" data-tip="{}"><i class="bi bi-info-circle" aria-hidden="true"></i></span>').format(body)
 
 # ===== AI連携（社内 Azure OpenAI の ChatGPT API を Responses API で呼ぶ。なければルールベース） =====
 AI_SETTING_LABELS = (("openai_api_url", "URL"), ("openai_api_key", "API キー"), ("openai_model", "モデル名"))
@@ -7651,20 +7656,17 @@ TEMPLATES = {
 {% macro member_mark(st, ans) %}{% if st == 'yes' %}<i class="bi bi-check-lg member-yes" title="回答あり"></i>{% elif st == 'out' %}<span class="member-out" title="月末時点で対象外{{ '（回答はありますが数えません）' if ans else '' }}">対象外</span>{% elif st == 'before' %}<span class="member-before" title="対象者になる前の月">－</span>{% endif %}{% endmacro %}
 <div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">
   <div>
-    <h2 class="mb-1">人財一覧</h2>
-    <p class="text-muted mb-0">月次アンケートか「自動化アイテム登録」に一度でも回答した人が、ユーザーIDごとに1行で自動で載ります。月ごとの回答と、一人ひとりの意欲（「自動化アイテム登録」の「スキルを身につけながら、一緒にやってみたい」・使える技術・学びたい技術、月次アンケートの改善の進め方）をまとめて見られます。退職や他部門への異動で回答率の分母から外す人は「対象外」にチェックします。</p>
+    <h2 class="mb-1">人財一覧{{ C.tip("月次アンケートか「自動化アイテム登録」に一度でも回答した人が、ユーザーIDごとに1行で自動で載ります。月ごとの回答と、一人ひとりの意欲（「自動化アイテム登録」の「スキルを身につけながら、一緒にやってみたい」・使える技術・学びたい技術、月次アンケートの改善の進め方）をまとめて見られます。退職や他部門への異動で回答率の分母から外す人は「対象外」にチェックします。") }}</h2>
   </div>
 </div>
 
 <div class="card mb-3"><div class="card-body">
   <div class="d-flex flex-wrap justify-content-between align-items-baseline gap-2 mb-2">
-    <h5 class="card-title mb-0">対象者 <span id="member-active">{{ active_count }}</span> 人 <span class="small text-muted fw-normal">（対象外 <span id="member-excluded">{{ rows|length - active_count }}</span> 人）</span></h5>
-    <span class="small text-muted"><i class="bi bi-check-lg member-yes"></i> その月に回答　<span class="member-out">対象外</span> 月末時点で対象外　<span class="member-before">－</span> 対象者になる前の月（初めて回答した月より前）。「対象外」と「－」の月は分母に入りません</span>
+    <h5 class="card-title mb-0">対象者 <span id="member-active">{{ active_count }}</span> 人 <span class="small text-muted fw-normal">（対象外 <span id="member-excluded">{{ rows|length - active_count }}</span> 人）</span>{{ C.tip("月の欄の印: ✓ その月に回答、「対象外」月末時点で対象外、「－」対象者になる前の月（初めて回答した月より前）。「対象外」と「－」の月は分母に入りません。\n列名を押すと並べ替え（もう一度押すと逆順）、見出しの下の欄で列ごとに絞り込めます。") }}</h5>
   </div>
   {% if rows %}
   {% set old_n = [periods|length - 12, 0]|max %}
   <div class="d-flex flex-wrap align-items-center gap-3 mb-2 small">
-    <span class="text-muted">列名を押すと並べ替え（もう一度押すと逆順）、見出しの下の欄で列ごとに絞り込めます。</span>
     <span class="d-inline-flex align-items-center gap-1 member-monthfilter">
       <label for="member-month" class="text-muted text-nowrap mb-0">月の回答で絞り込む</label>
       <select id="member-month" class="form-select form-select-sm"><option value="">月</option>{% for p in periods %}<option value="{{ loop.index0 }}">{{ p[:4] }}年{{ p[5:]|int }}月</option>{% endfor %}</select>
@@ -7683,7 +7685,7 @@ TEMPLATES = {
       <th data-col="name" aria-sort="none"><button type="button" class="member-sort">氏名</button></th>
       <th data-col="wp" aria-sort="none"><button type="button" class="member-sort">Gr・役割</button></th>
       <th data-col="pat" aria-sort="none"><button type="button" class="member-sort">勤務形態</button></th>
-      <th data-col="wish" aria-sort="none"><button type="button" class="member-sort">意欲（自動化アイテム登録）</button></th>
+      <th data-col="wish" aria-sort="none"><button type="button" class="member-sort">意欲（自動化アイテム登録）</button>{{ C.tip("「自動化アイテム登録」の「スキルを身につけながら、一緒にやってみたい」のチェック。絞り込みの「自分で改善したい人」は、このチェックと直近" ~ C.STANCE_MONTHS ~ "か月の月次の進め方（「自分で取り組みたい」「学びながら改善チームと一緒に取り組みたい」）のうち、新しいほうで判断します（チェックなしは意思表示なしとして扱う）。伴走している「自主改善」の案件がある人も含みます。") }}</th>
       <th data-col="stance" aria-sort="none"><button type="button" class="member-sort">月次：改善の進め方</button></th>
       <th data-col="skills" aria-sort="none"><button type="button" class="member-sort">使える技術</button></th>
       <th data-col="learn" aria-sort="none"><button type="button" class="member-sort">学びたい技術</button></th>
@@ -7742,12 +7744,11 @@ TEMPLATES = {
     {% endfor %}
     </tbody>
     <tfoot><tr>
-      <th colspan="10" class="text-end">回答 ／ 対象（回答率）<span class="d-block fw-normal text-muted" id="member-stat-note"></span></th>
+      <th colspan="10" class="text-end">回答 ／ 対象（回答率）{{ C.tip("この行の「回答 ／ 対象」は、その月に回答した対象者の数と対象者の数で、月次集計・ダッシュボードの回答率と同じ数え方です（絞り込んだときは、表示している人だけで数えます）。月末時点で「対象外」にチェックしている人は、その月の分母にも分子にも入りません（今月は今のチェックで数えます）。チェックを外すと外した月から分母に戻り、それより前の月は月末時点の状態のまま残ります。対象外の人は回答できません。削除できるのは、まだ回答も自動化アイテムの登録もない人だけです。") }}<span class="d-block fw-normal text-muted" id="member-stat-note"></span></th>
       {% for p in periods %}{% set st = stats[p] %}<td class="text-center member-stat{% if loop.index0 < old_n %} member-old{% endif %}" data-period="{{ p }}" data-m="{{ loop.index0 }}">{{ st.answered }}／{{ st.members }}{% if st.rate is not none %}<br>{{ '%.0f'|format(st.rate) }}%{% endif %}</td>{% endfor %}
     </tr></tfoot>
   </table>
   </div>
-  <p class="small text-muted mt-2 mb-0">下の行の「回答 ／ 対象」は、その月に回答した対象者の数と対象者の数で、月次集計・ダッシュボードの回答率と同じ数え方です（絞り込んだときは、表示している人だけで数えます）。月末時点で「対象外」にチェックしている人は、その月の分母にも分子にも入りません（今月は今のチェックで数えます）。チェックを外すと外した月から分母に戻り、それより前の月は月末時点の状態のまま残ります。対象外の人は回答できません。削除できるのは、まだ回答も自動化アイテムの登録もない人だけです。</p>
   {% else %}
   <p class="text-muted mb-0">まだ回答した人がいません。月次アンケートか「自動化アイテム登録」に回答すると、ここに載ります。</p>
   {% endif %}
@@ -7952,41 +7953,32 @@ TEMPLATES = {
   <li class="breadcrumb-item"><a href="{{ url_for('admin.index') }}">管理</a></li>
   <li class="breadcrumb-item active">業務マップの区分</li>
 </ol></nav>
-<h2 class="mb-1">業務マップの区分</h2>
-<p class="text-muted">業務マップは「作業」「情報」の箱と、「仕事の流れ」「情報の流れ」の線だけで描きます。ここでは、作業のだれ・情報の媒体・情報の流れの方法・仕事の流れの引き継ぎ方の区分と、名前から見分けるための語を決めます。業務マップ・案件の流れ図・聞き取り中の図・編集画面の判定がそろって変わります（編集画面で手で選んだものは残ります）。</p>
-<div class="alert alert-light border small">
-  判定に使う語は「、」で区切ります。英字の語は単語として見分け、全角の英数字は半角とみなします。「～課」のように「～」で始めると語尾だけで見分けます（後ろが文末・かっこ・ひらがなのとき）。「除く語」の部分は判定に使いません（例: Word の除く語に「パスワード」）。上から順に見て、最初に当てはまった区分になります（▲▼で順番を変えられます）。<span class="badge text-bg-light border">組み込み</span> の行は判定と書き戻しに使うため消せませんが、名前や語は変えられます。
-</div>
+<h2 class="mb-3">業務マップの区分{{ C.tip("業務マップは「作業」「情報」の箱と、「仕事の流れ」「情報の流れ」の線だけで描きます。ここでは、作業のだれ・情報の媒体・情報の流れの方法・仕事の流れの引き継ぎ方の区分と、名前から見分けるための語を決めます。業務マップ・案件の流れ図・聞き取り中の図・編集画面の判定がそろって変わります（編集画面で手で選んだものは残ります）。\n判定に使う語は「、」で区切ります。英字の語は単語として見分け、全角の英数字は半角とみなします。「～課」のように「～」で始めると語尾だけで見分けます（後ろが文末・かっこ・ひらがなのとき）。「除く語」の部分は判定に使いません（例: Word の除く語に「パスワード」）。上から順に見て、最初に当てはまった区分になります（▲▼で順番を変えられます）。「組み込み」の行は判定と書き戻しに使うため消せませんが、名前や語は変えられます。") }}</h2>
 <div id="mv-app">
   <div class="card mb-3 mv-card"><div class="card-body">
-    <h5 class="card-title">作業のだれ（担い手）</h5>
-    <p class="small text-muted mb-2">作業の箱に付く「だれがやるか」。渡す相手・前後の作業の担い手を名前から見分けます。氏名は出さず、Gr・役割・役職・部署で表します。先にGr・役割マスタの名前で判定し、当たらなければここの語で判定します。「利用者の区分」は、業務データへ反映するときの利用者（職場内・上司・他部署・顧客・社外）です。</p>
+    <h5 class="card-title">作業のだれ（担い手）{{ C.tip("作業の箱に付く「だれがやるか」。渡す相手・前後の作業の担い手を名前から見分けます。氏名は出さず、Gr・役割・役職・部署で表します。先にGr・役割マスタの名前で判定し、当たらなければここの語で判定します。「利用者の区分」は、業務データへ反映するときの利用者（職場内・上司・他部署・顧客・社外）です。") }}</h5>
     <div class="table-responsive"><table class="table table-sm align-middle mv-table" data-group="actors"><thead><tr><th></th><th>名前</th><th>判定に使う語</th><th>除く語</th><th>アイコン</th><th>利用者の区分</th><th></th></tr></thead><tbody></tbody></table></div>
     <button type="button" class="btn btn-sm btn-outline-primary mv-add" data-group="actors"><i class="bi bi-plus-lg"></i> 区分を追加</button>
   </div></div>
   <div class="card mb-3 mv-card"><div class="card-body">
-    <h5 class="card-title">情報の媒体</h5>
-    <p class="small text-muted mb-2">情報の箱の形とアイコンになる「どんな形の情報か」。どれにも当たらないものは「不明」になります。</p>
+    <h5 class="card-title">情報の媒体{{ C.tip("情報の箱の形とアイコンになる「どんな形の情報か」。どれにも当たらないものは「不明」になります。") }}</h5>
     <div class="table-responsive"><table class="table table-sm align-middle mv-table" data-group="media"><thead><tr><th></th><th>名前</th><th>判定に使う語</th><th>除く語</th><th>アイコン</th><th>形</th><th></th></tr></thead><tbody></tbody></table></div>
     <button type="button" class="btn btn-sm btn-outline-primary mv-add" data-group="media"><i class="bi bi-plus-lg"></i> 媒体を追加</button>
   </div></div>
   <div class="card mb-3 mv-card"><div class="card-body">
-    <h5 class="card-title">情報の流れの方法</h5>
-    <p class="small text-muted mb-2">情報の線のラベルになる「どうやって渡すか」。「渡し方」は線だけ、「置き場」（システム・共有フォルダ）は情報の箱を置いたうえで線の方法にもなります。既定の向きは仕事の流れの引き継ぎ方を決めるのに、箱がないときの媒体は口頭のやりとりなどで置く情報の箱に使います。</p>
+    <h5 class="card-title">情報の流れの方法{{ C.tip("情報の線のラベルになる「どうやって渡すか」。「渡し方」は線だけ、「置き場」（システム・共有フォルダ）は情報の箱を置いたうえで線の方法にもなります。既定の向きは仕事の流れの引き継ぎ方を決めるのに、箱がないときの媒体は口頭のやりとりなどで置く情報の箱に使います。") }}</h5>
     <div class="table-responsive"><table class="table table-sm align-middle mv-table" data-group="methods"><thead><tr><th></th><th>名前</th><th>判定に使う語</th><th>除く語</th><th>種類</th><th>既定の向き</th><th>箱がないときの媒体</th><th></th></tr></thead><tbody></tbody></table></div>
     <button type="button" class="btn btn-sm btn-outline-primary mv-add" data-group="methods"><i class="bi bi-plus-lg"></i> 方法を追加</button>
   </div></div>
   <div class="card mb-3 mv-card"><div class="card-body">
-    <h5 class="card-title">仕事の流れの引き継ぎ方</h5>
-    <p class="small text-muted mb-2">作業から次の作業へ仕事が移るときの2つのパターン。手順の文や渡し方にここの語（動詞）があれば、その引き継ぎ方になります。同じ人が続けて行う作業の間は「引き継ぎなし」です。</p>
+    <h5 class="card-title">仕事の流れの引き継ぎ方{{ C.tip("作業から次の作業へ仕事が移るときの2つのパターン。手順の文や渡し方にここの語（動詞）があれば、その引き継ぎ方になります。同じ人が続けて行う作業の間は「引き継ぎなし」です。") }}</h5>
     <div class="row g-2">
       <div class="col-md-6"><label class="form-label small mb-0">前の作業から伝えに行く</label><input type="text" class="form-control form-control-sm mb-1" id="mv-push-label" maxlength="20"><input type="text" class="form-control form-control-sm" id="mv-push-words" placeholder="判定に使う語（例: 渡す、送る）"></div>
       <div class="col-md-6"><label class="form-label small mb-0">後ろの作業が取りに行く</label><input type="text" class="form-control form-control-sm mb-1" id="mv-pull-label" maxlength="20"><input type="text" class="form-control form-control-sm" id="mv-pull-words" placeholder="判定に使う語（例: 集める、取りに）"></div>
     </div>
   </div></div>
   <div class="card mb-3 mv-card"><div class="card-body">
-    <h5 class="card-title">判定のお試し</h5>
-    <p class="small text-muted mb-2">名前や文を入れると、いま画面にある設定（保存前でも）でどう見分けるかを出します。</p>
+    <h5 class="card-title">判定のお試し{{ C.tip("名前や文を入れると、いま画面にある設定（保存前でも）でどう見分けるかを出します。") }}</h5>
     <div class="d-flex gap-2 flex-wrap"><input type="text" class="form-control form-control-sm" style="max-width: 28rem" id="mv-try" placeholder="例: 残業予定表（Excel）をメール送付、品質保証課 課長"><button type="button" class="btn btn-sm btn-outline-secondary text-nowrap" id="mv-try-btn">見分ける</button></div>
     <dl class="row small mt-2 mb-0 mv-try-out" id="mv-try-out"></dl>
   </div></div>
@@ -8150,21 +8142,19 @@ TEMPLATES = {
     </div></div>
 
     <div class="card mb-3"><div class="card-body">
-      <h5 class="card-title">業務マップの区分</h5>
-      <p class="small mb-2">業務マップの「作業」「情報」「仕事の流れ」「情報の流れ」に付く区分（だれ・媒体・方法・引き継ぎ方）と、名前から見分けるための語を決めます。</p>
+      <h5 class="card-title">業務マップの区分{{ C.tip("業務マップの「作業」「情報」「仕事の流れ」「情報の流れ」に付く区分（だれ・媒体・方法・引き継ぎ方）と、名前から見分けるための語を決めます。") }}</h5>
       <a class="btn btn-sm btn-outline-primary" href="{{ url_for('admin.map_vocab_page') }}"><i class="bi bi-diagram-3"></i> 業務マップの区分を設定</a>
     </div></div>
 
     <div class="card mb-3"><div class="card-body">
-      <h5 class="card-title">月次アンケート</h5>
-      <p class="small mb-2">毎月の設問を編集します。</p>
+      <h5 class="card-title">月次アンケート{{ C.tip("毎月の設問を編集します。") }}</h5>
       <div class="d-flex flex-wrap gap-2">
         <a class="btn btn-sm btn-outline-primary" href="{{ url_for('monthly.survey_admin') }}">月次の設問を編集</a>
       </div>
     </div></div>
 
     <form method="post" action="{{ url_for('admin.save_ai_settings') }}" class="card mb-3" autocomplete="off"><div class="card-body">
-      <h5 class="card-title">AI連携（ChatGPT API）</h5>
+      <h5 class="card-title">AI連携（ChatGPT API）{{ C.tip("空欄のままなら AI は使わず、ルールベースで同じ形式の分析をします（既定の URL やモデル名はありません）。保存すればすぐ反映され、再起動は不要です。temperature / top_p は送りません。") }}</h5>
       <p class="mb-2">{{ ai_status }}</p>
       <div class="mb-2"><label class="form-label small mb-0">API の URL（Responses API）</label><input type="text" name="openai_api_url" class="form-control form-control-sm" value="{{ settings.openai_api_url }}" placeholder="社内の中継サービスの Responses API の URL"></div>
       <div class="mb-2"><label class="form-label small mb-0">API キー</label><input type="text" name="openai_api_key" class="form-control form-control-sm" value="{{ settings.openai_api_key }}"></div>
@@ -8173,11 +8163,10 @@ TEMPLATES = {
         <button class="btn btn-primary btn-sm">保存</button>
         <button class="btn btn-outline-secondary btn-sm" formaction="{{ url_for('admin.test_ai_settings') }}">保存して接続テスト</button>
       </div>
-      <p class="small text-muted mt-2 mb-0">空欄のままなら AI は使わず、ルールベースで同じ形式の分析をします（既定の URL やモデル名はありません）。保存すればすぐ反映され、再起動は不要です。temperature / top_p は送りません。</p>
     </div></form>
 
     <div class="card mb-3"><div class="card-body">
-      <h5 class="card-title">データ</h5>
+      <h5 class="card-title">データ{{ C.tip("データは instance/portal.sqlite3 に保存されます。バックアップはこのファイルをコピーしてください。") }}</h5>
       <p class="small mb-2">回答した人 {{ answered_count }} 人／業務 {{ task_count }} 件（うちデモ {{ demo_count }} 件）</p>
       <div class="d-flex flex-wrap gap-2">
         <form method="post" action="{{ url_for('admin.load_demo') }}" data-confirm="デモデータを投入します（既存のデモデータは入れ替えます）。よろしいですか？">
@@ -8187,14 +8176,12 @@ TEMPLATES = {
           <button class="btn btn-sm btn-outline-danger" {% if not demo_active %}disabled{% endif %}>デモデータを削除</button>
         </form>
       </div>
-      <p class="small text-muted mt-2 mb-0">データは <code>instance/portal.sqlite3</code> に保存されます。バックアップはこのファイルをコピーしてください。</p>
     </div></div>
   </div>
 
   <div class="col-lg-6">
     <div class="card mb-3"><div class="card-body">
-      <h5 class="card-title">Gr・役割マスタ</h5>
-      <p class="small text-muted">Gr・役割名は直して保存できます（業務・回答の紐づきはそのまま）。業務・月次の回答・対象者・「自動化アイテム登録」の回答者が使っているGr・役割は削除できません。</p>
+      <h5 class="card-title">Gr・役割マスタ{{ C.tip("Gr・役割名は直して保存できます（業務・回答の紐づきはそのまま）。業務・月次の回答・対象者・「自動化アイテム登録」の回答者が使っているGr・役割は削除できません。") }}</h5>
       {% for w in workplaces %}
       {% set used = workplace_usage.get(w.id) %}
       <form method="post" action="{{ url_for('admin.update_workplace', workplace_id=w.id) }}" class="row g-1 align-items-center mb-2">
@@ -8213,8 +8200,7 @@ TEMPLATES = {
     </div></div>
 
     <div class="card"><div class="card-body">
-      <h5 class="card-title">業務領域マスタ（業務体系の大分類）</h5>
-      <p class="small text-muted">業務体系（大分類・中分類）の確定版に合わせて名称・説明を更新してください。業務が紐づいている領域は削除できません。</p>
+      <h5 class="card-title">業務領域マスタ（業務体系の大分類）{{ C.tip("業務体系（大分類・中分類）の確定版に合わせて名称・説明を更新してください。業務が紐づいている領域は削除できません。") }}</h5>
       {% for d in domains %}
       <form method="post" action="{{ url_for('admin.update_domain', domain_id=d.id) }}" class="row g-1 align-items-center mb-1">
         <div class="col-1"><input type="number" name="sort" class="form-control form-control-sm" value="{{ d.sort }}" title="並び順"></div>
@@ -8234,8 +8220,7 @@ TEMPLATES = {
     </div></div>
 
     <form method="post" action="{{ url_for('admin.save_skills') }}" class="card mt-3" id="skills"><div class="card-body">
-      <h5 class="card-title">技術の選択肢（自動化アイテム登録）</h5>
-      <p class="small text-muted">「スキルを身につけながら、一緒にやってみたい」にチェックした人が選ぶ「使える技術」「学びたい技術」の選択肢です。上から順に出ます。名前を変えると、すでに選んでいた人の記録も新しい名前になります。消しても、すでに選んでいた人の記録は人財一覧に残ります（次に選び直すときは選べません）。「{{ C.SKILL_NONE }}」はいつも最後に出ます（消せません）。</p>
+      <h5 class="card-title">技術の選択肢（自動化アイテム登録）{{ C.tip("「スキルを身につけながら、一緒にやってみたい」にチェックした人が選ぶ「使える技術」「学びたい技術」の選択肢です。上から順に出ます。名前を変えると、すでに選んでいた人の記録も新しい名前になります。消しても、すでに選んでいた人の記録は人財一覧に残ります（次に選び直すときは選べません）。「" ~ C.SKILL_NONE ~ "」はいつも最後に出ます（消せません）。\n並べ替え・削除は「保存」を押すと反映されます。") }}</h5>
       <div id="skill-rows">
       {% for s in skill_rows %}
         <div class="row g-1 align-items-center mb-1 skill-row">
@@ -8249,10 +8234,9 @@ TEMPLATES = {
         </div>
       {% endfor %}
       </div>
-      <div class="row g-1 align-items-center mt-2 mb-1">
+      <div class="row g-1 align-items-center mt-2 mb-2">
         <div class="col"><input type="text" name="name" class="form-control form-control-sm" placeholder="追加する技術（例: Copilot）" maxlength="30" aria-label="追加する技術"><input type="hidden" name="orig" value=""></div>
       </div>
-      <div class="small text-muted mb-2">最後に「{{ C.SKILL_NONE }}」が付きます。並べ替え・削除は「保存」を押すと反映されます。</div>
       <button class="btn btn-primary btn-sm">保存</button>
     </div></form>
   </div>
@@ -8421,8 +8405,7 @@ TEMPLATES = {
 <div class="card mb-3"><div class="card-body">
   <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
     <div>
-      <h5 class="mb-1">この領域の情報の流れ</h5>
-      <p class="small text-muted mb-0">取り出し元の情報 → 業務 → できるもの → 渡す相手の作業。業務の箱をクリックすると案件詳細を開きます。</p>
+      <h5 class="mb-1">この領域の情報の流れ{{ C.tip("取り出し元の情報 → 業務 → できるもの → 渡す相手の作業。業務の箱をクリックすると案件詳細を開きます。") }}</h5>
       {{ info_legend|safe }}
     </div>
     <div class="btn-group btn-group-sm flow-toolbar" data-target="info" role="group">
@@ -8463,8 +8446,7 @@ TEMPLATES = {
 <div class="row g-3">
   <div class="col-lg-6">
     <div class="card h-100"><div class="card-body">
-      <h5 class="card-title">ヒアリングが必要な業務</h5>
-      <p class="small text-muted">必須項目が未入力、または担当者確認が済んでいない業務です。</p>
+      <h5 class="card-title">ヒアリングが必要な業務{{ C.tip("必須項目が未入力、または担当者確認が済んでいない業務です。") }}</h5>
       <ul class="mb-0 small">
         {% for t in missing %}<li><a href="{{ url_for('cases.detail', task_id=t.id) }}">{{ t.name }}</a> — 必須項目に未入力</li>{% endfor %}
         {% for t in unverified %}{% if t not in missing %}<li><a href="{{ url_for('cases.detail', task_id=t.id) }}">{{ t.name }}</a> — 担当者未確認</li>{% endif %}{% endfor %}
@@ -8499,7 +8481,7 @@ TEMPLATES = {
      data-api="{{ url_for('bizmap.api_graph_get') }}" data-back="{{ url_for('bizmap.index', workplace_id=workplace_id, domain_id=domain_id) }}">
   <div class="fe-toolbar">
     <div class="fe-title">
-      <strong>{{ kind_label }}</strong> <span class="text-muted">— {{ scope_label }}</span>
+      <strong>{{ kind_label }}</strong> <span class="text-muted">— {{ scope_label }}</span>{{ C.tip("操作:\nドラッグで移動\n文字をダブルクリックで名前を編集\n🔗 で線を引く（相手をクリック。作業どうしは仕事の流れ、作業と情報は情報の流れ。情報どうしは結べません）\n線をクリックで方法・引き継ぎ方・向き・削除\n🎨 で種類・だれ・媒体・色\nShift+ドラッグで範囲選択\n空白をドラッグで画面移動\nホイールで拡大縮小\nDelete で選択を削除") }}
       <span id="fe-status" class="fe-status text-muted"></span>
     </div>
     <div class="fe-buttons">
@@ -8524,9 +8506,6 @@ TEMPLATES = {
       <button type="button" class="btn btn-sm btn-outline-dark" id="fe-max" title="図を画面いっぱいに表示（Esc で戻る）"><i class="bi bi-arrows-fullscreen"></i> 最大表示</button>
       <a class="btn btn-sm btn-outline-dark" href="{{ url_for('bizmap.index', workplace_id=workplace_id, domain_id=domain_id) }}">閲覧へ戻る</a>
     </div>
-  </div>
-  <div class="fe-hint">
-    操作: ドラッグで移動 ／ 文字をダブルクリックで名前を編集 ／ 🔗 で線を引く（相手をクリック。作業どうしは仕事の流れ、作業と情報は情報の流れ。情報どうしは結べません） ／ 線をクリックで方法・引き継ぎ方・向き・削除 ／ 🎨 で種類・だれ・媒体・色 ／ Shift+ドラッグで範囲選択 ／ 空白をドラッグで画面移動 ／ ホイールで拡大縮小 ／ Delete で選択を削除
   </div>
   <div class="map-legend fe-kind-legend" id="fe-kind-legend"></div>
   <div id="fe-mode" class="fe-mode"></div>
@@ -8568,8 +8547,7 @@ TEMPLATES = {
       </div>
     </div>
     <div class="fe-popover fe-popover-wide" id="fe-wb-popover">
-      <div class="fe-pop-title">業務データに反映する内容</div>
-      <p class="small text-muted mb-2">手で引いた矢印・直した業務名・消した前後の矢印から、反映できる変更を取り出しました。反映すると次回の再生成から自動で描かれます。</p>
+      <div class="fe-pop-title">業務データに反映する内容{{ C.tip("手で引いた矢印・直した業務名・消した前後の矢印から、反映できる変更を取り出しました。反映すると次回の再生成から自動で描かれます。") }}</div>
       <div id="fe-wb-list" class="fe-wb-list"></div>
       <div class="mt-2 d-flex gap-1">
         <button type="button" class="btn btn-sm btn-success" id="fe-wb-apply">選んだ変更を反映</button>
@@ -8602,10 +8580,9 @@ TEMPLATES = {
 <div class="card"><div class="card-body">
   <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
     <div>
-      <h5 class="mb-1">{{ title }}
+      <h5 class="mb-1">{{ title }}{{ C.tip(desc ~ ("\n業務の箱をクリックすると案件詳細を開きます。" if definition else "")) }}
         {% if saved_at[key] %}<span class="badge text-bg-warning align-middle" title="編集画面で直した配置・名前・追加・削除を反映しています">手修正あり（{{ saved_at[key] }}）</span>{% endif %}
       </h5>
-      <p class="small text-muted mb-1">{{ desc }}</p>
       <div>{{ kind_legends.get(key, '')|safe }}</div>
     </div>
     <div class="d-flex flex-column align-items-end gap-1">
@@ -8622,15 +8599,13 @@ TEMPLATES = {
   {% if definition %}
   <div class="flow-canvas"><div class="flow-inner" id="flow-{{ key }}" data-def="def-{{ key }}"><span class="text-muted small">描画中…</span></div></div>
   <script type="text/plain" id="def-{{ key }}">{{ definition|safe }}</script>
-  <p class="small text-muted mt-2 mb-0">業務の箱をクリックすると案件詳細を開きます。</p>
   {% else %}
   <div class="alert alert-light border mt-3 mb-0">{{ empty_msg }}</div>
   {% endif %}
 </div></div>
 {%- endmacro %}
 {% block content %}
-<h2 class="mb-1">業務体系・業務マップ</h2>
-<p class="text-muted">登録された業務から、仕事の流れ（作業 → 作業）と情報の流れ（情報 → 作業 → 情報）を1枚の図に自動生成します。案件が増えるほど製造部の業務全体像が描かれていきます。間違いは「この図を編集する」で手で直せ、直した内容は保存され、新しい業務を取り込んで再生成しても残ります。</p>
+<h2 class="mb-3">業務体系・業務マップ{{ C.tip("登録された業務から、仕事の流れ（作業 → 作業）と情報の流れ（情報 → 作業 → 情報）を1枚の図に自動生成します。案件が増えるほど製造部の業務全体像が描かれていきます。間違いは「この図を編集する」で手で直せ、直した内容は保存され、新しい業務を取り込んで再生成しても残ります。") }}</h2>
 
 <form method="get" class="card mb-3"><div class="card-body py-2">
   <div class="row g-2 align-items-end">
@@ -8666,8 +8641,7 @@ TEMPLATES = {
     <div class="row g-3 mt-1">
       <div class="col-lg-7">
         <div class="card h-100"><div class="card-body">
-          <h5 class="card-title">システム・情報源と業務のつながり</h5>
-          <p class="small text-muted">同じシステムやファイルを何件の業務が読んでいるか。件数と時間が多いところほど、そこを起点にした自動化の効果が大きくなります。</p>
+          <h5 class="card-title">システム・情報源と業務のつながり{{ C.tip("同じシステムやファイルを何件の業務が読んでいるか。件数と時間が多いところほど、そこを起点にした自動化の効果が大きくなります。") }}</h5>
           <div class="table-responsive">
           <table class="table table-sm mb-0">
             <thead><tr><th>システム・情報源</th><th class="text-end">業務</th><th class="text-end">月間</th><th>業務名</th></tr></thead>
@@ -8689,8 +8663,7 @@ TEMPLATES = {
       </div>
       <div class="col-lg-5">
         <div class="card h-100"><div class="card-body">
-          <h5 class="card-title">Gr・役割・部署の間の受け渡し</h5>
-          <p class="small text-muted">誰から受け取り、誰に渡しているか。「情報」は情報の受け取り元とアウトプットの利用者から、「関与」は関わる人・部署から数えています。業務マップと同じ決まりで、受け取り元は1つずつに分け、役職はGr・役割名つきにし、「他部署」だけの相手は目的の文の部署名にします。</p>
+          <h5 class="card-title">Gr・役割・部署の間の受け渡し{{ C.tip("誰から受け取り、誰に渡しているか。「情報」は情報の受け取り元とアウトプットの利用者から、「関与」は関わる人・部署から数えています。業務マップと同じ決まりで、受け取り元は1つずつに分け、役職はGr・役割名つきにし、「他部署」だけの相手は目的の文の部署名にします。") }}</h5>
           <div class="table-responsive">
           <table class="table table-sm mb-0">
             <thead><tr><th>から</th><th>へ</th><th class="text-end">情報</th><th class="text-end">関与</th></tr></thead>
@@ -8709,10 +8682,9 @@ TEMPLATES = {
   </div>
 
   <div id="tab-domains" class="mt-4">
-    <h2 class="section-title">領域別の把握状況 <span class="section-sub">案件がない領域と、実態を把握できていない領域を区別する</span></h2>
+    <h2 class="section-title"><span>領域別の把握状況{{ C.tip("案件がない領域と、実態を把握できていない領域を区別する") }}</span></h2>
     <div class="card"><div class="card-body">
-      <h5 class="card-title">業務領域ごとの把握状況（ヒートマップ） <span class="badge text-bg-light border align-middle">全体</span></h5>
-      <p class="small text-muted">案件がない領域と、業務実態を把握できていない領域を区別します。絞り込みに関係なく製造部全体で判定しています。</p>
+      <h5 class="card-title">業務領域ごとの把握状況（ヒートマップ）{{ C.tip("案件がない領域と、業務実態を把握できていない領域を区別します。絞り込みに関係なく製造部全体で判定しています。") }} <span class="badge text-bg-light border align-middle">全体</span></h5>
       <div class="table-responsive">
       <table class="table table-sm align-middle mb-2">
         <thead><tr><th>業務領域</th><th>説明</th><th class="text-end">登録</th><th class="text-end">案件候補</th><th class="text-end">完了</th><th class="text-end">月間時間</th><th class="text-end">充足率</th><th class="text-end">確認済み</th><th>業務把握</th><th>分析状態</th></tr></thead>
@@ -8735,7 +8707,7 @@ TEMPLATES = {
       </table>
       </div>
       <div class="small text-muted">
-        判定: 登録件数と必須項目（目的・アウトプット・利用者・入力元・頻度・時間）の充足率、担当者確認率から判定。
+        判定{{ C.tip("登録件数と必須項目（目的・アウトプット・利用者・入力元・頻度・時間）の充足率、担当者確認率から判定。") }}
         <span class="heat-3 px-1">分析済み</span> <span class="heat-2 px-1">追加調査</span> <span class="heat-1 px-1">情報不足</span> <span class="heat-0 px-1">未分析</span>
         ／ 業務領域は <a href="{{ url_for('admin.index') }}">管理</a> で業務体系の確定版に合わせて編集できます。
       </div>
@@ -8743,7 +8715,7 @@ TEMPLATES = {
   </div>
 
   <div id="tab-dup" class="mt-4">
-    <h2 class="section-title">重複・つながり <span class="section-sub">同じアウトプット・重複入力・前後の業務</span></h2>
+    <h2 class="section-title"><span>重複・つながり{{ C.tip("同じアウトプット・重複入力・前後の業務") }}</span></h2>
     <div class="row g-3 mb-3">
       <div class="col-lg-6">
         <div class="card h-100"><div class="card-body">
@@ -9001,7 +8973,7 @@ TEMPLATES = {
         <tr><th>前後の業務</th><td>{{ mark('prev_task') or mark('next_task') }}{{ task.prev_task or '－' }} → <strong>{{ task.name }}</strong> → {{ task.next_task or '－' }}</td></tr>
         <tr><th>関わる人・部署</th><td>{{ mark('actors') }}{{ task.actors_list|join('・') or '－' }}</td></tr>
         <tr><th>情報の受け取り元</th><td>{{ mark('info_from') }}{{ task.info_from or '－' }}</td></tr>
-        <tr><th>担当人数</th><td>{{ task.headcount or 1 }}人{% if task.ai_extra_dict.get('headcount_guess') %} <span class="small text-muted">（参考: AI の推定では {{ task.ai_extra_dict.headcount_guess }}人。月間時間には入れていません）</span>{% endif %}</td></tr>
+        <tr><th>担当人数</th><td>{{ task.headcount or 1 }}人{% if task.ai_extra_dict.get('headcount_guess') %} <span class="small text-muted">（参考: AI の推定では {{ task.ai_extra_dict.headcount_guess }}人）</span>{{ C.tip("月間時間には入れていません。") }}{% endif %}</td></tr>
         <tr><th>使用ツール</th><td>{{ mark('tools') }}{{ task.tools_list|join('・') }}</td></tr>
         <tr><th>作業の性質</th><td>{{ mark('nature') }}{{ task.nature_list|join('・') }}</td></tr>
         <tr><th>困りごと</th><td>{{ mark('pains') }}{{ task.pains_list|join('・') }}{% if task.pains_note %}<div class="small text-muted">{{ task.pains_note }}</div>{% endif %}</td></tr>
@@ -9019,8 +8991,8 @@ TEMPLATES = {
     <div class="card mb-3"><div class="card-body">
       <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
         <div>
-          <h5 class="mb-1">この業務の流れ</h5>
-          <p class="small text-muted mb-0">取り出し元の情報 → 手順 → できるもの → 渡す相手の作業、前後の業務。<a href="{{ url_for('bizmap.index', workplace_id=task.workplace_id) }}">Gr・役割全体の流れ図</a></p>
+          <h5 class="mb-1">この業務の流れ{{ C.tip("取り出し元の情報 → 手順 → できるもの → 渡す相手の作業、前後の業務。") }}</h5>
+          <p class="small text-muted mb-0"><a href="{{ url_for('bizmap.index', workplace_id=task.workplace_id) }}">Gr・役割全体の流れ図</a></p>
           {{ task_legend|safe }}
         </div>
         <div class="btn-group btn-group-sm flow-toolbar" data-target="task" role="group">
@@ -9035,7 +9007,7 @@ TEMPLATES = {
 
     <div class="card mb-3"><div class="card-body">
       <div class="d-flex justify-content-between align-items-center">
-        <h5 class="card-title mb-0">AI分析
+        <h5 class="card-title mb-0">AI分析{{ C.tip("AIの推定は参考情報です。担当者確認（右側）を経て正式な情報になります。") }}
           {% if task.ai_source == 'openai' %}<span class="badge text-bg-primary">ChatGPT API</span>{% elif task.ai_source == 'claude' %}<span class="badge text-bg-primary">Claude API</span>{% elif task.ai_source %}<span class="badge text-bg-secondary">ルールベース</span>{% endif %}
           {% if task.ai_priority %}<span class="badge text-bg-{{ {'高':'danger','中':'warning','低':'light text-muted'}.get(task.ai_priority, 'light') }}">優先度 {{ task.ai_priority }}</span>{% endif %}
         </h5>
@@ -9044,7 +9016,7 @@ TEMPLATES = {
         </form>
       </div>
       {% if task.ai_stale_note %}
-      <div class="small text-muted mt-2"><span class="badge text-bg-light border">{{ task.ai_stale_note }}</span> 業務情報を直したあとは分析していません。新しくするには「{% if ai_enabled %}AIで再分析{% else %}再分析（ルール）{% endif %}」を押してください。</div>
+      <div class="small text-muted mt-2"><span class="badge text-bg-light border">{{ task.ai_stale_note }}</span>{{ C.tip("業務情報を直したあとは分析していません。新しくするには「" ~ ("AIで再分析" if ai_enabled else "再分析（ルール）") ~ "」を押してください。") }}</div>
       {% endif %}
       {% if task.ai_summary %}
       <p class="mt-2 mb-2">{{ task.ai_summary }}</p>
@@ -9077,8 +9049,8 @@ TEMPLATES = {
       {% set plan_note = task.ai_plan_note %}
       {% if extra.get('tobe_steps') or extra.get('saving_minutes_per_month') or extra.get('hearing_questions') %}
       <div class="small mt-2{% if plan_note %} pt-2 border-top{% endif %}">
-        {% if plan_note == 'デモ' %}<div class="text-muted mb-1"><span class="badge bg-warning-subtle text-warning-emphasis">デモ</span> デモ用の見本の案です（AI で分析したものではありません）。</div>
-        {% elif plan_note %}<div class="text-muted mb-1"><span class="badge text-bg-light border">{{ plan_note }}</span> 前回の AI 分析で出た案です。いまの分析（ルールベース）とは別で、再分析では更新していません。</div>{% endif %}
+        {% if plan_note == 'デモ' %}<div class="text-muted mb-1"><span class="badge bg-warning-subtle text-warning-emphasis">デモ</span>{{ C.tip("デモ用の見本の案です（AI で分析したものではありません）。") }}</div>
+        {% elif plan_note %}<div class="text-muted mb-1"><span class="badge text-bg-light border">{{ plan_note }}</span>{{ C.tip("前回の AI 分析で出た案です。いまの分析（ルールベース）とは別で、再分析では更新していません。") }}</div>{% endif %}
         {% if extra.get('tobe_steps') %}
         <strong>改善後の流れ（AI案）</strong>
         <ol class="mb-1 ps-3">{% for x in extra.tobe_steps %}<li>{{ x }}</li>{% endfor %}</ol>
@@ -9094,7 +9066,6 @@ TEMPLATES = {
       {% if not task.ai_source %}
       <p class="text-muted small mb-0">まだ分析されていません。「再分析」を押してください。</p>
       {% endif %}
-      <p class="small text-muted mt-2 mb-0">AIの推定は参考情報です。担当者確認（右側）を経て正式な情報になります。</p>
     </div></div>
 
     <div class="card"><div class="card-body">
@@ -9120,17 +9091,13 @@ TEMPLATES = {
       </div>
       {{ stepper(task) }}
       <div class="d-flex justify-content-between align-items-center mt-2 gap-2 flex-wrap">
-        <div class="small text-muted">いま <strong class="text-dark">{{ task.stage_name }}</strong>（{{ task.stage_since|jpdate }}〜）{% if task.is_on_hold %} <span class="badge text-bg-warning">保留</span>{% endif %}</div>
+        <div class="small text-muted">いま <strong class="text-dark">{{ task.stage_name }}</strong>（{{ task.stage_since|jpdate }}〜）{% for key, name, desc, steps in C.STAGES if key == task.stage_key %}{{ C.tip(task.stage_label(key) ~ "：" ~ desc ~ ("（" ~ steps ~ "）" if steps else "") ~ "\nステータス（受付・対応中・完了）は段階から自動で決まります。") }}{% endfor %}{% if task.is_on_hold %} <span class="badge text-bg-warning">保留</span>{% endif %}</div>
         <div class="d-flex gap-1">
           <form method="post" action="{{ url_for('cases.toggle_hold', task_id=task.id) }}"><button class="btn btn-sm btn-outline-warning" {% if task.stage_key == 'done' %}disabled{% endif %}>{% if task.is_on_hold %}保留を解除{% else %}保留にする{% endif %}</button></form>
           <form method="post" action="{{ url_for('cases.set_stage', task_id=task.id) }}"><input type="hidden" name="direction" value="prev"><button class="btn btn-sm btn-outline-secondary" {% if task.stage_index == 0 %}disabled{% endif %}>◀ 戻す</button></form>
           <form method="post" action="{{ url_for('cases.set_stage', task_id=task.id) }}"><input type="hidden" name="direction" value="next"><button class="btn btn-sm btn-success" {% if task.stage_key == 'done' %}disabled{% endif %}>次の段階へ ▶</button></form>
         </div>
       </div>
-      {% for key, name, desc, steps in C.STAGES %}{% if key == task.stage_key %}
-      <div class="small text-muted mt-2">{{ task.stage_label(key) }}：{{ desc }}{% if steps %}（{{ steps }}）{% endif %}</div>
-      {% endif %}{% endfor %}
-      <div class="small text-muted mt-1">ステータス（受付・対応中・完了）は段階から自動で決まります。</div>
       {% if task.progress_note %}<div class="pb-note mt-1">{{ task.progress_note }}</div>{% endif %}
     </div></div>
 
@@ -9161,7 +9128,7 @@ TEMPLATES = {
 
       {% set missing = task.missing_required %}
       {% macro need(label) %}{% if label in missing %} <span class="badge text-bg-warning">未入力</span>{% endif %}{% endmacro %}
-      <label class="form-label small mb-1 mt-2" id="case-info"><strong>業務情報</strong>（直すと推定の印が外れます。必須項目が空なら <span class="badge text-bg-warning">未入力</span> が付きます）</label>
+      <label class="form-label small mb-1 mt-2" id="case-info"><strong>業務情報</strong></label>{{ C.tip("直すと推定の印が外れます。必須項目が空なら「未入力」が付きます。\n頻度・1回の時間・担当人数を変えると、保存したときに月間時間を計算し直します。") }}
       <div class="row g-2 mb-2">
         <div class="col-8">
           <label class="form-label small mb-0" for="f-domain_id">業務領域{{ need('業務領域') }}</label>
@@ -9174,7 +9141,7 @@ TEMPLATES = {
           <label class="form-label small mb-0">担当人数</label>
           <input type="number" name="headcount" class="form-control form-control-sm" min="1" step="1" value="{{ task.headcount or 1 }}">
         </div>
-        {% if task.ai_extra_dict.get('headcount_guess') %}<div class="col-12 small text-muted mt-0">AI の推定は {{ task.ai_extra_dict.headcount_guess }}人（参考）。同じ作業をしている人数が分かったら担当人数に入れてください（月間時間に掛けます）。</div>{% endif %}
+        {% if task.ai_extra_dict.get('headcount_guess') %}<div class="col-12 small text-muted mt-0">AI の推定は {{ task.ai_extra_dict.headcount_guess }}人（参考）。{{ C.tip("同じ作業をしている人数が分かったら担当人数に入れてください（月間時間に掛けます）。") }}</div>{% endif %}
         <div class="col-12">
           <label class="form-label small mb-0" for="f-purpose">目的（なぜやるのか・誰が何に使うか）{{ need('目的') }}</label>
           <textarea name="purpose" id="f-purpose" class="form-control form-control-sm" rows="2" maxlength="500">{{ task.purpose or '' }}</textarea>
@@ -9209,7 +9176,6 @@ TEMPLATES = {
             {% for v in C.DURATIONS %}<option value="{{ v }}" {% if task.duration == v %}selected{% endif %}>{{ v }}</option>{% endfor %}
           </select>
         </div>
-        <div class="col-12 small text-muted mt-0">頻度・1回の時間・担当人数を変えると、保存したときに月間時間を計算し直します。</div>
         <div class="col-6">
           <label class="form-label small mb-0">前の業務</label>
           <input type="text" name="prev_task" class="form-control form-control-sm" value="{{ task.prev_task or '' }}" maxlength="500">
@@ -9232,7 +9198,7 @@ TEMPLATES = {
         {% for no, name, desc in C.STEPS %}
         <div class="form-check">
           <input class="form-check-input" type="checkbox" name="steps" value="{{ no }}" id="step-{{ no }}" {% if no in task.steps_done_list %}checked{% endif %}>
-          <label class="form-check-label {% if no in task.steps_done_list %}step-done{% endif %}" for="step-{{ no }}">{{ no }}. {{ name }} <span class="text-muted small">— {{ desc }}</span></label>
+          <label class="form-check-label {% if no in task.steps_done_list %}step-done{% endif %}" for="step-{{ no }}">{{ no }}. {{ name }}</label>{{ C.tip(desc) }}
         </div>
         {% endfor %}
       </div>
@@ -9240,7 +9206,7 @@ TEMPLATES = {
       <label class="form-label small mb-1 mt-2"><strong>ECRSの検討メモ</strong></label>
       {% for key, label, question in C.ECRS %}
       <div class="mb-2">
-        <label class="form-label small mb-0">{{ label }} <span class="text-muted">— {{ question }}</span></label>
+        <label class="form-label small mb-0">{{ label }}</label>{{ C.tip(question) }}
         <textarea name="ecrs_{{ key }}" class="form-control form-control-sm" rows="2">{{ task['ecrs_' ~ key] or '' }}</textarea>
       </div>
       {% endfor %}
@@ -9267,8 +9233,7 @@ TEMPLATES = {
     </div></form>
 
     <form method="post" action="{{ url_for('cases.verify', task_id=task.id) }}" class="card"><div class="card-body">
-      <h5 class="card-title">担当者確認（推進メンバー）</h5>
-      <p class="small text-muted">必須項目の内容とAIの推定を本人・推進メンバーが確認すると、業務情報の充足率に算入されます。</p>
+      <h5 class="card-title">担当者確認（推進メンバー）{{ C.tip("必須項目の内容とAIの推定を本人・推進メンバーが確認すると、業務情報の充足率に算入されます。") }}</h5>
       {% if not task.required_filled %}
       <div class="alert alert-warning py-1 small">必須項目（{% for key, label in C.REQUIRED_FIELDS if label in task.missing_required %}<a href="#f-{{ key }}" class="alert-link">{{ label }}</a>{% if not loop.last %}・{% endif %}{% endfor %}）が未入力です。ヒアリングで確かめて、上の「案件管理」の<a href="#case-info" class="alert-link">業務情報</a>に入れて「保存する」を押してください。</div>
       {% endif %}
@@ -9290,8 +9255,8 @@ TEMPLATES = {
     </div></form>
 
     <form method="post" action="{{ url_for('cases.withdraw_task', task_id=task.id) }}" class="card mt-3 case-withdraw" data-confirm="「{{ task.name }}」の登録を取り消しますか？AI の聞き取りの記録・流れ図・段階の記録も消え、元に戻せません。"><div class="card-body">
-      <h5 class="card-title">登録の取り消し（管理者）</h5>
-      <p class="small text-muted">間違えて登録された業務や、同じ業務の二重登録を消します。本人は「自動化アイテム登録」の画面から取り消せません。取り消すと活動状況・ダッシュボード・業務マップからも消え、元に戻せません。続けるか迷うときは「保留」にしてください。</p>
+      <h5 class="card-title">登録の取り消し（管理者）{{ C.tip("間違えて登録された業務や、同じ業務の二重登録を消します。本人は「自動化アイテム登録」の画面から取り消せません。") }}</h5>
+      <p class="small text-muted">取り消すと活動状況・ダッシュボード・業務マップからも消え、元に戻せません。続けるか迷うときは「保留」にしてください。</p>
       <button class="btn btn-outline-danger btn-sm w-100">この登録を取り消す</button>
     </div></form>
   </div>
@@ -9306,13 +9271,12 @@ TEMPLATES = {
 {% from "board/_macros.html" import stepper with context %}
 {% block title %}改善案件一覧{% endblock %}
 {% block content %}
-<div class="d-flex flex-wrap justify-content-between align-items-center mb-2 gap-2">
-  <h2 class="mb-0">改善案件一覧</h2>
+<div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
+  <h2 class="mb-0">改善案件一覧{{ C.tip("登録された業務はすべて改善案件です。希望が「なくしたい・減らしたい」か、困りごとのある業務を「案件候補」として数えます。") }}</h2>
   <div class="d-flex gap-2">
     <a class="btn btn-primary btn-sm" href="{{ url_for('survey.index') }}">自動化アイテムを登録する</a>
   </div>
 </div>
-<p class="text-muted small">登録された業務はすべて改善案件です。希望が「なくしたい・減らしたい」か、困りごとのある業務を「案件候補」として数えます。</p>
 
 <form method="get" class="card mb-3"><div class="card-body py-2">
   <div class="row g-2 align-items-end">
@@ -9460,27 +9424,26 @@ TEMPLATES = {
   </div>
   <div class="col-6 col-lg-3">
     <div class="card stat h-100"><div class="card-body">
-      <div class="stat-head"><span class="stat-tile tile-indigo"><i class="bi bi-people"></i></span><span class="stat-label">自主改善者</span></div>
+      <div class="stat-head"><span class="stat-tile tile-indigo"><i class="bi bi-people"></i></span><span class="stat-label">自主改善者{{ C.tip("自ら改善に取り組みたい人") }}</span></div>
       <div class="stat-value">{{ k.self_improver_count }}<span class="stat-unit">人</span></div>
-      <div class="stat-sub">自ら改善に取り組みたい人（回答した人 {{ k.respondent_count }} 人中）</div>
+      <div class="stat-sub">回答した人 {{ k.respondent_count }} 人中</div>
     </div></div>
   </div>
   <div class="col-6 col-lg-3">
     <div class="card stat h-100"><div class="card-body">
-      <div class="stat-head"><span class="stat-tile tile-orange"><i class="bi bi-lightning-charge"></i></span><span class="stat-label">自動化・廃止業務</span></div>
+      <div class="stat-head"><span class="stat-tile tile-orange"><i class="bi bi-lightning-charge"></i></span><span class="stat-label">自動化・廃止業務{{ C.tip("完了案件のうち廃止・自動化したもの") }}</span></div>
       <div class="stat-value">{{ k.automated_count }}<span class="stat-unit">件</span></div>
-      <div class="stat-sub">完了案件のうち廃止・自動化したもの</div>
     </div></div>
   </div>
 </div>
 
-<h2 class="section-title">現状の把握 <span class="section-sub">自動化アイテム登録（棚卸し）から</span></h2>
+<h2 class="section-title"><span>現状の把握{{ C.tip("自動化アイテム登録（棚卸し）から") }}</span></h2>
 <div class="row g-3 mb-4">
   <div class="col-6 col-lg-3">
     <div class="card stat h-100"><div class="card-body">
       <div class="stat-head"><span class="stat-tile tile-teal"><i class="bi bi-list-check"></i></span><span class="stat-label">PCの定型・定期業務の月間時間</span></div>
       <div class="stat-value">{{ '%.1f'|format(k.total_hours) }}<span class="stat-unit">時間/月</span></div>
-      <div class="stat-sub">年間換算 {{ '%.0f'|format(k.annual_hours) }} 時間 ・ <a href="{{ url_for('cases.index', filter='candidates') }}">案件候補 {{ k.candidate_count }} 件</a>（なくしたい・減らしたい・困りごとあり）</div>
+      <div class="stat-sub">年間換算 {{ '%.0f'|format(k.annual_hours) }} 時間 ・ <a href="{{ url_for('cases.index', filter='candidates') }}">案件候補 {{ k.candidate_count }} 件</a>{{ C.tip("なくしたい・減らしたい・困りごとあり") }}</div>
     </div></div>
   </div>
   <div class="col-6 col-lg-3">
@@ -9513,7 +9476,7 @@ TEMPLATES = {
   <div class="col-lg-5">
     <div class="card h-100"><div class="card-body">
       <div class="d-flex justify-content-between align-items-center">
-        <h5 class="card-title mb-0">月次アンケート（時系列）</h5>
+        <h5 class="card-title mb-0">月次アンケート（時系列）{{ C.tip("毎月同じ設問でPCの定型・定期業務の変化を追います。") }}</h5>
       </div>
       {% if monthly_latest %}
       <div class="small text-muted mb-2">最新 {{ monthly_latest.label }}：回答 {{ monthly_latest.n }} 人{% if monthly_latest.member_answered != monthly_latest.n %}（うち対象者 {{ monthly_latest.member_answered }} 人）{% endif %}{% if monthly_latest.response_rate is not none %}・回答率 {{ '%.0f'|format(monthly_latest.response_rate) }}%（{{ monthly_latest.member_answered }}／{{ monthly_latest.members }} 人）{% endif %}{% if monthly_latest.pattern_counts %}・{% for k, v in monthly_latest.pattern_counts.items() %}{{ k }} {{ v }}人{% if not loop.last %}／{% endif %}{% endfor %}{% endif %}</div>
@@ -9524,14 +9487,14 @@ TEMPLATES = {
       </div>
       <div class="chart-box" style="height: 150px"><canvas id="chart-monthly"></canvas></div>
       {% else %}
-      <p class="text-muted small mb-2">毎月同じ設問でPCの定型・定期業務の変化を追います。まだ回答がありません。</p>
+      <p class="text-muted small mb-2">まだ回答がありません。</p>
       <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('monthly.form') }}">回答フォーム</a>
       {% endif %}
     </div></div>
   </div>
   <div class="col-lg-7">
     <div class="card h-100"><div class="card-body">
-      <h5 class="card-title">Gr・役割別の回答状況</h5>
+      <h5 class="card-title">Gr・役割別の回答状況{{ C.tip("回答した人は、業務を1件以上登録したか、月次アンケートに回答した人（対象外は除く）を、いまのGr・役割（月次アンケートか「自動化アイテム登録」のいちばん新しい回答で選んだGr・役割）で1人1回数えます。自主改善はそのうち自ら改善に取り組みたい人です。業務・月間時間・案件候補は、業務を登録したときのGr・役割で数えます。") }}</h5>
       <div class="table-responsive">
       <table class="table table-sm mb-0">
         <thead><tr><th>Gr・役割</th><th class="text-end">回答した人</th><th class="text-end">業務</th><th class="text-end">月間時間</th><th class="text-end" title="希望が「なくしたい・減らしたい」か、困りごとのある業務">案件候補</th><th class="text-end">自主改善</th></tr></thead>
@@ -9549,7 +9512,6 @@ TEMPLATES = {
         </tbody>
       </table>
       </div>
-      <p class="small text-muted mt-2 mb-0">回答した人は、業務を1件以上登録したか、月次アンケートに回答した人（対象外は除く）を、いまのGr・役割（月次アンケートか「自動化アイテム登録」のいちばん新しい回答で選んだGr・役割）で1人1回数えます。自主改善はそのうち自ら改善に取り組みたい人です。業務・月間時間・案件候補は、業務を登録したときのGr・役割で数えます。</p>
     </div></div>
   </div>
 </div>
@@ -9573,8 +9535,7 @@ TEMPLATES = {
 <div class="row g-3">
   <div class="col-lg-5">
     <div class="card h-100"><div class="card-body">
-      <h5 class="card-title">次のアクション提案</h5>
-      <p class="text-muted small mb-2">蓄積された案件と業務情報から、次に調査・改善すべきテーマを提案します。</p>
+      <h5 class="card-title">次のアクション提案{{ C.tip("蓄積された案件と業務情報から、次に調査・改善すべきテーマを提案します。") }}</h5>
       {% if suggestions %}
       <ul class="list-group list-group-flush">
         {% for s in suggestions %}
@@ -9606,7 +9567,7 @@ TEMPLATES = {
         <li class="list-group-item px-0 small text-muted">生成日時: {{ ai_suggestions[0].generated_at }}</li>
       </ul>
       {% elif not ai_enabled %}
-      <p class="small text-muted mt-2 mb-0">AI連携は未設定です。管理画面の「AI連携」で URL・API キー・モデル名を設定すると、案件登録時のAI分析とここでの提案生成が有効になります。</p>
+      <p class="small text-muted mt-2 mb-0">AI連携は未設定です。{{ C.tip("管理画面の「AI連携」で URL・API キー・モデル名を設定すると、案件登録時のAI分析とここでの提案生成が有効になります。") }}</p>
       {% endif %}
     </div></div>
   </div>
@@ -9700,8 +9661,7 @@ TEMPLATES = {
 </ol></nav>
 <div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">
   <div>
-    <h2 class="mb-0">月次アンケートの設問</h2>
-    <div class="text-muted small">月度ごとに設問を決めます。変えられるのは来月以降の月度だけです（今月と過去の月度は、すでに回答した人のデータと対応が取れなくなるため変えられません）。基本設問（鍵マーク）は毎月の推移に使うため、設問の文面と選択肢の表現だけ変えられます（選択肢の数・順番・意味と必須は固定）。</div>
+    <h2 class="mb-0">月次アンケートの設問{{ C.tip("月度ごとに設問を決めます。変えられるのは来月以降の月度だけです（今月と過去の月度は、すでに回答した人のデータと対応が取れなくなるため変えられません）。基本設問（鍵マーク）は毎月の推移に使うため、設問の文面と選択肢の表現だけ変えられます（選択肢の数・順番・意味と必須は固定）。") }}</h2>
   </div>
   <form method="get" class="d-flex gap-2 align-items-center">
     <input type="month" name="period" class="form-control form-control-sm" value="{{ period }}" onchange="this.form.submit()">
@@ -9712,7 +9672,7 @@ TEMPLATES = {
   <div class="col-lg-8">
     <div class="card"><div class="card-body">
       <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
-        <h5 class="card-title mb-0">{{ period_label }}の設問 {% if response_count %}<span class="badge text-bg-secondary ms-1">回答 {{ response_count }} 件</span>{% endif %}{% if locked %}<span class="badge text-bg-light border ms-1"><i class="bi bi-lock-fill"></i> 変更できません</span>{% endif %}</h5>
+        <h5 class="card-title mb-0">{{ period_label }}の設問{% if has_questions %}{{ C.tip("番号は回答画面と同じです。字下げした設問（1-2 など）と ↳ の付いた設問は、上の設問で決まった選択肢を選んだ人にだけ出ます。どの選択肢で何が出るかは、親の設問の選択肢の横に出ます。") }}{% endif %} {% if response_count %}<span class="badge text-bg-secondary ms-1">回答 {{ response_count }} 件</span>{% endif %}{% if locked %}<span class="badge text-bg-light border ms-1"><i class="bi bi-lock-fill"></i> 変更できません</span>{% endif %}</h5>
         {% if not locked %}
         <div class="d-flex gap-1 flex-wrap">
           <button type="button" class="btn btn-sm btn-outline-secondary" id="qe-copy-prev">前月（{{ prev_period }}）をコピー</button>
@@ -9733,7 +9693,6 @@ TEMPLATES = {
       <div class="alert alert-light border py-2 small">この月度の設問セットはありません。</div>
       {% endif %}
       {% endif %}
-      {% if has_questions %}<p class="small text-muted mb-2">番号は回答画面と同じです。字下げした設問（1-2 など）と <i class="bi bi-arrow-return-right"></i> の付いた設問は、上の設問で決まった選択肢を選んだ人にだけ出ます。どの選択肢で何が出るかは、親の設問の選択肢の横に出ます。</p>{% endif %}
       <div id="qe-list"></div>
       {% if not locked %}
       <button type="button" class="btn btn-outline-primary w-100 mt-2" id="qe-add"><i class="bi bi-plus-lg me-1"></i>設問を追加</button>
@@ -9755,7 +9714,7 @@ TEMPLATES = {
   </div>
   <div class="col-lg-4">
     <div class="card"><div class="card-body">
-      <h5 class="card-title">月度ごとの設問セット</h5>
+      <h5 class="card-title">月度ごとの設問セット{{ C.tip("月度の設問セットは、回答フォームが初めて開かれたときに直近の月度からコピーして自動で作られます。来月以降の分は、この画面で先に作っておけます（開いただけでは作らず、保存したときに作ります）。今月と過去の月度は見るだけです。回答できるのは今月と前月だけなので、それより前の月度は「終了」と出します。") }}</h5>
       <table class="table table-sm mb-0">
         <thead><tr><th>月度</th><th class="text-end">設問</th><th class="text-end">回答</th><th>状態</th><th></th></tr></thead>
         <tbody>
@@ -9774,7 +9733,6 @@ TEMPLATES = {
         {% endfor %}
         </tbody>
       </table>
-      <p class="small text-muted mt-2 mb-0">月度の設問セットは、回答フォームが初めて開かれたときに直近の月度からコピーして自動で作られます。来月以降の分は、この画面で先に作っておけます（開いただけでは作らず、保存したときに作ります）。今月と過去の月度は見るだけです。回答できるのは今月と前月だけなので、それより前の月度は「終了」と出します。</p>
     </div></div>
   </div>
 </div>
@@ -9796,14 +9754,14 @@ TEMPLATES = {
             </div>
           </div>
           <div class="qe-options mt-2">
-            <div class="form-label small mb-1 qe-options-label">選択肢（1行に1つ、2〜7個。上から順に「良い→悪い」などの順で）</div>
+            <div class="form-label small mb-1 qe-options-label">選択肢{{ C.tip("1行に1つ、2〜7個。上から順に「良い→悪い」などの順で。") }}</div>
             <textarea class="form-control form-control-sm qe-opts" rows="3" aria-label="選択肢"></textarea>
             <div class="qe-choices d-none"></div>
           </div>
           <div class="qe-placeholder mt-2 d-none">
             <input type="text" class="form-control form-control-sm qe-ph" placeholder="記入欄の例文（任意）" maxlength="100" aria-label="記入欄の例文">
           </div>
-          <div class="small text-muted mt-1 qe-core d-none"><i class="bi bi-lock-fill me-1"></i><span class="qe-core-text"></span></div>
+          <div class="small text-muted mt-1 qe-core d-none"><i class="bi bi-lock-fill me-1"></i>基本設問{{ C.tip("毎月の推移に使います。削除・並べ替え・必須の変更はできません。") }}<span class="qe-core-text"></span></div>
         </div>
         <div class="btn-group-vertical btn-group-sm qe-btns">
           <button type="button" class="btn btn-outline-secondary qe-up" title="上へ">▲</button>
@@ -9890,7 +9848,8 @@ TEMPLATES = {
       }
       if (core && q.type === "choice") {
         node.querySelector(".qe-opts").classList.add("d-none");
-        node.querySelector(".qe-options-label").textContent = LOCKED ? "選択肢" : "選択肢（表現だけ変えられます。数・順番・意味は変えられません）";
+        var optTip = node.querySelector(".qe-options-label .tip");
+        if (LOCKED) optTip.remove(); else optTip.dataset.tip = "表現だけ変えられます。数・順番・意味は変えられません。";
         var box = node.querySelector(".qe-choices");
         box.classList.remove("d-none");
         labelsOf(q).forEach(function (label, k) {
@@ -9909,7 +9868,7 @@ TEMPLATES = {
       if (core) {
         var note = node.querySelector(".qe-core");
         note.classList.remove("d-none");
-        note.querySelector(".qe-core-text").textContent = "基本設問（毎月の推移に使います。削除・並べ替え・必須の変更はできません）" + (LABELS[q.key] ? "　→ " + LABELS[q.key] : "");
+        note.querySelector(".qe-core-text").textContent = LABELS[q.key] ? "　→ " + LABELS[q.key] : "";
         ["qe-del", "qe-type", "qe-required", "qe-up", "qe-down"].forEach(function (c) { var el = node.querySelector("." + c); if (el) el.disabled = true; });
         node.querySelector(".qe-up").title = node.querySelector(".qe-down").title = "基本設問の順番は変えられません";
       }
@@ -10334,8 +10293,7 @@ TEMPLATES = {
 {% block content %}
 <div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">
   <div>
-    <h2 class="mb-1">CSV出力</h2>
-    <p class="text-muted mb-0">このアプリのデータを CSV で出力します。画面の絞り込みに関係なく、いま入っている全件を出します（デモデータを投入しているときはデモデータも含みます）。文字コードは UTF-8（BOM 付き）で、Excel でそのまま開けます。</p>
+    <h2 class="mb-1">CSV出力{{ C.tip("このアプリのデータを CSV で出力します。画面の絞り込みに関係なく、いま入っている全件を出します（デモデータを投入しているときはデモデータも含みます）。文字コードは UTF-8（BOM 付き）で、Excel でそのまま開けます。\nファイル名は「データの名前_出力した日.csv」です。ZIP には下の表の CSV がすべて入ります。") }}</h2>
   </div>
   <a class="btn btn-primary btn-sm text-nowrap" href="{{ url_for('export.download_all') }}"><i class="bi bi-file-earmark-zip"></i> すべてまとめて出力（ZIP）</a>
 </div>
@@ -10354,7 +10312,6 @@ TEMPLATES = {
     </tbody>
   </table>
 </div></div>
-<p class="small text-muted mt-2 mb-0">ファイル名は「データの名前_出力した日.csv」です。ZIP には上の CSV がすべて入ります。</p>
 {% endblock %}
 ''',
     'monthly/results.html': r'''{% extends "base.html" %}
@@ -10362,8 +10319,7 @@ TEMPLATES = {
 {% block content %}
 <div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-1">
   <div>
-    <h2 class="mb-0">月次アンケート 集計</h2>
-    <div class="text-muted small">毎月同じ基本設問で、変化を追います。</div>
+    <h2 class="mb-0">月次アンケート 集計{{ C.tip("毎月同じ基本設問で、変化を追います。") }}</h2>
   </div>
   <div class="d-flex gap-2 flex-wrap">
     <a class="btn btn-outline-primary btn-sm" href="{{ url_for('admin.employees') }}">人財一覧</a>
@@ -10372,7 +10328,7 @@ TEMPLATES = {
 </div>
 
 {% if rows %}
-<h2 class="section-title">推移 <span class="section-sub">基本設問の割合と回答者数</span></h2>
+<h2 class="section-title">推移{{ C.tip("基本設問の割合と回答者数") }}</h2>
 <div class="row g-3 mb-2">
   <div class="col-lg-7">
     <div class="card h-100"><div class="card-body">
@@ -10391,8 +10347,8 @@ TEMPLATES = {
       <div class="table-responsive">
       <table class="table table-sm align-middle mb-0">
         <thead><tr>
-          <th>月度</th><th class="text-end">回答者</th><th class="text-end">回答率</th><th class="text-end">PCの定型・定期業務あり</th><th class="text-end">推計 月間時間</th>
-          <th class="text-end">減った</th><th class="text-end">増えた</th><th class="text-end">自動化したい</th><th class="text-end">依頼したい</th><th class="text-end">一緒に取り組みたい</th><th class="text-end">自分で取り組みたい</th><th class="text-end">新規業務</th><th class="text-end">コメント</th>
+          <th>月度</th><th class="text-end">回答者{{ C.tip("「うち対象者」は回答者に対象外の人が含まれるときだけ出ます。") }}</th><th class="text-end">回答率{{ C.tip("回答率は、その月までに人財一覧に載った人（初めて回答した月から。「対象外」にした人を除く）のうち、その月に回答した人の割合です（下の小さい数字が 回答した対象者／対象者）。") }}</th><th class="text-end">PCの定型・定期業務あり</th><th class="text-end">推計 月間時間{{ C.tip("推計月間時間 ＝ 1シフトあたり時間の換算値 × " ~ C.SHIFTS_PER_MONTH ~ "（1か月の出勤日数の目安）。") }}</th>
+          <th class="text-end">減った{{ C.tip("減った・増えた・自動化したいは ① で「ある」と答えた人のうちの割合です（その設問に答えた人が分母）。") }}</th><th class="text-end">増えた</th><th class="text-end">自動化したい</th><th class="text-end">依頼したい{{ C.tip("依頼したい・一緒に取り組みたい・自分で取り組みたいは「なくしたい業務がある」と答えた人のうちの割合です（その設問に答えた人が分母）。") }}</th><th class="text-end">一緒に取り組みたい</th><th class="text-end">自分で取り組みたい</th><th class="text-end">新規業務</th><th class="text-end">コメント</th>
         </tr></thead>
         <tbody>
         {% for r in rows %}
@@ -10415,18 +10371,17 @@ TEMPLATES = {
         </tbody>
       </table>
       </div>
-      <p class="small text-muted mt-2 mb-0">減った・増えた・自動化したいは ① で「ある」と答えた人のうちの割合、依頼したい・一緒に取り組みたい・自分で取り組みたいは「なくしたい業務がある」と答えた人のうちの割合です（その設問に答えた人が分母）。回答率は、その月までに人財一覧に載った人（初めて回答した月か、管理画面で追加した月から。「対象外」にした人を除く）のうち、その月に回答した人の割合です（下の小さい数字が 回答した対象者／対象者）。「うち対象者」は回答者に対象外の人が含まれるときだけ出ます。推計月間時間 ＝ 1シフトあたり時間の換算値 × {{ C.SHIFTS_PER_MONTH }}（1か月の出勤日数の目安）。</p>
     </div></div>
   </div>
 </div>
 
-<h2 class="section-title">設問ごとの推移 <span class="section-sub">選択肢の割合（%）が月度ごとにどう動いたか</span></h2>
+<h2 class="section-title">設問ごとの推移{{ C.tip("選択肢の割合（%）が月度ごとにどう動いたか") }}</h2>
 <div class="row g-3 mb-2">
   {% for t in trends %}
   <div class="col-lg-6">
     <div class="card h-100"><div class="card-body">
-      <h5 class="card-title mb-0">{{ t.q.text }}</h5>
-      <div class="small text-muted mb-2">{{ t.label }}{% if t.note %}<br>{{ t.note }}{% endif %}</div>
+      <h5 class="card-title mb-0">{{ t.q.text }}{% if t.note %}{{ C.tip(t.note) }}{% endif %}</h5>
+      <div class="small text-muted mb-2">{{ t.label }}</div>
       <div class="chart-box" style="height: 200px"><canvas id="chart-q-{{ t.q.key }}"></canvas></div>
       <div class="table-responsive mt-2">
       <table class="table table-sm trend-table mb-0">
@@ -10444,7 +10399,7 @@ TEMPLATES = {
   {% endfor %}
 </div>
 
-<h2 class="section-title">Gr・役割別の推移 <span class="section-sub">PCの定型・定期業務あり率と推計月間時間</span></h2>
+<h2 class="section-title">Gr・役割別の推移{{ C.tip("PCの定型・定期業務あり率と推計月間時間\n上段がPCの定型・定期業務あり率、下段が推計月間時間と回答者数です。") }}</h2>
 <div class="card mb-2"><div class="card-body">
   <div class="table-responsive">
   <table class="table table-sm trend-table mb-0">
@@ -10463,10 +10418,9 @@ TEMPLATES = {
     </tbody>
   </table>
   </div>
-  <p class="small text-muted mt-2 mb-0">上段がPCの定型・定期業務あり率、下段が推計月間時間と回答者数です。</p>
 </div></div>
 
-<h2 class="section-title">勤務形態別の推移 <span class="section-sub">普通勤務と交代勤務の違い</span></h2>
+<h2 class="section-title">勤務形態別の推移{{ C.tip("普通勤務と交代勤務の違い\n勤務形態はその月の回答で選んだものです。「未設定」は勤務形態を聞く前の回答です。") }}</h2>
 <div class="card mb-2"><div class="card-body">
   <div class="table-responsive">
   <table class="table table-sm trend-table mb-0">
@@ -10485,7 +10439,6 @@ TEMPLATES = {
     </tbody>
   </table>
   </div>
-  <p class="small text-muted mt-2 mb-0">勤務形態は本人が初回に選んだものです。「未設定」は勤務形態を聞く前の回答です。</p>
 </div></div>
 {% endif %}
 
@@ -10636,12 +10589,11 @@ TEMPLATES = {
 
       <div id="rq-from-monthly" class="rq-from d-none"></div>
       <div id="rq-pick">
-        <div class="rq-label"><span>業務名</span></div>
+        <div class="rq-label"><span>業務名</span>{{ C.tip("業務名が決まっていなくても始められます。AI が聞きながら決めます。") }}</div>
         <div class="rq-suggest d-none" id="rq-suggest"></div>
         <div class="rq-pick-row">
           <input type="text" class="form-control" id="rq-title" placeholder="分かる範囲で（例：日報の実績を集計表に転記する）" maxlength="200" aria-label="業務名">
         </div>
-        <div class="small text-muted mt-2">業務名が決まっていなくても始められます。AI が聞きながら決めます。</div>
         <div id="rq-dup-note" class="rq-dup d-none"></div>
       </div>
 
@@ -10763,6 +10715,24 @@ TEMPLATES = {
 # ===== 静的ファイル =====
 STATIC = {
     'app.js': r'''// 共通スクリプト
+(function () {
+  if (!window.bootstrap || !bootstrap.Tooltip) return;
+  new bootstrap.Tooltip(document.body, {
+    selector: "[data-tip]",
+    title: function (el) { return (el && el.getAttribute ? el : this).getAttribute("data-tip") || ""; },
+    delay: { show: 1000, hide: 100 },
+    trigger: "hover focus",
+    customClass: "tip-balloon",
+    container: "body",
+    placement: "top",
+    fallbackPlacements: ["bottom", "right", "left"]
+  });
+  document.addEventListener("inserted.bs.tooltip", function (e) {
+    var fs = document.fullscreenElement, inst = bootstrap.Tooltip.getInstance(e.target);
+    if (fs && inst && inst.tip && fs.contains(e.target) && !fs.contains(inst.tip)) fs.appendChild(inst.tip);
+  });
+})();
+
 document.addEventListener("DOMContentLoaded", function () {
   document.querySelectorAll("form[data-confirm]").forEach(function (form) {
     form.addEventListener("submit", function (e) {
@@ -12219,7 +12189,6 @@ body.flow-max-open { overflow: hidden; }
 .fe-buttons { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem; }
 .fe-sep { width: 1px; height: 1.4rem; background: #dee2e6; margin: 0 0.2rem; }
 .fe-status { font-size: 0.8rem; margin-left: 0.6rem; }
-.fe-hint { font-size: 0.78rem; color: #6c757d; margin-bottom: 0.3rem; }
 .fe-mode { display: none; font-size: 0.85rem; background: #e7f1ff; color: #052c65; border: 1px solid #b6d4fe; border-radius: 0.4rem; padding: 0.25rem 0.6rem; margin-bottom: 0.3rem; }
 .fe-container { position: relative; flex: 1; overflow: hidden; border: 1px solid #dee2e6; border-radius: 0.5rem; background: #fff;
   background-image: linear-gradient(#f1f3f5 1px, transparent 1px), linear-gradient(90deg, #f1f3f5 1px, transparent 1px); background-size: 24px 24px; cursor: grab; }
@@ -12828,6 +12797,12 @@ summary { transition: color 0.15s ease; }
 .mq-list { list-style: none; margin: 0; padding: 0; }
 .mq-list li { padding: 0.5rem 0; border-top: 1px solid var(--ui-line); font-size: 0.92rem; }
 .mq-list li:first-child { border-top: 0; padding-top: 0; }
+/* ---- 説明の吹き出し（ⓘ にマウスを1秒ほど置くと出る） ---- */
+.tip { display: inline-flex; align-items: center; margin-left: 0.3rem; color: var(--ui-text-2); font-size: 0.9rem; font-weight: 400; line-height: 1; vertical-align: middle; cursor: help; }
+.tip:hover, .tip:focus-visible { color: #4338ca; outline: none; }
+.section-title > .tip { margin-left: -0.3rem; }
+.tooltip.tip-balloon { --bs-tooltip-bg: #fff; --bs-tooltip-color: #1f2937; --bs-tooltip-max-width: 380px; --bs-tooltip-opacity: 1; --bs-tooltip-font-size: 0.8rem; --bs-tooltip-padding-x: 0.8rem; --bs-tooltip-padding-y: 0.6rem; --bs-tooltip-border-radius: 0.6rem; filter: drop-shadow(0 6px 16px rgba(15, 23, 42, 0.18)) drop-shadow(0 0 1px rgba(15, 23, 42, 0.45)); }
+.tooltip.tip-balloon .tooltip-inner { text-align: left; white-space: pre-line; line-height: 1.6; }
 /* ---- 設問エディタ ---- */
 .qe-q { border: 1px solid var(--ui-line); box-shadow: none; }
 .qe-handle { min-width: 2.4rem; }
@@ -13052,6 +13027,16 @@ summary { transition: color 0.15s ease; }
     b.type = "button";
     b.addEventListener("click", onClick);
     return b;
+  }
+  // 吹き出しの説明（テンプレートの C.tip と同じ形）
+  function tipIcon(text) {
+    var t = el("span", "tip");
+    t.tabIndex = 0;
+    t.setAttribute("role", "button");
+    t.setAttribute("aria-label", "説明");
+    t.dataset.tip = text;
+    t.appendChild(el("i", "bi bi-info-circle")).setAttribute("aria-hidden", "true");
+    return t;
   }
   function optionLabel(v) { return (O.frequency_hints && O.frequency_hints[v]) || v; }
   async function api(method, url, body) {
@@ -13326,8 +13311,7 @@ summary { transition: color 0.15s ease; }
     var box = $("rq-from-monthly");
     if (!CFG.monthly || !box) return;
     box.innerHTML = "";
-    box.appendChild(el("div", "rq-from-title", CFG.monthly.period_label + "の月次アンケートの続きです"));
-    box.appendChild(el("div", "small", "「なくしたい・自動化したい」と答えた業務を、1つずつ AI と整理します。基本情報と業務名はアンケートの答えから入力済みです。"));
+    box.appendChild(el("div", "rq-from-title", CFG.monthly.period_label + "の月次アンケートの続きです")).appendChild(tipIcon("「なくしたい・自動化したい」と答えた業務を、1つずつ AI と整理します。基本情報と業務名はアンケートの答えから入力済みです。"));
     var list = el("div", "rq-from-list");
     var done = doneNames();
     var current = conv ? normName(conv.monthlyName || conv.title) : "";
