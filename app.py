@@ -8378,7 +8378,7 @@ TEMPLATES = {
         <li class="nav-sep" aria-hidden="true"></li>
         <li class="nav-lock" title="管理者メニュー"><i class="bi bi-lock-fill"></i></li>
         <li class="nav-item"><a class="nav-link nav-link-admin {% if request.endpoint == 'main.index' %}active{% endif %}" href="{{ url_for('main.index') }}">ダッシュボード</a></li>
-        <li class="nav-item"><a class="nav-link nav-link-admin {% if bp == 'cases' %}active{% endif %}" href="{{ url_for('cases.index') }}">改善案件</a></li>
+        <li class="nav-item"><a class="nav-link nav-link-admin {% if bp == 'cases' %}active{% endif %}" href="{{ url_for('cases.index') }}">改善案件一覧</a></li>
         <li class="nav-item"><a class="nav-link nav-link-admin {% if bp == 'bizmap' %}active{% endif %}" href="{{ url_for('bizmap.index') }}">業務マップ</a></li>
         <li class="nav-item"><a class="nav-link nav-link-admin {% if request.endpoint in ('monthly.results', 'monthly.survey_admin') %}active{% endif %}" href="{{ url_for('monthly.results') }}">月次集計</a></li>
         <li class="nav-item"><a class="nav-link nav-link-admin {% if request.endpoint == 'admin.employees' %}active{% endif %}" href="{{ url_for('admin.employees') }}">人財一覧</a></li>
@@ -8988,7 +8988,7 @@ TEMPLATES = {
 {% block title %}{{ task.name }}{% endblock %}
 {% block content %}
 <nav aria-label="breadcrumb"><ol class="breadcrumb small mb-2">
-  <li class="breadcrumb-item"><a href="{{ url_for('cases.index') }}">改善案件</a></li>
+  <li class="breadcrumb-item"><a href="{{ url_for('cases.index') }}">改善案件一覧</a></li>
   <li class="breadcrumb-item active">{{ task.name }}</li>
 </ol></nav>
 

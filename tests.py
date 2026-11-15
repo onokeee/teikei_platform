@@ -811,6 +811,7 @@ def smoke_board():
     check(code == 200 and "デモデータを表示中" in html, "掲示板 200・デモデータを表示中の帯")
     code, html = page("/cases/")
     check("デモデータを表示中" in html and html.count('text-warning-emphasis">デモ</span>') == 26, "改善案件の一覧: 帯とデモの印")
+    check(">改善案件一覧</a></li>" in html and ">改善案件</a></li>" not in html, "ヘッダーのタブ名は「改善案件一覧」")
     code, html = page("/")
     check("デモデータを表示中" in html and 'text-warning-emphasis">デモ</span>' in html, "ダッシュボード: 帯と最近の業務にデモの印")
     monthly_card = html.split("月次アンケート（時系列）", 1)[1][:2500] if "月次アンケート（時系列）" in html else ""
