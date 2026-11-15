@@ -1909,7 +1909,8 @@ def smoke_login_monthly():
     html_mr = client.get("/monthly/results").data.decode("utf-8")
     check('line("自分で取り組みたい", d.self_only_rate, "#00a99d")' in html_mr and '"self_rate"' not in html_mr.split('id="monthly-chart"', 1)[-1][:400],
           "月次集計のグラフで「自動化したい」と「自分で取り組みたい」を別の色にする")
-    check("月次の進め方: 自分で取り組みたい" in html_e and "月次: 自分で取り組みたい" not in html_e, "人財一覧の意欲の分布の月次は、表と同じ「直近の進め方」で数える")
+    html_dash = client.get("/").data.decode("utf-8")
+    check("月次の進め方: 自分で取り組みたい" in html_dash and "月次: 自分で取り組みたい" not in html_dash, "ダッシュボードの意欲の分布の月次は「直近の進め方」で数える")
     check("改善チームに連絡してください" in app_module.EMP_NOT_FOUND, "見つからないユーザーIDの知らせに、初めての人の連絡先を添える")
     html_d = client.get("/").data.decode("utf-8")
     check(all(h.count('href="/monthly/results"') == 1 for h in (html, html_e, html_d)) and "月次集計へ" not in html_d,
@@ -2872,7 +2873,12 @@ def smoke_request():
         check(code == 200 and '<span class="badge text-bg-dark">夜勤</span>' in html and '<span class="badge text-bg-dark">昼勤・夜勤の両方</span>' in html, "改善案件の一覧に夜勤・両方のバッジが出る")
         code, html, r = get("/admin/employees")
         check(code == 200 and ">勤務形態</button>" in html and "交代勤務" in html, "人財一覧に勤務形態の列が出る")
-        check("登録: スキルを身につけながら、一緒にやってみたい" in html and "割ける時間" not in html and "発表・共有" not in html, "人財一覧の意欲は依頼の「一緒にやってみたい」から出し、集めなくなった列は出さない")
+        code, html_d, r = get("/")
+        board = html_d.split("意欲と技術", 1)[1].split("次のアクション", 1)[0] if "意欲と技術" in html_d else ""
+        check("登録: スキルを身につけながら、一緒にやってみたい" in board and "現在使える技術" in board and "学びたい技術" in board and "割ける時間" not in html_d + html and "発表・共有" not in html_d + html,
+              "ダッシュボードの「意欲と技術」に、依頼の「一緒にやってみたい」・月次の進め方・使える技術・学びたい技術の人数を出す（集めなくなった項目は出さない）")
+        check("登録: スキルを身につけながら、一緒にやってみたい" not in html and "現在使える技術" not in html and "progress-bar" not in html and "意欲（自動化アイテム登録と直近の月次）" not in html,
+              "人財一覧は一覧を見るだけにし、表の下の意欲・技術の集計カードは置かない（分析はダッシュボードにまとめる）")
         code, html, r = get("/bizmap/")
         check(code == 200 and "日報の集計" in html, "業務マップに新しい案件が載る")
         code, html, r = get("/cases/?wish=まずは相談したい")

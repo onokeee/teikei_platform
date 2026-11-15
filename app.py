@@ -5588,6 +5588,7 @@ def index():
     suggestions = _resolve_urls(suggest_actions())
     ai_suggestions = _json_column(Setting.get("ai_suggestions"), [])
     recent = Task.query.order_by(Task.created_at.desc()).limit(8).all()
+    _summary, wish_counts, have, learn, _stances = people_summary(dx_people())
     monthly_rows = monthly_summary()
     charts["monthly"] = {
         "labels": [r["label"] for r in monthly_rows],
@@ -5601,6 +5602,9 @@ def index():
         ai_suggestions=ai_suggestions,
         workplaces=workplace_stats(),
         recent=recent,
+        wish_counts=wish_counts,
+        have=have.most_common(),
+        learn=learn.most_common(),
         monthly_latest=monthly_rows[-1] if monthly_rows else None,
     )
 
@@ -6970,11 +6974,9 @@ def employees():
     rows, periods, stats, active = _member_payload()
     dx_all = dx_people(include_excluded=True)
     by_key = {p["key"][1]: p for p in dx_all if p["key"][0] == "id"}
-    excluded = {emp_key(r["emp"].emp_id) for r in rows if not r["emp"].active}
-    everyone = [p for p in dx_all if not (p["key"][0] == "id" and p["key"][1] in excluded)]
     for r in rows:
         r["dx"] = by_key.get(emp_key(r["emp"].emp_id))
-    _summary, wish_counts, have, learn, stance_options = people_summary(everyone)
+    stance_options = next((q["options"] for q in C.MONTHLY_CORE_QUESTIONS if q["key"] == "stance"), [])
     months = lambda key: [(x, period_label(x)) for x in sorted({r["dx"][key] for r in rows if r["dx"] and r["dx"][key]}, reverse=True)]
     names = [w.name for w in _workplaces()]
     used = {r["workplace"] for r in rows if r["workplace"]}
@@ -7002,9 +7004,6 @@ def employees():
         periods=periods,
         stats=stats,
         active_count=active,
-        wish_counts=wish_counts,
-        have=have.most_common(),
-        learn=learn.most_common(),
         stance_rank={opt: i for i, opt in enumerate(stance_options)},
         filter_options=filter_options,
         filter_selected=filter_selected,
@@ -7812,52 +7811,6 @@ TEMPLATES = {
   <p class="text-muted mb-0">まだ回答した人がいません。月次アンケートか「自動化アイテム登録」に回答すると、ここに載ります。</p>
   {% endif %}
 </div></div>
-
-<div class="row g-3 mb-3">
-  <div class="col-lg-4">
-    <div class="card h-100"><div class="card-body">
-      <h5 class="card-title">意欲（自動化アイテム登録と直近の月次）</h5>
-      {% set maxc = (wish_counts|map(attribute=1)|max) if wish_counts else 1 %}
-      {% for opt, n in wish_counts %}
-      <div class="d-flex align-items-center small mb-1">
-        <div style="width: 15rem">{{ opt }}</div>
-        <div class="progress flex-grow-1" style="height: 14px"><div class="progress-bar" style="width: {{ (n / (maxc or 1) * 100)|round }}%"></div></div>
-        <div style="width: 3rem" class="text-end">{{ n }} 人</div>
-      </div>
-      {% endfor %}
-    </div></div>
-  </div>
-  <div class="col-lg-4">
-    <div class="card h-100"><div class="card-body">
-      <h5 class="card-title">現在使える技術</h5>
-      {% set maxh = (have[0][1] if have else 1) %}
-      {% for skill, n in have %}
-      <div class="d-flex align-items-center small mb-1">
-        <div style="width: 9rem">{{ skill }}</div>
-        <div class="progress flex-grow-1" style="height: 14px"><div class="progress-bar" style="width: {{ (n / maxh * 100)|round }}%"></div></div>
-        <div style="width: 3rem" class="text-end">{{ n }} 人</div>
-      </div>
-      {% else %}
-      <p class="text-muted small mb-0">データなし</p>
-      {% endfor %}
-    </div></div>
-  </div>
-  <div class="col-lg-4">
-    <div class="card h-100"><div class="card-body">
-      <h5 class="card-title">学びたい技術</h5>
-      {% set maxl = (learn[0][1] if learn else 1) %}
-      {% for skill, n in learn %}
-      <div class="d-flex align-items-center small mb-1">
-        <div style="width: 9rem">{{ skill }}</div>
-        <div class="progress flex-grow-1" style="height: 14px"><div class="progress-bar bg-success" style="width: {{ (n / maxl * 100)|round }}%"></div></div>
-        <div style="width: 3rem" class="text-end">{{ n }} 人</div>
-      </div>
-      {% else %}
-      <p class="text-muted small mb-0">データなし</p>
-      {% endfor %}
-    </div></div>
-  </div>
-</div>
 
 {% endblock %}
 {% block scripts %}
@@ -9641,6 +9594,53 @@ TEMPLATES = {
     <div class="card h-100"><div class="card-body">
       <h5 class="card-title">困りごと（ムリ・ムダ・ムラ）</h5>
       <div class="chart-box"><canvas id="chart-pains"></canvas></div>
+    </div></div>
+  </div>
+</div>
+
+<h2 class="section-title"><span>意欲と技術{{ C.tip("回答した人（対象外を除く）で数えます。月次アンケートの改善の進め方は、直近" ~ C.STANCE_MONTHS ~ "か月の答えで数えます。") }}</span></h2>
+<div class="row g-3 mb-4">
+  <div class="col-lg-4">
+    <div class="card h-100"><div class="card-body">
+      <h5 class="card-title">意欲（自動化アイテム登録と直近の月次）</h5>
+      {% set maxc = (wish_counts|map(attribute=1)|max) if wish_counts else 1 %}
+      {% for opt, n in wish_counts %}
+      <div class="d-flex align-items-center small mb-1">
+        <div style="width: 15rem">{{ opt }}</div>
+        <div class="progress flex-grow-1" style="height: 14px"><div class="progress-bar" style="width: {{ (n / (maxc or 1) * 100)|round }}%"></div></div>
+        <div style="width: 3rem" class="text-end">{{ n }} 人</div>
+      </div>
+      {% endfor %}
+    </div></div>
+  </div>
+  <div class="col-lg-4">
+    <div class="card h-100"><div class="card-body">
+      <h5 class="card-title">現在使える技術</h5>
+      {% set maxh = (have[0][1] if have else 1) %}
+      {% for skill, n in have %}
+      <div class="d-flex align-items-center small mb-1">
+        <div style="width: 9rem">{{ skill }}</div>
+        <div class="progress flex-grow-1" style="height: 14px"><div class="progress-bar" style="width: {{ (n / maxh * 100)|round }}%"></div></div>
+        <div style="width: 3rem" class="text-end">{{ n }} 人</div>
+      </div>
+      {% else %}
+      <p class="text-muted small mb-0">データなし</p>
+      {% endfor %}
+    </div></div>
+  </div>
+  <div class="col-lg-4">
+    <div class="card h-100"><div class="card-body">
+      <h5 class="card-title">学びたい技術</h5>
+      {% set maxl = (learn[0][1] if learn else 1) %}
+      {% for skill, n in learn %}
+      <div class="d-flex align-items-center small mb-1">
+        <div style="width: 9rem">{{ skill }}</div>
+        <div class="progress flex-grow-1" style="height: 14px"><div class="progress-bar bg-success" style="width: {{ (n / maxl * 100)|round }}%"></div></div>
+        <div style="width: 3rem" class="text-end">{{ n }} 人</div>
+      </div>
+      {% else %}
+      <p class="text-muted small mb-0">データなし</p>
+      {% endfor %}
     </div></div>
   </div>
 </div>
