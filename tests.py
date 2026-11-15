@@ -62,6 +62,21 @@ def smoke_bizmap_edit():
         into = lambda sid: sorted(fd.nodes[a]["text"] for (a, b), e in fd.edges.items() if b == sid and e["type"] == "info")
         check(into("st1") == ["PMK", "ライン管理"] and into("st2") == ["URA", "統合保全システム"] and not any("、" in n["text"] for n in fd.nodes.values() if n["cls"] == "source"),
               f"手順の取り出し元に「、」で並べた名前は、流れ図で1つずつ別の箱にする: {into('st1')} {into('st2')}")
+        labels = lambda g, sid: {g.nodes[a]["text"]: e["label"] for (a, b), e in g.edges.items() if b == sid and e["type"] == "info"}
+        check(labels(fd, "st1") == {"PMK": "トラブル装置の対応状況", "ライン管理": "生産状況"} and labels(fd, "st2") == {"URA": "", "統合保全システム": ""},
+              f"どの取り出し元からどの情報を受け取るかを線に書く（手順の文の「〇〇から△△」から読む）: {labels(fd, 'st1')}")
+        paired = app_module.build_steps_flow([{"no": 1, "action": "情報を集める", "system": "PMK、ライン管理", "input": "トラブル装置の対応状況、生産状況", "how_from": "システムで見る"}], "製造1課")
+        rendered = paired.render()
+        check(labels(paired, "st1") == {"PMK": "トラブル装置の対応状況／システム（登録・参照）", "ライン管理": "生産状況／システム（登録・参照）"} and "トラブル装置の対応状況、生産状況" not in rendered and '"生産状況／システム（登録・参照）"' in rendered,
+              f"元になる情報を取り出し元と同じ順に並べていれば、その対応で線に書く（受け取り方も添える）: {labels(paired, 'st1')}")
+        check(app_module.source_infos(["生産管理システム"], "前日の実績", "生産管理システムから前日の実績を出す") == {} and app_module.source_infos(["A", "B"], "x", "AとBを見る") == {},
+              "取り出し元が1つのとき・対応が読めないときは、線に情報を書かない（いままでどおり）")
+        t_multi = app_module.Task(id=99901, name="朝会資料準備", steps_json=json.dumps(multi, ensure_ascii=False))
+        with app.test_request_context():
+            gm = app_module.build_info_flow([t_multi])
+        into_t = {gm.nodes[a]["text"]: e["label"] for (a, b), e in gm.edges.items() if b == "t99901" and e["type"] == "info"}
+        check(into_t.get("PMK") == "トラブル装置の対応状況" and into_t.get("ライン管理") == "生産状況" and into_t.get("URA") == "",
+              f"業務マップでも取り出し元を分け、受け取る情報を線に書く: {into_t}")
         dg = app_module.Diagram()
         dg.node("s_a", "日次実績集計表（Excel）", "source")
         dg.node("s_b", "生産管理システム", "source")

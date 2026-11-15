@@ -2214,8 +2214,10 @@ class Diagram:
         elif not old["method"] and new["method"]:
             old.update(method=new["method"], show_method=new["show_method"])
 
-    def info_edge(self, a, b, method, info_node=None, inferred=False):
-        self.edge(a, b, "info", method=method, show_method=show_method_for(method, self.nodes[info_node or a]["medium"]), inferred=inferred)
+    def info_edge(self, a, b, method, info_node=None, inferred=False, note=""):
+        show = show_method_for(method, self.nodes[info_node or a]["medium"])
+        label = "／".join(v for v in ((note or "").strip(), vocab_label("methods", method) if show and method else "") if v) if (note or "").strip() else ""
+        self.edge(a, b, "info", label=label, method=method, show_method=show, inferred=inferred)
 
     def click(self, node_id, url, tooltip=""):
         self.clicks[node_id] = (url, tooltip)
@@ -2940,6 +2942,28 @@ def _match_tasks(text, tasks, exclude=None, limit=3):
 _SPLIT_NAMES_RX = re.compile(r"[、,，／/\n]+")
 
 
+def source_infos(names, inp, action):
+    if len(names) < 2:
+        return {}
+    items = _names(inp)
+    if len(items) == len(names):
+        return dict(zip(names, items))
+    text, out = action or "", {}
+    for n in names:
+        k = text.find(n + "から")
+        if k < 0:
+            continue
+        rest = text[k + len(n) + 2:].lstrip("、, ")
+        for other in names:
+            j = rest.find(other + "から") if other != n else -1
+            if j >= 0:
+                rest = rest[:j]
+        rest = re.split(r"[、。,，を]", rest)[0].strip()
+        rest = re.sub(r"(と|や|および|及び)$", "", rest).strip()
+        if rest and len(rest) <= 30:
+            out[n] = rest
+    return out
+
 def _names(value, dots=False):
     names = [v.strip() for v in _SPLIT_NAMES_RX.split(value or "") if v.strip()]
     if not dots:
@@ -3014,7 +3038,7 @@ def _raw_task_sources(t):
     items = []
     written = written_sources(t)
 
-    def add(name, hint=None, method="", shared=True, exact=False, fixed=False):
+    def add(name, hint=None, method="", shared=True, exact=False, fixed=False, info=""):
         name = (name or "").strip()
         if not name:
             return
@@ -3024,8 +3048,10 @@ def _raw_task_sources(t):
                 same = same_thing(name, it["name"]) if fixed or it["fixed"] else same_name(name, it["name"], 2)
             if same:
                 it["method"] = it["method"] or method
+                if info and info not in it["info"]:
+                    it["info"] = "・".join(v for v in (it["info"], info) if v)
                 return
-        items.append({"name": name, "hint": hint, "method": method or "", "shared": shared, "fixed": fixed})
+        items.append({"name": name, "hint": hint, "method": method or "", "shared": shared, "fixed": fixed, "info": info or ""})
 
     steps = t.steps
     made = _task_outputs(t, steps)
@@ -3042,8 +3068,9 @@ def _raw_task_sources(t):
                 add(inp, hint=_method_medium(m), method=m)
             continue
         names = [n for n in _names(system) if field_role(n)[0] != "line" and not internal(n) and not _is_destination(n, action)]
+        notes = source_infos(_names(system), inp, action)
         for n in names:
-            add(n, method=field_role(n)[1] or recv)
+            add(n, method=field_role(n)[1] or recv, info=notes.get(n, ""))
         if not names and inp and not internal(inp) and not to:
             add(inp, method=recv)
     if not items:
@@ -3277,7 +3304,7 @@ def _add_task_info(d, t, tid, outs=None, dups=None, frame=None):
             continue
         sid = nid("s", s["name"]) if s["shared"] else nid("s", f"{t.id}:{s['name']}")
         node = d.node(sid, s["name"], "source", hint=s["hint"])
-        d.info_edge(node, tid, s["method"])
+        d.info_edge(node, tid, s["method"], note=s.get("info", ""))
     for dst in task_destinations(t):
         node = d.node(nid("s", dst["name"]), dst["name"], "source")
         d.info_edge(tid, node, dst["method"], info_node=node)
@@ -3449,6 +3476,7 @@ def build_steps_flow(steps, own_wp="", purpose=""):
             d.info_edge(node, sid, m)
         else:
             names = _names(system) if system and role != "line" else []
+            notes = source_infos(names, inp, action)
             sys_nodes, dests = [], []
             for name in names:
                 n_role, n_m = field_role(name)
@@ -3460,12 +3488,12 @@ def build_steps_flow(steps, own_wp="", purpose=""):
                     d.info_edge(sid, node, n_m, info_node=node)
                 else:
                     node = find(name) or info(name)
-                    d.info_edge(node, sid, n_m or recv)
+                    d.info_edge(node, sid, n_m or recv, note=notes.get(name, ""))
                 sys_nodes.append(node)
                 dests.append(bool(dest))
             if src and src not in sys_nodes:
                 d.info_edge(src, sid, recv)
-            elif inp and not src and not to and (not sys_nodes or all(dests)) and not any(same_name(inp, n, 2) for n in names):
+            elif inp and not src and not to and (not sys_nodes or all(dests)) and not notes and not any(same_name(inp, n, 2) for n in names):
                 node = info(inp, hint=_method_medium(recv))
                 d.info_edge(node, sid, recv)
         if prev:
@@ -3956,7 +3984,7 @@ INTAKE_PROMPT = """あなたは製造部「PC定型業務ゼロ化プロジェ�
 state は次の形（必ず全部のキーを返す。不明は "" か [] か null）:
 {
   "title": "<業務名。『〜を〜する』で短く>",
-  "steps": [{"no": 1, "action": "<その手順でやること>", "system": "<使うシステム・ファイル・ツール名。なければ空>", "input": "<元になる情報。なければ空>", "output": "<その手順でできるもの。なければ空>", "to": "<渡す相手（Gr・役割・役職・部署。氏名は書かない）。なければ空>", "how": "<to がある手順の渡し方（メール・手渡し・共有フォルダなど）。なければ空>", "use": "<渡す相手がそれを何に使うか。分からなければ空>", "how_from": "<この手順で情報を受け取る方法（メールで届く・PHSで聞く・システムで見るなど）。なければ空>"}],
+  "steps": [{"no": 1, "action": "<その手順でやること>", "system": "<使うシステム・ファイル・ツール名、または情報をもらう相手（所属・部署）。複数あるときは「、」で並べる。なければ空>", "input": "<元になる情報。system が複数のときは、それぞれから受け取る情報を system と同じ順に「、」で並べる（例: system「PMK、ライン管理」→ input「トラブル装置の対応状況、生産状況」）。なければ空>", "output": "<その手順でできるもの。なければ空>", "to": "<渡す相手（Gr・役割・役職・部署。氏名は書かない）。なければ空>", "how": "<to がある手順の渡し方（メール・手渡し・共有フォルダなど）。なければ空>", "use": "<渡す相手がそれを何に使うか。分からなければ空>", "how_from": "<この手順で情報を受け取る方法（メールで届く・PHSで聞く・システムで見るなど）。なければ空>"}],
   "sources": ["<情報の取り出し元（システム名・帳票名・人）>"],
   "outputs": ["<最終的にできるもの>"],
   "recipients": ["<最終的に渡す相手。人・部署を1つずつ>"],
