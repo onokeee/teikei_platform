@@ -1752,8 +1752,15 @@ def smoke_login_monthly():
     check(code == 200 and "DX人財情報" not in html and "人材育成" not in html and "田中 一郎" in html and "E777" in html, "対象者一覧（DX人財情報をまとめた）: 自動化を検討の回答者と、月次だけ答えた人が並ぶ")
     check("自分で改善したい" in html and "直近の月次で「自分で・一緒に取り組みたい」" in html and all(f">{h}</button>" in html for h in ("Gr・役割", "勤務形態", "意欲（自動化アイテム登録）", "月次：改善の進め方", "使える技術", "学びたい技術")),
           "対象者一覧: DX人財情報の集計カードと、Gr・役割・勤務形態・意欲・進め方・技術の列")
-    check('id="member-table"' in html and 'data-filter="wp"' in html and 'data-filter="m0"' in html and "function applySort()" in html and "function applyFilter()" in html and 'aria-sort="none"' in html,
-          "対象者一覧: 列名を押して並べ替え、見出しの下の欄で列ごとに絞り込める")
+    check('id="member-table"' in html and 'data-filter="wp"' in html and 'id="member-month"' in html and 'id="member-month-st"' in html and 'data-filter="m0"' not in html
+          and "function applySort()" in html and "function applyFilter()" in html and 'aria-sort="none"' in html and "monthOk(tr)" in html,
+          "対象者一覧: 列名を押して並べ替え、見出しの下の欄で列ごとに絞り込める（月の回答は表の上の1か所で絞り込む）")
+    check("ユーザーIDの照会（LDAP）" not in html and "回答前に対象者へ入れる" not in html and "test-btn" not in html and "/admin/employees/import" not in html and "/admin/employees/add" not in html
+          and client.post("/admin/employees/add", data={"emp_id": "Z001", "name": "x"}).status_code == 404 and client.post("/admin/employees/import").status_code == 404,
+          "対象者一覧に LDAP の照会テスト・手での追加・CSV取込はない")
+    css = client.get("/static/style.css").data.decode("utf-8")
+    check(".member-table th, .member-table td { white-space: normal; }" in css and ".member-table .member-old { display: none; }" in css and "min-width: 0; width: 100%;" in css and "前の月も表示" not in html,
+          "対象者一覧は横にはみ出さないよう折り返し、絞り込みの欄を細くし、月は新しい12か月だけ出す（デモは4か月なので切り替えは出ない）")
     r = client.get("/people/", query_string={"wish": "positive"})
     check(r.status_code == 302 and "/admin/employees" in r.headers["Location"] and "wish=positive" in r.headers["Location"], "前の DX人財情報のアドレスは対象者一覧へ送る（絞り込みを引き継ぐ）")
     html = client.get(r.headers["Location"]).data.decode("utf-8")
@@ -1766,37 +1773,20 @@ def smoke_login_monthly():
     check('<option value="positive" selected>' in html and positive and all('data-positive="1"' in row_id(e) for e in positive), "自分で改善したい人の絞り込みを選んだ状態で開き、その人の行に印が付く")
     wish_yes = 'data-wish="スキルを身につけながら、一緒にやってみたい"'
     check(yes and others and all(wish_yes in row_id(e) for e in yes) and not any(wish_yes in row_id(e) for e in others), f"意欲（依頼で選んだもの）の列で絞り込める（一緒に {len(yes)} 人／それ以外 {len(others)} 人）")
-    r = client.post("/admin/employees/add", data={"emp_id": "N001", "name": "新規 社員", "department": "", "email": "", "workplace_id": "1", "work_pattern": "交代勤務"})
-    with app.app_context():
-        e = Employee.query.filter_by(emp_id="N001").first()
-        check(r.status_code == 302 and e is not None and e.work_pattern == "交代勤務", "社員の手動追加で勤務形態を登録できる")
     with app.app_context():
         used = next(x["workplace"] for x in app_module.member_rows() if x["workplace"])
         used_id = app_module.Workplace.query.filter_by(name=used).first().id
     html = client.get("/people/", query_string={"workplace_id": used_id}, follow_redirects=True).data.decode("utf-8")
     check(f'<option value="{used}" selected>' in html, f"前のアドレスの Gr・役割の絞り込みも引き継ぐ（{used}）")
 
-    # ---- 社員IDの表記ゆれ（全角・小文字）は同じ人。回答のある人は削除せず対象外に ----
+    # ---- 回答のある人は削除せず対象外に（まだ回答のない以前の行だけ削除できる） ----
     with app.app_context():
-        n_before = Employee.query.count()
-    r = client.post("/admin/employees/add", data={"emp_id": "ｄｅｍｏ－００９", "name": "小林 直樹", "workplace_id": "1", "work_pattern": ""}, follow_redirects=True)
-    csv_body = "社員ID,氏名\n" + "ｄｅｍｏ－０１０ ,加藤 恵\n" + "n001,新規 社員\n"
-    r2 = client.post("/admin/employees/import", data={"file": (io.BytesIO(csv_body.encode("utf-8")), "emp.csv")}, content_type="multipart/form-data", follow_redirects=True)
-    with app.app_context():
-        check(Employee.query.count() == n_before and "社員情報を更新しました" in r.data.decode("utf-8") and "追加 0 人、更新 2 人" in r2.data.decode("utf-8") and Employee.query.filter_by(emp_id="ｄｅｍｏ－００９").first() is None,
-              "P6: 手動追加・CSV取込の社員IDは全角を半角にし、大文字・小文字の違いも同じ人として上書きする")
-        n001 = Employee.query.filter_by(emp_id="N001").first().id
+        db.session.add(Employee(emp_id="N001", name="新規 社員", source="manual", workplace_id=1, work_pattern="交代勤務"))
         db.session.add(Employee(emp_id="R001", name="保存だけ", source="manual"))
         db.session.add(Respondent(emp_id="r001", name="", workplace_id=1, work_pattern="普通勤務"))
         db.session.commit()
+        n001 = Employee.query.filter_by(emp_id="N001").first().id
         r001 = Employee.query.filter_by(emp_id="R001").first().id
-    r3 = client.post("/admin/employees/import", data={"file": (io.BytesIO("ユーザーID,氏名,Gr・役割\nN002,新規 二郎,製造1課\n".encode("utf-8")), "emp.csv")},
-                     content_type="multipart/form-data", follow_redirects=True)
-    with app.app_context():
-        n002 = Employee.query.filter_by(emp_id="N002").first()
-        check(n002 is not None and n002.name == "新規 二郎" and "追加 1 人" in r3.data.decode("utf-8"), "CSV取込は見出しが「ユーザーID」でも読む（「社員ID」も読む）")
-        n002 = n002.id if n002 is not None else 0
-    client.post(f"/admin/employees/{n002}/delete")
     code, html, r = get("/admin/employees")
     check(f"/admin/employees/{n001}/delete" in html and f"/admin/employees/{e009}/delete" not in html and f"/admin/employees/{r001}/delete" not in html, "P10: 対象者一覧の削除ボタンは、まだ回答も登録もない人だけに出す")
     html_x = client.post(f"/admin/employees/{e009}/delete", follow_redirects=True).data.decode("utf-8")

@@ -133,18 +133,6 @@ def _lookup_ldap3(emp_id):
         log.warning("LDAP 直接照会に失敗しました: %s", e)
         return None
 
-def status_text():
-    if api_config()["url"]:
-        return f"社内 LDAP API 連携 有効（{api_config()['url']}）。照会結果は社員マスタにも保存します"
-    if ldap_config()["server"]:
-        try:
-            import ldap3
-
-            return f"LDAP サーバー直接照会 有効（{ldap_config()['server']}）"
-        except ImportError:
-            return "LDAP_SERVER が設定されていますが ldap3 が未インストールです（pip install ldap3）"
-    return "LDAP 未設定（社員マスタのみで照会。管理 → 社員マスタ から CSV 取込できます）"
-
 def lookup_directory(emp_id):
     emp_id = (emp_id or "").strip()
     if not emp_id:

@@ -817,20 +817,10 @@ def init_id_seq():
     db.session.commit()
 
 # ===== ユーザーID照会の控え（ldap_auth の結果を employees に残し、足りない氏名を補う） =====
-ldap_status_text = ldap_auth.status_text
 EMP_NOT_FOUND = "このユーザーIDは見つかりません。IDを確かめてください"
 EMP_EXCLUDED = "このユーザーIDは対象外になっています。管理者に連絡してください"
 PREFILL_NOTE = "前回の回答のGr・役割と勤務形態を入れました。変わっていたら、今の所属・勤務形態に合わせてプルダウンで選び直してください。"
 
-
-def workplace_for(department):
-    department = (department or "").strip()
-    if not department:
-        return None
-    for w in Workplace.query.all():
-        if w.name == department or w.name in department or department in w.name:
-            return w
-    return None
 
 def norm_emp_id(value):
     return unicodedata.normalize("NFKC", str(value or "")).strip()
@@ -6984,45 +6974,8 @@ def employees():
         skill_options=sorted({x for p in dx_all for x in p["skills"]}),
         learn_options=sorted({x for p in dx_all for x in p["learn"]}),
         initial={"wish": (request.args.get("wish") or "").strip(), "wp": wp.name if wp is not None else "", "learn": (request.args.get("learn") or "").strip()},
-        ldap_status=ldap_status_text(),
-        workplaces=_workplaces(),
         demo_real=demo_ids_with_real_data(),
     )
-
-def _upsert_employee(emp_id, name, department, email, workplace_id=None, source="manual", work_pattern=None):
-    emp = find_employee(emp_id)
-    created = emp is None
-    if emp is None:
-        emp = Employee(emp_id=emp_id, name=name)
-        db.session.add(emp)
-    emp.name = name or emp.name
-    emp.department = department if department is not None else emp.department
-    emp.email = email if email is not None else emp.email
-    emp.source = source
-    if work_pattern in C.WORK_PATTERNS:
-        emp.work_pattern = work_pattern
-    if workplace_id:
-        emp.workplace_id = workplace_id
-    else:
-        wp = workplace_for(emp.department)
-        if wp is not None:
-            emp.workplace_id = wp.id
-    return created
-
-@bp_admin.post("/employees/add")
-def add_employee():
-    emp_id = norm_emp_id(request.form.get("emp_id"))
-    name = (request.form.get("name") or "").strip()
-    if not emp_id or not name:
-        flash("ユーザーIDと氏名を入力してください。", "danger")
-        return redirect(url_for("admin.employees"))
-    created = _upsert_employee(
-        emp_id, name, (request.form.get("department") or "").strip(), (request.form.get("email") or "").strip(),
-        request.form.get("workplace_id", type=int), "manual", (request.form.get("work_pattern") or "").strip() or None,
-    )
-    db.session.commit()
-    flash("社員を追加しました。" if created else "社員情報を更新しました。", "success")
-    return redirect(url_for("admin.employees"))
 
 @bp_admin.post("/employees/<int:employee_id>/toggle")
 def toggle_employee(employee_id):
@@ -7047,64 +7000,6 @@ def delete_employee(employee_id):
     db.session.delete(e)
     db.session.commit()
     flash("社員を削除しました。", "info")
-    return redirect(url_for("admin.employees"))
-
-_HEADER_ALIASES = {
-    "emp_id": ["ユーザーid", "ユーザid", "社員id", "社員番号", "社員コード", "user_id", "userid", "emp_id", "employee_id", "employeeid", "id"],
-    "name": ["氏名", "名前", "name", "displayname"],
-    "department": ["所属", "部署", "gr・役割", "職場", "department", "dept"],
-    "email": ["メール", "メールアドレス", "email", "mail", "e-mail"],
-    "work_pattern": ["勤務形態", "勤務", "work_pattern", "shift"],
-}
-
-
-def _detect_columns(fieldnames):
-    mapping = {}
-    for key, aliases in _HEADER_ALIASES.items():
-        for f in fieldnames or []:
-            if (f or "").strip().lower().replace(" ", "") in aliases:
-                mapping[key] = f
-                break
-    return mapping
-
-@bp_admin.post("/employees/import")
-def import_employees():
-    file = request.files.get("file")
-    if file is None or not file.filename:
-        flash("CSVファイルを選択してください。", "danger")
-        return redirect(url_for("admin.employees"))
-    raw = file.read()
-    text = None
-    for enc in ("utf-8-sig", "cp932"):
-        try:
-            text = raw.decode(enc)
-            break
-        except UnicodeDecodeError:
-            pass
-    if text is None:
-        flash("文字コードを判別できませんでした（UTF-8 または Shift_JIS で保存してください）。", "danger")
-        return redirect(url_for("admin.employees"))
-    reader = csv.DictReader(io.StringIO(text))
-    cols = _detect_columns(reader.fieldnames)
-    if "emp_id" not in cols or "name" not in cols:
-        flash("見出し行に「ユーザーID」と「氏名」が必要です。", "danger")
-        return redirect(url_for("admin.employees"))
-
-    def cell(row, key):
-        return (row.get(cols[key]) or "").strip() if key in cols else None
-
-    created = updated = 0
-    for row in reader:
-        emp_id = norm_emp_id(row.get(cols["emp_id"]))
-        name = cell(row, "name")
-        if not emp_id or not name:
-            continue
-        if _upsert_employee(emp_id, name, cell(row, "department"), cell(row, "email"), None, "csv", cell(row, "work_pattern")):
-            created += 1
-        else:
-            updated += 1
-    db.session.commit()
-    flash(f"社員マスタを取り込みました（追加 {created} 人、更新 {updated} 人）。", "success")
     return redirect(url_for("admin.employees"))
 
 @bp_admin.route("/employees/export.csv")
@@ -7620,11 +7515,18 @@ TEMPLATES = {
 <div class="card mb-3"><div class="card-body">
   <div class="d-flex flex-wrap justify-content-between align-items-baseline gap-2 mb-2">
     <h5 class="card-title mb-0">対象者 <span id="member-active">{{ active_count }}</span> 人 <span class="small text-muted fw-normal">（対象外 <span id="member-excluded">{{ rows|length - active_count }}</span> 人）</span></h5>
-    <span class="small text-muted"><i class="bi bi-check-lg member-yes"></i> その月に回答　<span class="member-out">対象外</span> 月末時点で対象外　<span class="member-before">－</span> 対象者になる前の月（初めて回答した月か、ここで追加した月より前）。「対象外」と「－」の月は分母に入りません</span>
+    <span class="small text-muted"><i class="bi bi-check-lg member-yes"></i> その月に回答　<span class="member-out">対象外</span> 月末時点で対象外　<span class="member-before">－</span> 対象者になる前の月（初めて回答した月より前）。「対象外」と「－」の月は分母に入りません</span>
   </div>
   {% if rows %}
+  {% set old_n = [periods|length - 12, 0]|max %}
   <div class="d-flex flex-wrap align-items-center gap-3 mb-2 small">
     <span class="text-muted">列名を押すと並べ替え（もう一度押すと逆順）、見出しの下の欄で列ごとに絞り込めます。</span>
+    <span class="d-inline-flex align-items-center gap-1 member-monthfilter">
+      <label for="member-month" class="text-muted text-nowrap mb-0">月の回答で絞り込む</label>
+      <select id="member-month" class="form-select form-select-sm"><option value="">月</option>{% for p in periods %}<option value="{{ loop.index0 }}">{{ p[:4] }}年{{ p[5:]|int }}月</option>{% endfor %}</select>
+      <select id="member-month-st" class="form-select form-select-sm" aria-label="その月の回答"><option value="">すべて</option><option value="yes">回答</option><option value="no">未回答</option><option value="out">対象外</option><option value="before">対象前</option></select>
+    </span>
+    {% if old_n %}<button type="button" class="btn btn-link btn-sm p-0" id="member-old-toggle" data-label="前の月も表示（{{ old_n }} か月）">前の月も表示（{{ old_n }} か月）</button>{% endif %}
     <span id="member-shown" class="fw-semibold"></span>
     <button type="button" class="btn btn-link btn-sm p-0 d-none" id="member-clear">絞り込みを解除</button>
   </div>
@@ -7642,7 +7544,7 @@ TEMPLATES = {
       <th data-col="skills" aria-sort="none"><button type="button" class="member-sort">使える技術</button></th>
       <th data-col="learn" aria-sort="none"><button type="button" class="member-sort">学びたい技術</button></th>
       <th data-col="tasks" aria-sort="none"><button type="button" class="member-sort">自動化アイテム</button></th>
-      {% for p in periods %}<th class="text-center member-month" data-col="m{{ loop.index0 }}" aria-sort="none"><button type="button" class="member-sort">{{ p[:4] }}<br>{{ p[5:]|int }}月</button></th>{% endfor %}
+      {% for p in periods %}<th class="text-center member-month{% if loop.index0 < old_n %} member-old{% endif %}" data-col="m{{ loop.index0 }}" aria-sort="none"><button type="button" class="member-sort">{{ p[:4] }}<br>{{ p[5:]|int }}月</button></th>{% endfor %}
     </tr>
     <tr class="member-filters">
       <th><select class="form-select form-select-sm" data-filter="excluded" aria-label="対象外で絞り込む"><option value="">すべて</option><option value="1">対象外</option><option value="0">対象</option></select></th>
@@ -7655,7 +7557,7 @@ TEMPLATES = {
       <th><select class="form-select form-select-sm" data-filter="skills" aria-label="使える技術で絞り込む"><option value="">すべて</option>{% for s in skill_options %}<option value="{{ s }}">{{ s }}</option>{% endfor %}<option value="-">（なし）</option></select></th>
       <th><select class="form-select form-select-sm" data-filter="learn" aria-label="学びたい技術で絞り込む"><option value="">すべて</option>{% for s in learn_options %}<option value="{{ s }}" {% if initial.learn == s %}selected{% endif %}>{{ s }}</option>{% endfor %}<option value="-">（なし）</option></select></th>
       <th><select class="form-select form-select-sm" data-filter="tasks" aria-label="自動化アイテムで絞り込む"><option value="">すべて</option><option value="0">0 件</option><option value="1">1 件以上</option><option value="{{ C.BUILD_STAGE_SELF }}">{{ C.BUILD_STAGE_SELF }}あり</option><option value="希望">希望あり</option></select></th>
-      {% for p in periods %}<th><select class="form-select form-select-sm" data-filter="m{{ loop.index0 }}" aria-label="{{ p[:4] }}年{{ p[5:]|int }}月で絞り込む"><option value="">すべて</option><option value="yes">回答</option><option value="no">未回答</option><option value="out">対象外</option><option value="before">対象前</option></select></th>{% endfor %}
+      {% for p in periods %}<th{% if loop.index0 < old_n %} class="member-old"{% endif %}></th>{% endfor %}
     </tr>
     </thead>
     <tbody>
@@ -7691,13 +7593,13 @@ TEMPLATES = {
         <a href="{{ url_for('survey.start', emp=d.emp_id, src='monthly', m=d.monthly_wants_id) }}">自動化アイテム登録で流れを整理する</a>
         {% endif %}{% endif %}
       </td>
-      {% for p, st in r.cells %}<td class="text-center member-cell" data-st="{{ st }}"{% if p in r.answered %} data-ans="1"{% endif %}>{{ member_mark(st, p in r.answered) }}</td>{% endfor %}
+      {% for p, st in r.cells %}<td class="text-center member-cell{% if loop.index0 < old_n %} member-old{% endif %}" data-st="{{ st }}"{% if p in r.answered %} data-ans="1"{% endif %}>{{ member_mark(st, p in r.answered) }}</td>{% endfor %}
     </tr>
     {% endfor %}
     </tbody>
     <tfoot><tr>
       <th colspan="10" class="text-end">回答 ／ 対象（回答率）<span class="d-block fw-normal text-muted" id="member-stat-note"></span></th>
-      {% for p in periods %}{% set st = stats[p] %}<td class="text-center member-stat" data-period="{{ p }}" data-m="{{ loop.index0 }}">{{ st.answered }}／{{ st.members }}{% if st.rate is not none %}<br>{{ '%.0f'|format(st.rate) }}%{% endif %}</td>{% endfor %}
+      {% for p in periods %}{% set st = stats[p] %}<td class="text-center member-stat{% if loop.index0 < old_n %} member-old{% endif %}" data-period="{{ p }}" data-m="{{ loop.index0 }}">{{ st.answered }}／{{ st.members }}{% if st.rate is not none %}<br>{{ '%.0f'|format(st.rate) }}%{% endif %}</td>{% endfor %}
     </tr></tfoot>
   </table>
   </div>
@@ -7753,54 +7655,9 @@ TEMPLATES = {
   </div>
 </div>
 
-<div class="row g-3 mb-3">
-  <div class="col-lg-6">
-    <div class="card h-100"><div class="card-body">
-      <h5 class="card-title">ユーザーIDの照会（LDAP）</h5>
-      <p class="mb-2">{{ ldap_status }}</p>
-      <p class="small text-muted mb-0">回答するときは、ユーザーIDが存在するかだけを確かめます。<code>config.py</code> に <code>LDAP_API_URL</code>（例: <code>http://ldap-api.local/employees/{id}</code>）と、レスポンスの項目名 <code>LDAP_API_FIELD_NAME</code> などを設定します（README 参照）。</p>
-      <form class="d-flex gap-2 mt-3" onsubmit="return false">
-        <input type="text" id="test-emp" class="form-control form-control-sm" placeholder="ユーザーIDで照会テスト">
-        <button type="button" class="btn btn-sm btn-outline-primary text-nowrap" id="test-btn">照会</button>
-      </form>
-      <div id="test-msg" class="form-text"></div>
-    </div></div>
-  </div>
-  <div class="col-lg-6">
-    <div class="card h-100"><div class="card-body">
-      <h5 class="card-title">回答前に対象者へ入れる（任意）</h5>
-      <p class="small text-muted">まだ回答していない人も分母に入れたいときだけ使います。</p>
-      <form method="post" action="{{ url_for('admin.add_employee') }}" class="row g-2 align-items-end">
-        <div class="col-6 col-md-3"><label class="form-label small mb-0">ユーザーID</label><input type="text" name="emp_id" class="form-control form-control-sm" required></div>
-        <div class="col-6 col-md-3"><label class="form-label small mb-0">氏名</label><input type="text" name="name" class="form-control form-control-sm" required></div>
-        <div class="col-6 col-md-3"><label class="form-label small mb-0">Gr・役割</label>
-          <select name="workplace_id" class="form-select form-select-sm"><option value="">（未設定）</option>{% for w in workplaces %}<option value="{{ w.id }}">{{ w.name }}</option>{% endfor %}</select></div>
-        <div class="col-6 col-md-3"><label class="form-label small mb-0">勤務形態</label>
-          <select name="work_pattern" class="form-select form-select-sm"><option value="">（本人が選ぶ）</option>{% for w in C.WORK_PATTERNS %}<option value="{{ w }}">{{ w }}</option>{% endfor %}</select></div>
-        <div class="col-12"><button class="btn btn-sm btn-primary">追加</button></div>
-      </form>
-      <form method="post" action="{{ url_for('admin.import_employees') }}" enctype="multipart/form-data" class="d-flex gap-2 align-items-center mt-3">
-        <input type="file" name="file" accept=".csv,text/csv" class="form-control form-control-sm" required>
-        <button class="btn btn-sm btn-outline-primary text-nowrap">CSV取込</button>
-      </form>
-      <p class="small text-muted mt-2 mb-0">CSV は1行目に「ユーザーID」（「社員ID」でも可）と「氏名」（任意で「所属」「メール」「勤務形態」）。同じユーザーIDは上書きします。文字コードは UTF-8 または Shift_JIS。</p>
-    </div></div>
-  </div>
-</div>
 {% endblock %}
 {% block scripts %}
 <script>
-document.getElementById("test-btn").addEventListener("click", async function () {
-  var id = document.getElementById("test-emp").value.trim();
-  var msg = document.getElementById("test-msg");
-  if (!id) return;
-  msg.textContent = "照会中…";
-  try {
-    var r = await fetch("{{ url_for('monthly.api_employee', emp_id='') }}" + encodeURIComponent(id));
-    var j = await r.json();
-    msg.textContent = j.found ? ("見つかりました: " + j.emp_id + (j.excluded ? "（対象外。回答できません）" : "")) : "見つかりませんでした";
-  } catch (e) { msg.textContent = "照会に失敗しました"; }
-});
 (function () {
   var table = document.getElementById("member-table");
   if (!table) return;
@@ -7863,7 +7720,13 @@ document.getElementById("test-btn").addEventListener("click", async function () 
     if (col === "tasks") return v === "0" ? Number(td.dataset.sort) === 0 : (v === "1" ? Number(td.dataset.sort) > 0 : hasToken(td.dataset.targets, v));
     return true;
   }
-  function filtering() { return filters.some(function (f) { return f.value.trim() !== ""; }); }
+  var monthSel = document.getElementById("member-month"), monthSt = document.getElementById("member-month-st"), oldToggle = document.getElementById("member-old-toggle");
+  function monthOk(tr) {
+    if (!monthSel || monthSel.value === "" || !monthSt.value) return true;
+    var td = tr.cells[FIXED + Number(monthSel.value)];
+    return !!td && td.dataset.st === monthSt.value;
+  }
+  function filtering() { return filters.some(function (f) { return f.value.trim() !== ""; }) || (!!monthSel && monthSel.value !== "" && monthSt.value !== ""); }
   function updateStats() {
     var on = filtering();
     statCells.forEach(function (c) {
@@ -7881,7 +7744,7 @@ document.getElementById("test-btn").addEventListener("click", async function () 
   function applyFilter() {
     var n = 0, on = filtering();
     rows.forEach(function (tr) {
-      var ok = filters.every(function (f) { return matches(tr, f); });
+      var ok = filters.every(function (f) { return matches(tr, f); }) && monthOk(tr);
       tr.hidden = !ok;
       if (ok) n++;
     });
@@ -7890,7 +7753,12 @@ document.getElementById("test-btn").addEventListener("click", async function () 
     updateStats();
   }
   filters.forEach(function (f) { f.addEventListener(f.tagName === "SELECT" ? "change" : "input", applyFilter); });
-  clearBtn.addEventListener("click", function () { filters.forEach(function (f) { f.value = ""; }); applyFilter(); });
+  clearBtn.addEventListener("click", function () { filters.forEach(function (f) { f.value = ""; }); if (monthSel) { monthSel.value = ""; monthSt.value = ""; } applyFilter(); });
+  [monthSel, monthSt].forEach(function (el) { if (el) el.addEventListener("change", applyFilter); });
+  if (oldToggle) oldToggle.addEventListener("click", function () {
+    var on = table.classList.toggle("show-old");
+    oldToggle.textContent = on ? "前の月を隠す" : oldToggle.dataset.label;
+  });
   function markHtml(st, ans) {
     if (st === "yes") return '<i class="bi bi-check-lg member-yes" title="回答あり"></i>';
     if (st === "out") return '<span class="member-out" title="月末時点で対象外' + (ans ? "（回答はありますが数えません）" : "") + '">対象外</span>';
@@ -12170,24 +12038,30 @@ body.flow-max-open { overflow: hidden; }
 .mv-icon { font-size: 1.15rem; width: 1.3rem; text-align: center; }
 .mv-savebar { position: sticky; bottom: 0; z-index: 5; display: flex; gap: 0.5rem; align-items: center; padding: 0.75rem 0; background: linear-gradient(to top, #f5f6f8 70%, rgba(245, 246, 248, 0)); }
 .member-wrap { overflow: auto; max-height: 72vh; }
-.member-table th, .member-table td { white-space: nowrap; }
+.member-table th, .member-table td { white-space: normal; }
+.member-table td:nth-child(1), .member-table td:nth-child(2), .member-table .member-cell, .member-table .member-stat { white-space: nowrap; }
+.member-table .badge { white-space: normal; text-align: left; line-height: 1.25; }
+.member-table .member-old { display: none; }
+.member-table.show-old .member-old { display: table-cell; }
+.member-monthfilter .form-select { width: auto; font-size: 0.78rem; padding-top: 0.12rem; padding-bottom: 0.12rem; }
 .member-table thead { position: sticky; top: 0; z-index: 2; }
 .member-table thead th { background: #fff; vertical-align: bottom; }
 .member-month { font-size: 0.78rem; line-height: 1.15; }
-.member-cell { min-width: 2.6rem; }
+.member-cell { min-width: 2.4rem; }
 .member-yes { color: var(--ui-green-text); font-size: 1.05rem; }
 .member-before { color: #ced4da; }
 .member-table tr.is-excluded td { color: #adb5bd; background: #f8f9fa; }
 .member-table tr.is-excluded .member-yes { color: #adb5bd; }
-.member-table td.member-wide { white-space: normal; min-width: 9rem; max-width: 15rem; }
-.member-table td.member-tasks { white-space: normal; min-width: 12rem; max-width: 20rem; }
+.member-table td.member-wide { min-width: 6rem; max-width: 12rem; }
+.member-table td.member-tasks { min-width: 9rem; max-width: 16rem; }
 .member-out { display: inline-block; padding: 0 0.3rem; border-radius: 4px; background: #eef0f3; color: #6c757d; font-size: 0.72rem; line-height: 1.5; }
-.member-sort { border: 0; background: none; padding: 0; font: inherit; font-weight: 600; color: inherit; text-align: inherit; cursor: pointer; white-space: nowrap; }
+.member-sort { border: 0; background: none; padding: 0; font: inherit; font-weight: 600; color: inherit; text-align: inherit; cursor: pointer; white-space: normal; }
 .member-sort::after { content: "↕"; margin-left: 0.2rem; opacity: 0.3; font-size: 0.85em; }
 .member-table th[aria-sort="ascending"] .member-sort::after { content: "▲"; opacity: 0.85; }
 .member-table th[aria-sort="descending"] .member-sort::after { content: "▼"; opacity: 0.85; }
 .member-filters th { padding-top: 0.1rem; padding-bottom: 0.4rem; font-weight: 400; }
-.member-filters .form-select, .member-filters .form-control { min-width: 5.5rem; font-size: 0.76rem; padding-top: 0.12rem; padding-bottom: 0.12rem; }
+.member-filters .form-select, .member-filters .form-control { min-width: 0; width: 100%; font-size: 0.72rem; padding: 0.12rem 1.3rem 0.12rem 0.35rem; background-position: right 0.3rem center; }
+.member-filters .form-control { padding-right: 0.35rem; }
 .member-table tfoot th, .member-table tfoot td { background: #f8f9fa; font-size: 0.8rem; line-height: 1.2; }
 /* ---- 進捗掲示板 ---- */
 .pb-head { margin: 0.25rem 0 0.75rem; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 0.75rem 1.5rem; }
