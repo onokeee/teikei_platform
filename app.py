@@ -6955,6 +6955,7 @@ MEMBER_COLUMNS = [
     ("wants_month", "月次：なくしたい業務を挙げた月", ""),
 ]
 MEMBER_NUMERIC = {"tasks", "checked", "accompanied", "answers", "self_count"}
+MEMBER_TEXT_FILTERS = {"id", "name", "task_names", "wants"}
 
 
 def _member_payload():
@@ -6978,6 +6979,23 @@ def employees():
     names = [w.name for w in _workplaces()]
     used = {r["workplace"] for r in rows if r["workplace"]}
     wp = db.session.get(Workplace, request.args.get("workplace_id", type=int) or 0)
+    same = lambda values: [(x, x) for x in values]
+    count = lambda unit: [("0", f"0 {unit}"), ("1", f"1 {unit}以上")]
+    filter_options = {
+        "excluded": [("1", "対象外"), ("0", "対象")],
+        "wp": same([n for n in names if n in used] + sorted(used - set(names))) + [("-", "（未設定）")],
+        "pat": same(C.WORK_PATTERNS) + [("-", "（未設定）")],
+        "team": same(C.SHIFT_TEAMS) + [("-", "（なし）")],
+        "skills": same(sorted({x for p in dx_all for x in p["skills"]})) + [("-", "（なし）")],
+        "learn": same(sorted({x for p in dx_all for x in p["learn"]})) + [("-", "（なし）")],
+        "tasks": count("件"), "checked": count("件"), "accompanied": count("件"), "answers": count("回"), "self_count": count("回"),
+        "stance": same(stance_options) + [("-", "（回答なし）")],
+        "stance_month": months("stance_period") + [("-", "（回答なし）")],
+        "wants_month": months("monthly_wants_period") + [("-", "（なし）")],
+    }
+    learn_arg = (request.args.get("learn") or "").strip()
+    filter_selected = {"wp": [wp.name] if wp is not None else [], "learn": [learn_arg] if learn_arg else [],
+                       "checked": ["1"] if (request.args.get("wish") or "").strip() == C.SELF_IMPROVE_YES else []}
     return render_template(
         "admin/employees.html",
         rows=rows,
@@ -6987,14 +7005,9 @@ def employees():
         wish_counts=wish_counts,
         have=have.most_common(),
         learn=learn.most_common(),
-        stance_options=stance_options,
         stance_rank={opt: i for i, opt in enumerate(stance_options)},
-        stance_months=months("stance_period"),
-        wants_months=months("monthly_wants_period"),
-        member_workplaces=[n for n in names if n in used] + sorted(used - set(names)),
-        skill_options=sorted({x for p in dx_all for x in p["skills"]}),
-        learn_options=sorted({x for p in dx_all for x in p["learn"]}),
-        initial={"checked": "1" if (request.args.get("wish") or "").strip() == C.SELF_IMPROVE_YES else "", "wp": wp.name if wp is not None else "", "learn": (request.args.get("learn") or "").strip()},
+        filter_options=filter_options,
+        filter_selected=filter_selected,
         demo_real=demo_ids_with_real_data(),
     )
 
@@ -7720,7 +7733,8 @@ TEMPLATES = {
 {% block title %}人財一覧{% endblock %}
 {% block content %}
 {% macro member_mark(st, ans) %}{% if st == 'yes' %}<i class="bi bi-check-lg member-yes" title="回答あり"></i>{% elif st == 'out' %}<span class="member-out" title="月末時点で対象外{{ '（回答はありますが数えません）' if ans else '' }}">対象外</span>{% elif st == 'before' %}<span class="member-before" title="対象者になる前の月">－</span>{% endif %}{% endmacro %}
-{% macro count_filter(key, label, unit, selected='') %}<th><select class="form-select form-select-sm" data-filter="{{ key }}" aria-label="{{ label }}で絞り込む"><option value="">すべて</option><option value="0">0 {{ unit }}</option><option value="1"{% if selected == '1' %} selected{% endif %}>1 {{ unit }}以上</option></select></th>{% endmacro %}
+{% macro multi_filter(key, label, options, selected) %}<th><div class="dropdown member-filter" data-filter="{{ key }}"><button type="button" class="form-select form-select-sm member-filter-btn" data-bs-toggle="dropdown" data-bs-auto-close="outside" data-bs-popper-config='{"strategy":"fixed"}' aria-expanded="false" aria-label="{{ label }}で絞り込む">すべて</button>
+<div class="dropdown-menu member-filter-menu">{% for value, text in options %}<label class="form-check"><input class="form-check-input" type="checkbox" value="{{ value }}"{% if value in selected %} checked{% endif %}><span class="form-check-label">{{ text }}</span></label>{% endfor %}<button type="button" class="btn btn-link btn-sm p-0 member-filter-clear">すべて表示</button></div></div></th>{% endmacro %}
 <div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">
   <div>
     <h2 class="mb-1">人財一覧{{ C.tip("月次アンケートか「自動化アイテム登録」に一度でも回答した人が、ユーザーIDごとに1行で自動で載ります。一人ひとりの回答の中身を1列に1つずつ出しているので、列名で並べ替え、見出しの下の欄で絞り込んで、目的に合わせて人を探してください（出す列は「表示する列」で選べます）。退職や他部門への異動で回答率の分母から外す人は「対象外」にチェックします。") }}</h2>
@@ -7729,7 +7743,7 @@ TEMPLATES = {
 
 <div class="card mb-3"><div class="card-body">
   <div class="d-flex flex-wrap justify-content-between align-items-baseline gap-2 mb-2">
-    <h5 class="card-title mb-0">対象者 <span id="member-active">{{ active_count }}</span> 人 <span class="small text-muted fw-normal">（対象外 <span id="member-excluded">{{ rows|length - active_count }}</span> 人）</span>{{ C.tip("月の欄の印: ✓ その月に回答、「対象外」月末時点で対象外、「－」対象者になる前の月（初めて回答した月より前）。「対象外」と「－」の月は分母に入りません。\n列名を押すと並べ替え（もう一度押すと逆順）、見出しの下の欄で列ごとに絞り込めます。") }}</h5>
+    <h5 class="card-title mb-0">対象者 <span id="member-active">{{ active_count }}</span> 人 <span class="small text-muted fw-normal">（対象外 <span id="member-excluded">{{ rows|length - active_count }}</span> 人）</span>{{ C.tip("月の欄の印: ✓ その月に回答、「対象外」月末時点で対象外、「－」対象者になる前の月（初めて回答した月より前）。「対象外」と「－」の月は分母に入りません。\n列名を押すと並べ替え（もう一度押すと逆順）、見出しの下の欄で列ごとに絞り込めます（一覧から選ぶ欄は複数選べ、選んだもののどれかに当てはまる人を出します）。") }}</h5>
   </div>
   {% if rows %}
   {% set old_n = [periods|length - 12, 0]|max %}
@@ -7756,25 +7770,8 @@ TEMPLATES = {
       {% endfor %}{% for p in periods %}<th class="text-center member-month member-mcol{% if loop.index0 < old_n %} member-old{% endif %}" data-col="m{{ loop.index0 }}" aria-sort="none"><button type="button" class="member-sort">{{ p[:4] }}<br>{{ p[5:]|int }}月</button></th>{% endfor %}
     </tr>
     <tr class="member-filters">
-      <th><select class="form-select form-select-sm" data-filter="excluded" aria-label="対象外で絞り込む"><option value="">すべて</option><option value="1">対象外</option><option value="0">対象</option></select></th>
-      <th><input type="search" class="form-control form-control-sm" data-filter="id" placeholder="含む" aria-label="ユーザーIDで絞り込む"></th>
-      <th><input type="search" class="form-control form-control-sm" data-filter="name" placeholder="含む" aria-label="氏名で絞り込む"></th>
-      <th><select class="form-select form-select-sm" data-filter="wp" aria-label="Gr・役割で絞り込む"><option value="">すべて</option>{% for w in member_workplaces %}<option value="{{ w }}" {% if initial.wp == w %}selected{% endif %}>{{ w }}</option>{% endfor %}<option value="-">（未設定）</option></select></th>
-      <th><select class="form-select form-select-sm" data-filter="pat" aria-label="勤務形態で絞り込む"><option value="">すべて</option>{% for w in C.WORK_PATTERNS %}<option value="{{ w }}">{{ w }}</option>{% endfor %}<option value="-">（未設定）</option></select></th>
-      <th><select class="form-select form-select-sm" data-filter="team" aria-label="班で絞り込む"><option value="">すべて</option>{% for t in C.SHIFT_TEAMS %}<option value="{{ t }}">{{ t }}</option>{% endfor %}<option value="-">（なし）</option></select></th>
-      <th><select class="form-select form-select-sm" data-filter="skills" aria-label="使える技術で絞り込む"><option value="">すべて</option>{% for s in skill_options %}<option value="{{ s }}">{{ s }}</option>{% endfor %}<option value="-">（なし）</option></select></th>
-      <th><select class="form-select form-select-sm" data-filter="learn" aria-label="学びたい技術で絞り込む"><option value="">すべて</option>{% for s in learn_options %}<option value="{{ s }}" {% if initial.learn == s %}selected{% endif %}>{{ s }}</option>{% endfor %}<option value="-">（なし）</option></select></th>
-      {{ count_filter("tasks", "自動化アイテムの件数", "件") }}
-      <th><input type="search" class="form-control form-control-sm" data-filter="task_names" placeholder="含む" aria-label="自動化アイテム名で絞り込む"></th>
-      {{ count_filter("checked", "「一緒にやってみたい」の件数", "件", initial.checked) }}
-      {{ count_filter("accompanied", "伴走の件数", "件") }}
-      {{ count_filter("answers", "月次の回答数", "回") }}
-      <th><select class="form-select form-select-sm" data-filter="stance" aria-label="改善の進め方で絞り込む"><option value="">すべて</option>{% for opt in stance_options %}<option value="{{ opt }}">{{ opt }}</option>{% endfor %}<option value="-">（回答なし）</option></select></th>
-      <th><select class="form-select form-select-sm" data-filter="stance_month" aria-label="進め方を答えた月で絞り込む"><option value="">すべて</option>{% for p, label in stance_months %}<option value="{{ p }}">{{ label }}</option>{% endfor %}<option value="-">（回答なし）</option></select></th>
-      {{ count_filter("self_count", "自分で／一緒にの回数", "回") }}
-      <th><input type="search" class="form-control form-control-sm" data-filter="wants" placeholder="含む" aria-label="なくしたい業務で絞り込む"></th>
-      <th><select class="form-select form-select-sm" data-filter="wants_month" aria-label="なくしたい業務を挙げた月で絞り込む"><option value="">すべて</option>{% for p, label in wants_months %}<option value="{{ p }}">{{ label }}</option>{% endfor %}<option value="-">（なし）</option></select></th>
-      {% for p in periods %}<th class="member-mcol{% if loop.index0 < old_n %} member-old{% endif %}"></th>{% endfor %}
+      {% for key, label, note in C.MEMBER_COLUMNS %}{% if key in C.MEMBER_TEXT_FILTERS %}<th><input type="search" class="form-control form-control-sm" data-filter="{{ key }}" placeholder="含む" aria-label="{{ label }}で絞り込む"></th>{% else %}{{ multi_filter(key, label, filter_options[key], filter_selected.get(key, [])) }}{% endif %}
+      {% endfor %}{% for p in periods %}<th class="member-mcol{% if loop.index0 < old_n %} member-old{% endif %}"></th>{% endfor %}
     </tr>
     </thead>
     <tbody>
@@ -7918,9 +7915,11 @@ TEMPLATES = {
     });
   });
   function hasToken(list, v) { return ("|" + (list || "") + "|").indexOf("|" + v + "|") >= 0; }
-  function matches(tr, f) {
-    var v = f.value.trim(), col = f.dataset.filter, td = cellOf(tr, col), kind = KIND[col] || "eq";
-    if (!v || !td) return true;
+  function picked(f) {
+    if (f.tagName === "INPUT") return f.value.trim() ? [f.value.trim()] : [];
+    return Array.prototype.filter.call(f.querySelectorAll("input"), function (c) { return c.checked; }).map(function (c) { return c.value; });
+  }
+  function matchOne(tr, td, kind, v) {
     if (kind === "flag") return tr.dataset.excluded === v;
     if (kind === "text") return (td.dataset.sort || "").toLowerCase().indexOf(v.toLowerCase()) >= 0;
     if (kind === "list") return v === "-" ? !td.dataset.list : hasToken(td.dataset.list, v);
@@ -7928,8 +7927,26 @@ TEMPLATES = {
     var val = "val" in td.dataset ? td.dataset.val : (td.dataset.sort || "");
     return v === "-" ? !val : val === v;
   }
+  function matches(tr, f) {
+    var vs = picked(f), col = f.dataset.filter, td = cellOf(tr, col), kind = KIND[col] || "eq";
+    if (!vs.length || !td) return true;
+    return vs.some(function (v) { return matchOne(tr, td, kind, v); });
+  }
+  function showPicked(f) {
+    if (f.tagName === "INPUT") return;
+    var names = Array.prototype.filter.call(f.querySelectorAll("input"), function (c) { return c.checked; }).map(function (c) { return c.nextElementSibling.textContent; });
+    var btn = f.querySelector(".member-filter-btn");
+    btn.textContent = !names.length ? "すべて" : (names.length === 1 ? names[0] : names.length + "つ選択中");
+    btn.title = names.join("、");
+    f.classList.toggle("is-on", names.length > 0);
+  }
+  function clearFilter(f) {
+    if (f.tagName === "INPUT") f.value = "";
+    else f.querySelectorAll("input").forEach(function (c) { c.checked = false; });
+    showPicked(f);
+  }
   var oldToggle = document.getElementById("member-old-toggle");
-  function filtering() { return filters.some(function (f) { return f.value.trim() !== ""; }); }
+  function filtering() { return filters.some(function (f) { return picked(f).length > 0; }); }
   function updateStats() {
     var on = filtering();
     statCells.forEach(function (c) {
@@ -7955,8 +7972,13 @@ TEMPLATES = {
     clearBtn.classList.toggle("d-none", !on);
     updateStats();
   }
-  filters.forEach(function (f) { f.addEventListener(f.tagName === "SELECT" ? "change" : "input", applyFilter); });
-  clearBtn.addEventListener("click", function () { filters.forEach(function (f) { f.value = ""; }); applyFilter(); });
+  filters.forEach(function (f) {
+    showPicked(f);
+    f.addEventListener(f.tagName === "INPUT" ? "input" : "change", function () { showPicked(f); applyFilter(); });
+    var clear = f.querySelector(".member-filter-clear");
+    if (clear) clear.addEventListener("click", function () { clearFilter(f); applyFilter(); });
+  });
+  clearBtn.addEventListener("click", function () { filters.forEach(clearFilter); applyFilter(); });
   var colBox = document.getElementById("member-cols"), HIDE_KEY = "member-hidden-cols";
   function applyColumns() {
     var hidden = Array.prototype.filter.call(colBox.querySelectorAll("input"), function (c) { return !c.checked; }).map(function (c) { return c.value; });
@@ -12457,6 +12479,10 @@ body.flow-max-open { overflow: hidden; }
 .member-filters th { padding-top: 0.1rem; padding-bottom: 0.4rem; font-weight: 400; }
 .member-filters .form-select, .member-filters .form-control { min-width: 0; width: 100%; font-size: 0.72rem; padding: 0.12rem 1.3rem 0.12rem 0.35rem; background-position: right 0.3rem center; }
 .member-filters .form-control { padding-right: 0.35rem; }
+.member-filter-btn { text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.member-filter.is-on .member-filter-btn { border-color: #86b7fe; background-color: #eef4ff; }
+.member-filter-menu { max-height: 50vh; overflow-y: auto; min-width: 11rem; padding: 0.4rem 0.6rem; font-size: 0.8rem; }
+.member-filter-menu .form-check { margin-bottom: 0.15rem; white-space: nowrap; }
 .member-table tfoot th, .member-table tfoot td { background: #f8f9fa; font-size: 0.8rem; line-height: 1.2; }
 /* ---- 進捗掲示板 ---- */
 .pb-head { margin: 0.25rem 0 0.75rem; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 0.75rem 1.5rem; }

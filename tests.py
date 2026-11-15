@@ -1896,7 +1896,7 @@ def smoke_login_monthly():
           f"P9: 管理の人数は「回答した人」（対象外とまだ回答のない人を除く）: {answered_n} 人。人財一覧には人数のカードを置かない")
     html_mr2 = client.get("/monthly/results").data.decode("utf-8")
     team_rows = [x for x in html_e.split("<tr") if 'data-sort="交代勤務">交代勤務</td>' in x and 'data-sort="2班">2班</td>' in x]
-    check(team_rows and "交代勤務（2班）" not in html_e and 'value="交代勤務|1班"' not in html_e and 'data-filter="team"' in html_e and '<option value="2班">2班</option>' in html_e and "交代勤務 2班" in html_mr2,
+    check(team_rows and "交代勤務（2班）" not in html_e and 'value="交代勤務|1班"' not in html_e and 'data-filter="team"' in html_e and 'type="checkbox" value="2班"><span class="form-check-label">2班</span>' in html_e and "交代勤務 2班" in html_mr2,
           "人財一覧は勤務形態と班を別の列に出し（交代勤務／2班）、班の列でも絞り込める。月次集計の勤務形態別の推移に班ごとの行を出す")
     check("LDAP は未設定です。人財一覧に載っている人だけが回答できます" in html and "LDAP_API_URL" in html and 'name="catchphrase"' not in html and 'name="sub_message"' not in html,
           "管理: LDAP の設定の有無と、未設定なら新しい人は回答できないことを出す。どこにも出ないキャッチコピー・サブメッセージの設定はない")
@@ -1998,8 +1998,8 @@ def smoke_login_monthly():
     r = client.get("/people/", query_string={"wish": "positive"})
     check(r.status_code == 302 and "/admin/employees" in r.headers["Location"] and "wish=positive" in r.headers["Location"], "前の DX人財情報のアドレスは人財一覧へ送る（絞り込みを引き継ぐ）")
     html = client.get(r.headers["Location"]).data.decode("utf-8")
-    checked_box = lambda h: h.split('data-filter="checked"', 1)[1].split("</select>", 1)[0] if 'data-filter="checked"' in h else ""
-    check(checked_box(html) and " selected" not in checked_box(html) and 'value="positive"' not in html,
+    checked_box = lambda h: h.split('data-filter="checked"', 1)[1].split("</th>", 1)[0] if 'data-filter="checked"' in h else ""
+    check(checked_box(html) and " checked" not in checked_box(html) and 'value="positive"' not in html,
           "人財一覧に「自分で改善したい人」の絞り込みはない（前のアドレスの wish=positive では何も絞り込まない）")
     html = client.get("/people/", query_string={"wish": "スキルを身につけながら、一緒にやってみたい"}, follow_redirects=True).data.decode("utf-8")
     with app.app_context():
@@ -2008,14 +2008,23 @@ def smoke_login_monthly():
         others = [p["emp_id"] for p in app_module.dx_people() if p["emp_id"] not in yes]
         checked_n = {p["emp_id"]: p["checked_count"] for p in app_module.dx_people()}
     cells_of = lambda e: dict(zip([k for k, _l, _n in app_module.MEMBER_COLUMNS], [re.sub(r"<[^>]+>", "", c).strip() for c in re.findall(r"<td[^>]*>(.*?)</td>", next((x for x in html.split("<tr") if f'data-sort="{e}"' in x), ""), re.S)]))
-    check('<option value="1" selected>1 件以上</option>' in checked_box(html) and yes and others
+    check('value="1" checked><span class="form-check-label">1 件以上</span>' in checked_box(html) and yes and others
           and all(cells_of(e).get("checked") == f"{checked_n[e]} 件" and checked_n[e] >= 1 for e in yes) and all(checked_n[e] == 0 and cells_of(e).get("checked") == "0 件" for e in others),
           f"「一緒にやってみたい（件）」の列に、チェックした自動化アイテムの数を出す。前のアドレスの wish=一緒にやってみたい は「1 件以上」で開く（チェックあり {len(yes)} 人／なし {len(others)} 人）")
     with app.app_context():
         used = next(x["workplace"] for x in app_module.member_rows() if x["workplace"])
         used_id = app_module.Workplace.query.filter_by(name=used).first().id
     html = client.get("/people/", query_string={"workplace_id": used_id}, follow_redirects=True).data.decode("utf-8")
-    check(f'<option value="{used}" selected>' in html, f"前のアドレスの Gr・役割の絞り込みも引き継ぐ（{used}）")
+    check(f'value="{used}" checked><span class="form-check-label">{used}</span>' in html, f"前のアドレスの Gr・役割の絞り込みも引き継ぐ（{used}）")
+    filter_row = html.split('<tr class="member-filters">', 1)[1].split("</tr>", 1)[0]
+    multi = [k for k, _l, _n in app_module.MEMBER_COLUMNS if k not in app_module.MEMBER_TEXT_FILTERS]
+    check("<select" not in filter_row and all(f'<div class="dropdown member-filter" data-filter="{k}">' in filter_row for k in multi)
+          and all(f'<input type="search" class="form-control form-control-sm" data-filter="{k}"' in filter_row for k in ("id", "name", "task_names", "wants"))
+          and filter_row.count('data-bs-auto-close="outside"') == len(multi) and filter_row.count("""data-bs-popper-config='{"strategy":"fixed"}'""") == len(multi)
+          and filter_row.count('class="btn btn-link btn-sm p-0 member-filter-clear">すべて表示</button>') == len(multi)
+          and "function picked(f)" in html and "return vs.some(function (v) { return matchOne(tr, td, kind, v); });" in html and "filters.forEach(clearFilter)" in html
+          and 'names.length + "つ選択中"' in html and "一覧から選ぶ欄は複数選べ、選んだもののどれかに当てはまる人を出します" in html,
+          "人財一覧: 一覧から選ぶ絞り込みはチェックで複数選べ（同じ列で選んだもののどれかに当てはまる人）、列ごとに「すべて表示」で外せる。文字の列は「含む」のまま")
 
     # ---- 回答のある人は削除せず対象外に（まだ回答のない以前の行だけ削除できる） ----
     with app.app_context():
