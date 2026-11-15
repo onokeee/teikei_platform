@@ -110,6 +110,31 @@ def smoke_bizmap_edit():
         t_rec = app_module.Task(id=99902, name="朝会資料準備2", steps_json=json.dumps([dict(cleaned, no=1)], ensure_ascii=False))
         rec_src = {x["name"]: (x["method"], x["info"]) for x in app_module._raw_task_sources(t_rec)}
         check(rec_src == {"ライン管理": ("phone", "生産状況"), "PMK": ("system", "トラブル装置の対応状況")}, f"業務マップの受け取り元も receive から（受け取り方・情報つき）: {rec_src}")
+
+        # ---- 技術の選択肢は管理で編集できる（並べ替え・名前の変更・削除・追加） ----
+        default_opts = app_module.skill_options()
+        rid_demo = next(r.id for r in app_module.Respondent.query.all() if "Excel VBA" in r.skills + r.learn)
+    html_admin = client.get("/admin/").data.decode("utf-8")
+    rows = [(s, s) for s in default_opts if s not in (app_module.SKILL_NONE, "Access")]
+    rows = [("VBA", o) if o == "Excel VBA" else (n, o) for n, o in rows]
+    rows = rows[-1:] + rows[:-1] + [("Copilot", ""), (app_module.SKILL_NONE, ""), ("", "")]
+    r = client.post("/admin/skills", data={"name": [n for n, _ in rows], "orig": [o for _, o in rows]}, follow_redirects=True)
+    with app.app_context():
+        opts = app_module.skill_options()
+        rd = db.session.get(app_module.Respondent, rid_demo)
+        picked_now = rd.skills + rd.learn
+        kept = app_module._skill_list(["Copilot", "Access", "VBA"])
+    check(default_opts == app_module.SKILLS and opts[0] == rows[0][0] and "VBA" in opts and "Excel VBA" not in opts and "Access" not in opts and opts[-2:] == ["Copilot", "特になし"] and opts.count("特になし") == 1
+          and "VBA" in picked_now and "Excel VBA" not in picked_now and kept == ["Copilot", "VBA"] and "技術の選択肢を保存しました" in r.data.decode("utf-8"),
+          f"技術の選択肢を管理で編集（並べ替え・名前の変更・削除・追加）。名前を変えると選んでいた人の記録も新しい名前に。消した技術は選べない: {opts}")
+    html_sv = client.get("/survey/").data.decode("utf-8")
+    check('"Copilot"' in html_sv and '"Access"' not in html_sv, "自動化アイテム登録の画面の選択肢も変わる")
+    r = client.post("/admin/skills", data={"name": ["", app_module.SKILL_NONE], "orig": [opts[0], ""]}, follow_redirects=True)
+    with app.app_context():
+        still = app_module.skill_options()
+    check("技術を1つ以上入れてください" in r.data.decode("utf-8") and still == opts, "選択肢を全部消すことはできない（「特になし」だけにはしない）")
+    check('id="skills"' in html_admin and "技術の選択肢（自動化アイテム登録）" in html_admin and "skill-del" in html_admin and "skill-up" in html_admin and "使える " in html_admin,
+          "管理に技術の選択肢の欄（使っている人数・上へ・下へ・削除）がある")
     html = client.get("/bizmap/").data.decode("utf-8")
     check("map-legend" in html and "箱と線" in html, "業務マップ: 箱と線・色・媒体・だれの凡例")
     js = client.get("/static/flows.js").data.decode("utf-8")

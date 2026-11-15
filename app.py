@@ -5620,8 +5620,33 @@ def _int_or(value, default):
     except (TypeError, ValueError):
         return default
 
+SKILL_OPTIONS_KEY = "skill_options"
+
+def skill_options():
+    try:
+        raw = Setting.get(SKILL_OPTIONS_KEY, "")
+        data = json.loads(raw) if raw else None
+    except Exception:
+        data = None
+    items = [str(v).strip() for v in data] if isinstance(data, list) else list(C.SKILLS)
+    seen, out = set(), []
+    for v in items:
+        key = normalize_text(v)
+        if v and v != C.SKILL_NONE and key not in seen:
+            seen.add(key)
+            out.append(v)
+    return out + [C.SKILL_NONE]
+
+def skill_usage():
+    have, learn = Counter(), Counter()
+    for r in Respondent.query.all():
+        have.update(set(r.skills))
+        learn.update(set(r.learn))
+    return have, learn
+
 def _skill_list(values):
-    picked = [v for v in values or [] if v in C.SKILLS]
+    options = skill_options()
+    picked = [v for v in values or [] if v in options]
     return [v for v in picked if v != C.SKILL_NONE] if len(picked) > 1 else picked
 
 def _check_emp_id(raw, missing):
@@ -5773,7 +5798,7 @@ def _options():
         "shift_options": C.SHIFT_OPTIONS,
         "frequency_hints": C.FREQUENCY_HINTS,
         "self_improve_yes": C.SELF_IMPROVE_YES,
-        "skills": C.SKILLS,
+        "skills": skill_options(),
         "skill_none": C.SKILL_NONE,
         "max_questions": C.INTAKE_MAX_QUESTIONS,
     }
@@ -6739,7 +6764,48 @@ def index():
         answered_count=len(answered_people()),
         task_count=Task.query.count(),
         auth_status=auth_status_text(),
+        skill_rows=_skill_rows(),
     )
+
+def _skill_rows():
+    have, learn = skill_usage()
+    return [{"name": s, "have": have.get(s, 0), "learn": learn.get(s, 0)} for s in skill_options() if s != C.SKILL_NONE]
+
+@bp_admin.post("/skills")
+def save_skills():
+    names, origs = request.form.getlist("name"), request.form.getlist("orig")
+    out, renames, seen, dups = [], {}, set(), []
+    for name, orig in zip(names, origs + [""] * (len(names) - len(origs))):
+        name, orig = name.strip()[:30], orig.strip()
+        if not name or name == C.SKILL_NONE:
+            continue
+        key = normalize_text(name)
+        if key in seen:
+            dups.append(name)
+            continue
+        seen.add(key)
+        out.append(name)
+        if orig and orig != name:
+            renames[orig] = name
+    if not out:
+        flash("技術を1つ以上入れてください（「特になし」だけにはできません）。", "danger")
+        return redirect(url_for("admin.index") + "#skills")
+    Setting.set(SKILL_OPTIONS_KEY, json.dumps(out, ensure_ascii=False))
+    moved = 0
+    if renames:
+        for r in Respondent.query.all():
+            for attr in ("c2_skills", "c3_learn"):
+                values = C.split_list(getattr(r, attr))
+                new = list(dict.fromkeys(renames.get(v, v) for v in values))
+                if new != values:
+                    setattr(r, attr, C.join_list(new))
+                    moved += 1
+    db.session.commit()
+    message = "技術の選択肢を保存しました。" + (f"名前を変えた技術は、選んでいた人の記録も新しい名前にしました（{moved} 件）。" if renames else "")
+    if dups:
+        message += "同じ名前が重なっていたもの（" + "・".join(dict.fromkeys(dups)) + "）は1つにまとめました。"
+    flash(message, "warning" if dups else "success")
+    return redirect(url_for("admin.index") + "#skills")
 
 @bp_admin.post("/settings")
 def save_settings():
@@ -8157,8 +8223,51 @@ document.getElementById("test-btn").addEventListener("click", async function () 
         <div class="col-2"><button class="btn btn-sm btn-primary w-100">追加</button></div>
       </form>
     </div></div>
+
+    <form method="post" action="{{ url_for('admin.save_skills') }}" class="card mt-3" id="skills"><div class="card-body">
+      <h5 class="card-title">技術の選択肢（自動化アイテム登録）</h5>
+      <p class="small text-muted">「スキルを身につけながら、一緒にやってみたい」にチェックした人が選ぶ「使える技術」「学びたい技術」の選択肢です。上から順に出ます。名前を変えると、すでに選んでいた人の記録も新しい名前になります。消しても、すでに選んでいた人の記録は対象者一覧に残ります（次に選び直すときは選べません）。「{{ C.SKILL_NONE }}」はいつも最後に出ます（消せません）。</p>
+      <div id="skill-rows">
+      {% for s in skill_rows %}
+        <div class="row g-1 align-items-center mb-1 skill-row">
+          <div class="col"><input type="text" name="name" class="form-control form-control-sm" value="{{ s.name }}" maxlength="30" aria-label="技術名"><input type="hidden" name="orig" value="{{ s.name }}"></div>
+          <div class="col-auto small text-muted">使える {{ s.have }} 人・学びたい {{ s.learn }} 人</div>
+          <div class="col-auto d-flex gap-1">
+            <button type="button" class="btn btn-sm btn-outline-secondary skill-up" title="上へ" aria-label="{{ s.name }} を上へ"><i class="bi bi-arrow-up"></i></button>
+            <button type="button" class="btn btn-sm btn-outline-secondary skill-down" title="下へ" aria-label="{{ s.name }} を下へ"><i class="bi bi-arrow-down"></i></button>
+            <button type="button" class="btn btn-sm btn-outline-danger skill-del" data-name="{{ s.name }}" data-used="{{ s.have + s.learn }}">削除</button>
+          </div>
+        </div>
+      {% endfor %}
+      </div>
+      <div class="row g-1 align-items-center mt-2 mb-1">
+        <div class="col"><input type="text" name="name" class="form-control form-control-sm" placeholder="追加する技術（例: Copilot）" maxlength="30" aria-label="追加する技術"><input type="hidden" name="orig" value=""></div>
+      </div>
+      <div class="small text-muted mb-2">最後に「{{ C.SKILL_NONE }}」が付きます。並べ替え・削除は「保存」を押すと反映されます。</div>
+      <button class="btn btn-primary btn-sm">保存</button>
+    </div></form>
   </div>
 </div>
+{% endblock %}
+{% block scripts %}
+<script>
+(function () {
+  var box = document.getElementById("skill-rows");
+  if (!box) return;
+  box.addEventListener("click", function (e) {
+    var b = e.target.closest("button");
+    if (!b) return;
+    var row = b.closest(".skill-row");
+    if (b.classList.contains("skill-up") && row.previousElementSibling) box.insertBefore(row, row.previousElementSibling);
+    if (b.classList.contains("skill-down") && row.nextElementSibling) box.insertBefore(row.nextElementSibling, row);
+    if (b.classList.contains("skill-del")) {
+      var used = Number(b.dataset.used || 0);
+      if (!confirm("「" + b.dataset.name + "」を選択肢から消しますか？" + (used ? "（すでに選んでいた " + used + " 件の記録は残ります）" : "") + "「保存」を押すと反映されます。")) return;
+      row.remove();
+    }
+  });
+})();
+</script>
 {% endblock %}
 ''',
     'auth/login.html': r'''{% extends "base.html" %}
