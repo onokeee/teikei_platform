@@ -7658,11 +7658,6 @@ TEMPLATES = {
   {% if rows %}
   {% set old_n = [periods|length - 12, 0]|max %}
   <div class="d-flex flex-wrap align-items-center gap-3 mb-2 small">
-    <span class="d-inline-flex align-items-center gap-1 member-monthfilter">
-      <label for="member-month" class="text-muted text-nowrap mb-0">月の回答で絞り込む</label>
-      <select id="member-month" class="form-select form-select-sm"><option value="">月</option>{% for p in periods %}<option value="{{ loop.index0 }}">{{ p[:4] }}年{{ p[5:]|int }}月</option>{% endfor %}</select>
-      <select id="member-month-st" class="form-select form-select-sm" aria-label="その月の回答"><option value="">すべて</option><option value="yes">回答</option><option value="no">未回答</option><option value="out">対象外</option><option value="before">対象前</option></select>
-    </span>
     {% if old_n %}<button type="button" class="btn btn-link btn-sm p-0" id="member-old-toggle" data-label="前の月も表示（{{ old_n }} か月）">前の月も表示（{{ old_n }} か月）</button>{% endif %}
     <span id="member-shown" class="fw-semibold"></span>
     <button type="button" class="btn btn-link btn-sm p-0 d-none" id="member-clear">絞り込みを解除</button>
@@ -7856,13 +7851,8 @@ TEMPLATES = {
     if (col === "tasks") return v === "0" ? Number(td.dataset.sort) === 0 : (v === "1" ? Number(td.dataset.sort) > 0 : hasToken(td.dataset.targets, v));
     return true;
   }
-  var monthSel = document.getElementById("member-month"), monthSt = document.getElementById("member-month-st"), oldToggle = document.getElementById("member-old-toggle");
-  function monthOk(tr) {
-    if (!monthSel || monthSel.value === "" || !monthSt.value) return true;
-    var td = tr.cells[FIXED + Number(monthSel.value)];
-    return !!td && td.dataset.st === monthSt.value;
-  }
-  function filtering() { return filters.some(function (f) { return f.value.trim() !== ""; }) || (!!monthSel && monthSel.value !== "" && monthSt.value !== ""); }
+  var oldToggle = document.getElementById("member-old-toggle");
+  function filtering() { return filters.some(function (f) { return f.value.trim() !== ""; }); }
   function updateStats() {
     var on = filtering();
     statCells.forEach(function (c) {
@@ -7880,7 +7870,7 @@ TEMPLATES = {
   function applyFilter() {
     var n = 0, on = filtering();
     rows.forEach(function (tr) {
-      var ok = filters.every(function (f) { return matches(tr, f); }) && monthOk(tr);
+      var ok = filters.every(function (f) { return matches(tr, f); });
       tr.hidden = !ok;
       if (ok) n++;
     });
@@ -7889,8 +7879,7 @@ TEMPLATES = {
     updateStats();
   }
   filters.forEach(function (f) { f.addEventListener(f.tagName === "SELECT" ? "change" : "input", applyFilter); });
-  clearBtn.addEventListener("click", function () { filters.forEach(function (f) { f.value = ""; }); if (monthSel) { monthSel.value = ""; monthSt.value = ""; } applyFilter(); });
-  [monthSel, monthSt].forEach(function (el) { if (el) el.addEventListener("change", applyFilter); });
+  clearBtn.addEventListener("click", function () { filters.forEach(function (f) { f.value = ""; }); applyFilter(); });
   if (oldToggle) oldToggle.addEventListener("click", function () {
     var on = table.classList.toggle("show-old");
     oldToggle.textContent = on ? "前の月を隠す" : oldToggle.dataset.label;
@@ -12295,7 +12284,6 @@ body.flow-max-open { overflow: hidden; }
 .member-table .badge { white-space: normal; text-align: left; line-height: 1.25; }
 .member-table .member-old { display: none; }
 .member-table.show-old .member-old { display: table-cell; }
-.member-monthfilter .form-select { width: auto; font-size: 0.78rem; padding-top: 0.12rem; padding-bottom: 0.12rem; }
 .member-table thead { position: sticky; top: 0; z-index: 2; }
 .member-table thead th { background: #fff; vertical-align: bottom; }
 .member-month { font-size: 0.78rem; line-height: 1.15; }

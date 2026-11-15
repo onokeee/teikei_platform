@@ -1931,9 +1931,9 @@ def smoke_login_monthly():
     check(html.count('class="tip"') >= 4 and 'data-tip="月次アンケートか「自動化アイテム登録」に一度でも回答した人が' in html and "列名を押すと並べ替え" in legend_tip
           and 'data-tip="この行の「回答 ／ 対象」は' in html and "下の行の「回答 ／ 対象」" not in html and '<span class="text-muted">列名を押すと' not in html,
           "人財一覧の説明・月の印の凡例・並べ替えの案内・回答／対象の数え方は ⓘ の吹き出しにまとめ、画面には出さない")
-    check('id="member-table"' in html and 'data-filter="wp"' in html and 'id="member-month"' in html and 'id="member-month-st"' in html and 'data-filter="m0"' not in html
-          and "function applySort()" in html and "function applyFilter()" in html and 'aria-sort="none"' in html and "monthOk(tr)" in html,
-          "人財一覧: 列名を押して並べ替え、見出しの下の欄で列ごとに絞り込める（月の回答は表の上の1か所で絞り込む）")
+    check('id="member-table"' in html and 'data-filter="wp"' in html and 'id="member-month"' not in html and 'id="member-month-st"' not in html and "月の回答で絞り込む" not in html and 'data-filter="m0"' not in html
+          and "function applySort()" in html and "function applyFilter()" in html and 'aria-sort="none"' in html and "monthOk" not in html,
+          "人財一覧: 列名を押して並べ替え、見出しの下の欄で列ごとに絞り込める（「月の回答で絞り込む」は置かない）")
     check("ユーザーIDの照会（LDAP）" not in html and "回答前に対象者へ入れる" not in html and "test-btn" not in html and "/admin/employees/import" not in html and "/admin/employees/add" not in html
           and client.post("/admin/employees/add", data={"emp_id": "Z001", "name": "x"}).status_code == 404 and client.post("/admin/employees/import").status_code == 404,
           "人財一覧に LDAP の照会テスト・手での追加・CSV取込はない")
