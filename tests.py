@@ -1271,8 +1271,16 @@ def smoke_login_monthly():
 
     # ---- 設問の編集（要ログイン） ----
     r = client.post("/login", data={"emp_id": "admin", "password": "adminpass"})
+    nxt = shift_period(period, 1)
     code, html, r = get(f"/monthly/admin?period={period}")
-    check(code == 200 and "qe-list" in html and "基本設問に戻す" in html, "設問エディタ")
+    check(code == 200 and "qe-list" in html and "var LOCKED = true;" in html and "基本設問に戻す" not in html and 'id="qe-save"' not in html and 'id="qe-add"' not in html
+          and "今月の設問は変更できません" in html and f'href="/monthly/admin?period={nxt}"' in html and 'id="qe-active"' in html and "切り替えるとすぐ保存します" in html,
+          "今月の設問は見るだけ（保存・追加・前月コピー・基本設問に戻すはなく、来月の編集へのリンク。受付のオン・オフだけ切り替えられる）")
+    code, html, r = get(f"/monthly/admin?period={nxt}")
+    check(code == 200 and "var LOCKED = false;" in html and "基本設問に戻す" in html and 'id="qe-save"' in html and "番号は回答画面と同じです" in html, "来月以降の月度は編集できる")
+    code, html, r = get("/monthly/admin?period=2024-02")
+    check(code == 200 and "var LOCKED = true;" in html and "過去の月度の設問は変更できません" in html and "この月度の設問セットはありません" in html and 'id="qe-active"' not in html,
+          "設問セットのない過去の月度は、ないことだけ出す（受付の切り替えも出さない）")
     r = client.get("/monthly/admin/questions?period=default")
     check(r.get_json()["questions"][0]["key"] == "has", "基本設問の取得")
     base_qs = r.get_json()["questions"]
@@ -1292,12 +1300,27 @@ def smoke_login_monthly():
     with app.app_context():
         survey = MonthlySurvey.query.filter_by(period=period).first()
         qs = survey.questions
+        before_json = survey.questions_json
+        past = MonthlySurvey(period="2024-03", is_active=True)
+        past.set_questions(qs)
+        db.session.add(past)
+        db.session.commit()
+        past_id = past.id
+    r = client.post("/monthly/admin/save", json={"period": period, "questions": qs + [{"key": "", "type": "text", "text": "今月だけの設問", "required": False}], "is_active": True})
+    r_prev = client.post("/monthly/admin/save", json={"period": shift_period(period, -1), "questions": qs, "is_active": True})
+    client.post(f"/monthly/admin/{past_id}/delete")
+    with app.app_context():
+        check(r.status_code == 400 and "今月と過去の月度の設問は変更できません" in r.get_json()["message"] and r_prev.status_code == 400
+              and MonthlySurvey.query.filter_by(period=period).first().questions_json == before_json and db.session.get(MonthlySurvey, past_id) is not None,
+              "今月・過去の月度の設問は保存も削除もできない（画面を通さずに送っても変わらない）")
+        db.session.delete(db.session.get(MonthlySurvey, past_id))
+        db.session.commit()
     qs.append({"key": "", "type": "choice", "text": "改善の勉強会に参加したいですか", "options": ["参加したい", "内容による", "参加しない"], "required": True})
     qs.append({"key": "", "type": "text", "text": "勉強会で学びたいこと", "required": False})
-    r = client.post("/monthly/admin/save", json={"period": period, "questions": qs, "is_active": True})
-    check(r.status_code == 200 and r.get_json()["success"] and r.get_json()["count"] == len(qs), "設問を追加して保存")
+    r = client.post("/monthly/admin/save", json={"period": nxt, "questions": qs, "is_active": True})
+    check(r.status_code == 200 and r.get_json()["success"] and r.get_json()["count"] == len(qs), "来月の設問に追加して保存")
     with app.app_context():
-        survey = MonthlySurvey.query.filter_by(period=period).first()
+        survey = MonthlySurvey.query.filter_by(period=nxt).first()
         keys = [q["key"] for q in survey.questions]
         check(len(keys) == len(set(keys)) and all(keys) and "has" in keys, f"保存後のキーは一意で基本設問も残る: {keys[-2:]}")
     code, html, r = get(f"/monthly/results?period={period}")
@@ -1346,28 +1369,66 @@ def smoke_login_monthly():
         db.session.delete(old)
         db.session.commit()
     tampered = [dict(q, text="今月、繰り返しのPC作業はありましたか", options=["はい", "いいえ"], required=False) if q["key"] == "has" else q for q in qs]
-    r = client.post("/monthly/admin/save", json={"period": period, "questions": tampered, "is_active": True})
+    r = client.post("/monthly/admin/save", json={"period": nxt, "questions": tampered, "is_active": True})
     with app.app_context():
-        has_q = next(q for q in MonthlySurvey.query.filter_by(period=period).first().questions if q["key"] == "has")
-        check(r.status_code == 200 and has_q["options"] == ["ある", "ない"] and has_q["required"] and has_q["text"] == "今月、繰り返しのPC作業はありましたか", "基本設問は文面だけ変わり、選択肢と必須は固定のまま")
-    r = client.post("/monthly/admin/save", json={"period": period, "questions": [q for q in qs if q["key"] != "stance"], "is_active": True})
+        has_q = next(q for q in MonthlySurvey.query.filter_by(period=nxt).first().questions if q["key"] == "has")
+        check(r.status_code == 200 and has_q["options"] == ["ある", "ない"] and has_q["required"] and has_q["text"] == "今月、繰り返しのPC作業はありましたか" and "labels" not in has_q,
+              "基本設問は文面だけ変わり、選択肢（集計に使う値）と必須は固定のまま")
+    stance_opts = next(q["options"] for q in qs if q["key"] == "stance")
+    relabeled = [dict(q, labels=["あります", ""]) if q["key"] == "has" else dict(q, labels=["自分でやってみたい"] + stance_opts[1:]) if q["key"] == "stance" else q for q in qs]
+    r = client.post("/monthly/admin/save", json={"period": nxt, "questions": relabeled, "is_active": True})
+    with app.app_context():
+        saved = {q["key"]: q for q in MonthlySurvey.query.filter_by(period=nxt).first().questions}
+    check(r.status_code == 200 and saved["has"]["options"] == ["ある", "ない"] and saved["has"]["labels"] == ["あります", "ない"] and saved["stance"]["options"] == stance_opts
+          and saved["stance"]["labels"][0] == "自分でやってみたい" and "labels" not in saved["trend"] and saved["has"]["text"] == "PCの定型・定期業務（繰り返しの手動作業）はありますか",
+          "基本設問の選択肢は表現だけ変えられる（空は元の言葉。集計に使う値はそのまま）")
+    code, html, r = get(f"/monthly/admin?period={nxt}")
+    check('"labels": ["あります", "ない"]' in html and "集計では「" in html and "を選んだ人にだけ出します" in html and "を出す" in html,
+          "設問エディタに変えた表現が入り、元の選択肢・出す条件・選択肢ごとに出る設問を示す")
+    r = client.post("/monthly/admin/save", json={"period": nxt, "questions": [dict(q, labels=["ない", "ある"]) if q["key"] == "has" else q for q in qs]})
+    check(r.status_code == 400 and "ほかの選択肢と同じ言葉" in r.get_json()["message"], "選択肢の表現を、ほかの選択肢と同じ言葉にはできない（意味が入れ替わるため）")
+    r = client.post("/monthly/admin/save", json={"period": nxt, "questions": [dict(q, labels=["はい", "はい"]) if q["key"] == "has" else q for q in qs]})
+    check(r.status_code == 400 and "重複" in r.get_json()["message"], "選択肢の表現の重複は保存できない")
+    with app.app_context():
+        check("labels" in next(q for q in MonthlySurvey.query.filter_by(period=nxt).first().questions if q["key"] == "has"), "保存できなかったときは前の表現のまま")
+    r = client.post("/monthly/admin/save", json={"period": nxt, "questions": [q for q in qs if q["key"] != "stance"], "is_active": True})
     check(r.status_code == 400 and "基本設問は外せません" in r.get_json()["message"], "基本設問を外した保存は拒否")
     swapped = list(qs)
     i_t = next(i for i, q in enumerate(swapped) if q["key"] == "trend")
     i_r = next(i for i, q in enumerate(swapped) if q["key"] == "decreased_reason")
     swapped[i_t], swapped[i_r] = swapped[i_r], swapped[i_t]
-    r = client.post("/monthly/admin/save", json={"period": period, "questions": swapped, "is_active": True})
+    r = client.post("/monthly/admin/save", json={"period": nxt, "questions": swapped, "is_active": True})
     with app.app_context():
-        saved_keys = [q["key"] for q in MonthlySurvey.query.filter_by(period=period).first().questions]
+        saved_keys = [q["key"] for q in MonthlySurvey.query.filter_by(period=nxt).first().questions]
     check(r.status_code == 200 and saved_keys.index("trend") < saved_keys.index("decreased_reason"), "基本設問を並べ替えても、親（先月と比べて）は子（なぜ減ったのか）より前に保存される")
+    r = client.post("/monthly/admin/save", json={"period": nxt, "questions": relabeled, "is_active": True})
+    with app.app_context():
+        cur_s = MonthlySurvey.query.filter_by(period=period).first()
+        cur_s.set_questions(MonthlySurvey.query.filter_by(period=nxt).first().questions)
+        db.session.commit()
     code, html, r = get(f"/monthly/?period={period}&emp=DEMO-011")
-    check("改善の勉強会に参加したいですか" in html and "参加したい" in html, "回答フォームに追加した設問が出る")
-    r = client.post("/monthly/admin/save", json={"period": period, "questions": [{"key": "x", "type": "choice", "text": "一択", "options": ["a"]}]})
+    check("改善の勉強会に参加したいですか" in html and "参加したい" in html and 'value="ある"><span>あります</span>' in html and 'value="自分で取り組みたい"><span>自分でやってみたい</span>' in html
+          and '<span class="mq-no">1-2</span>' in html and '<span class="mq-no">3-3</span>' in html,
+          "来月の設問セットがその月になったら、回答フォームに追加した設問が出て、基本設問の選択肢は変えた表現で出る（送る値は元の選択肢のまま。枝番も同じ）")
+    r = client.post("/monthly/admin/save", json={"period": nxt, "questions": [{"key": "x", "type": "choice", "text": "一択", "options": ["a"]}]})
     check(r.status_code == 400 and "選択肢" in r.get_json()["message"], "選択肢が1つなら保存できない")
     code, html, r = get(f"/monthly/results?period={period}")
     check(code == 200 and "改善の勉強会に参加したいですか" in html and "テストのコメント" in html, "集計に追加設問とコメントが出る")
+    check('<td class="small">あります</td>' in html and "<td>ある</td>" in html, "集計: 回答一覧はその月度の表現（あります）、月をまたぐ推移は元の選択肢（ある）で出す")
+    with app.app_context():
+        q_csv = client.get("/export/questions.csv").data.decode("utf-8-sig")
+    check(f"{period},受付中,1-2," in q_csv and "あります／ない,ある／ない" in q_csv and "1「" in q_csv and "で「あります」を選んだとき" in q_csv,
+          "CSV出力の設問: 回答画面と同じ番号、選択肢は表現と集計に使う値、出す条件は親の番号と表現")
 
-    r = client.post("/monthly/admin/save", json={"period": period, "questions": qs, "is_active": False})
+    with app.app_context():
+        nxt_id = MonthlySurvey.query.filter_by(period=nxt).first().id
+    client.post(f"/monthly/admin/{nxt_id}/delete")
+    with app.app_context():
+        check(MonthlySurvey.query.filter_by(period=nxt).first() is None, "来月以降の設問セットは削除できる")
+
+    r = client.post("/monthly/admin/active", json={"period": period, "is_active": False})
+    check(r.status_code == 200 and r.get_json()["success"] and "止めました" in r.get_json()["message"], "今月の受付は設問の保存とは別に止められる")
+    check(client.post("/monthly/admin/active", json={"period": "2024-02", "is_active": True}).status_code == 400, "回答できない古い月度の受付は切り替えられない")
     client.post("/logout")
     code, html, r = get(f"/monthly/?period={period}&emp=DEMO-012")
     check("準備中" in html, "受付停止中は準備中の表示")
@@ -1377,7 +1438,7 @@ def smoke_login_monthly():
     # ---- 回答できる月度は当月（と設問セットのある前月）だけ ----
 
     client.post("/login", data={"emp_id": "admin", "password": "adminpass"})
-    client.post("/monthly/admin/save", json={"period": period, "questions": qs, "is_active": True})
+    client.post("/monthly/admin/active", json={"period": period, "is_active": True})
     client.post("/logout")
     with app.app_context():
         cur = MonthlySurvey.query.filter_by(period=period).first()

@@ -1559,11 +1559,13 @@ def monthly_question_stats(survey, responses):
             n = sum(counts.values())
             options = list(q.get("options", []))
             options += [o for o in counts if o not in options]
+            label_of = dict(zip(q.get("options") or [], option_labels(q)))
             stats.append(
                 {
                     "q": q,
                     "n": n,
                     "options": options,
+                    "labels": [label_of.get(o, o) for o in options],
                     "counts": [counts.get(o, 0) for o in options],
                     "percents": [round(counts.get(o, 0) / n * 100) if n else 0 for o in options],
                 }
@@ -4851,6 +4853,10 @@ def _migrate_monthly_questions():
                     touched = True
                 if base["type"] == "choice" and list(q.get("options") or []) != list(base["options"]):
                     q["options"] = list(base["options"])
+                    q.pop("labels", None)
+                    touched = True
+                if "labels" in q and (base["type"] != "choice" or not isinstance(q["labels"], list) or len(q["labels"]) != len(q["options"])):
+                    q.pop("labels")
                     touched = True
                 if bool(q.get("required")) != bool(base.get("required")):
                     q["required"] = bool(base.get("required"))
@@ -7064,6 +7070,36 @@ def get_or_create_survey(period):
         db.session.commit()
     return survey
 
+SURVEY_LOCKED_MSG = "今月と過去の月度の設問は変更できません（すでに回答した人のデータと対応が取れなくなるため）。変えるときは来月以降の月度で変更してください。"
+
+
+def survey_locked(period):
+    return period <= current_period()
+
+def option_labels(q):
+    options = list(q.get("options") or [])
+    labels = q.get("labels")
+    if not isinstance(labels, list) or len(labels) != len(options):
+        return options
+    return [str(x or "").strip() or o for x, o in zip(labels, options)]
+
+def option_label(q, value):
+    return dict(zip(q.get("options") or [], option_labels(q))).get(value, value)
+
+def question_numbers(questions):
+    nos, subs, out, main = {}, Counter(), {}, 0
+    for q in questions:
+        dep = q.get("depends") if isinstance(q.get("depends"), dict) else {}
+        if dep.get("key") and not dep.get("main"):
+            grp = (dep["key"], tuple(dep.get("show_if") or []))
+            subs[grp] += 1
+            out[q["key"]] = f"{nos.get(dep['key'], '?')}-{subs[grp] + 1}"
+        else:
+            main += 1
+            nos[q["key"]] = main
+            out[q["key"]] = str(main)
+    return out
+
 def _wants_json():
     return request.is_json or "application/json" in (request.headers.get("Accept") or "")
 
@@ -7234,28 +7270,42 @@ def results():
         wp_trends=monthly_workplace_trends(), pattern_trends=monthly_pattern_trends(),
         chart_json=json.dumps(chart, ensure_ascii=False),
         choice_keys=[q["key"] for q in (survey.questions if survey else []) if q["type"] == "choice"],
+        qnos=question_numbers(survey.questions) if survey else {},
     )
 
 # ----- 設問の編集（要ログイン） -----
 @bp_monthly.route("/admin")
 def survey_admin():
     period = parse_period(request.args.get("period"))
+    cur = current_period()
     survey = MonthlySurvey.query.filter_by(period=period).first()
     surveys = MonthlySurvey.query.order_by(MonthlySurvey.period.desc()).all()
     counts = dict(db.session.query(MonthlyResponse.period, db.func.count(MonthlyResponse.id)).group_by(MonthlyResponse.period).all())
+    answerable = answerable_periods()
+    if survey is not None:
+        questions = survey.questions
+    else:
+        questions = questions_for_new(period) if period >= cur else []
+    nxt = shift_period(cur, 1)
     return render_template(
         "monthly/admin.html",
         period=period,
         period_label=period_label(period),
         survey=survey,
         is_active=survey.is_active if survey is not None else True,
-        questions_json=json.dumps(survey.questions if survey is not None else questions_for_new(period), ensure_ascii=False),
+        questions_json=json.dumps(questions, ensure_ascii=False),
+        has_questions=bool(questions),
         core_keys=sorted(C.MONTHLY_CORE_KEYS),
         surveys=surveys,
         counts=counts,
         response_count=counts.get(period, 0),
         prev_period=shift_period(period, -1),
-        current_period=current_period(),
+        current_period=cur,
+        locked=survey_locked(period),
+        can_toggle=period > cur or period in answerable,
+        answerable=answerable,
+        next_period=nxt,
+        next_label=period_label(nxt),
     )
 
 @bp_monthly.route("/admin/questions")
@@ -7287,6 +7337,15 @@ def _clean_questions(items):
             item = {"key": key, "type": base["type"], "text": text[:200], "required": bool(base.get("required"))}
             if base["type"] == "choice":
                 item["options"] = list(base["options"])
+                raw = q.get("labels")
+                if isinstance(raw, list) and len(raw) == len(base["options"]):
+                    labels = [str(x or "").strip()[:60] or o for x, o in zip(raw, base["options"])]
+                    if len(set(labels)) != len(labels):
+                        return None, f"設問{i}「{text[:20]}」の選択肢の表現が重複しています"
+                    if any(lb in base["options"] and lb != o for lb, o in zip(labels, base["options"])):
+                        return None, f"設問{i}「{text[:20]}」の選択肢の表現を、ほかの選択肢と同じ言葉にはできません（意味が入れ替わるため）"
+                    if labels != item["options"]:
+                        item["labels"] = labels
             else:
                 item["placeholder"] = str(q.get("placeholder") or base.get("placeholder") or "").strip()[:100]
             if base.get("depends"):
@@ -7320,19 +7379,35 @@ def _clean_questions(items):
 def survey_admin_save():
     data = request.get_json(silent=True) or {}
     period = parse_period(data.get("period"))
+    if survey_locked(period):
+        return jsonify({"success": False, "message": SURVEY_LOCKED_MSG}), 400
     questions, error = _clean_questions(data.get("questions"))
     if error:
         return jsonify({"success": False, "message": error}), 400
     survey = get_or_create_survey(period)
     survey.set_questions(questions)
-    survey.is_active = bool(data.get("is_active", True))
+    if "is_active" in data:
+        survey.is_active = bool(data["is_active"])
     db.session.commit()
     return jsonify({"success": True, "message": f"{period_label(period)}の設問を保存しました（{len(questions)}問）。", "count": len(questions)})
+
+@bp_monthly.post("/admin/active")
+def survey_admin_active():
+    data = request.get_json(silent=True) or {}
+    period = parse_period(data.get("period"))
+    if period < current_period() and period not in answerable_periods():
+        return jsonify({"success": False, "message": "この月度はもう回答を受け付けられません（回答できるのは今月と前月だけです）"}), 400
+    survey = get_or_create_survey(period)
+    survey.is_active = bool(data.get("is_active"))
+    db.session.commit()
+    return jsonify({"success": True, "is_active": survey.is_active, "message": f"{period_label(period)}の回答を" + ("受け付けるようにしました。" if survey.is_active else "止めました。")})
 
 @bp_monthly.post("/admin/<int:survey_id>/delete")
 def survey_admin_delete(survey_id):
     survey = _get_or_404(MonthlySurvey, survey_id)
-    if MonthlyResponse.query.filter_by(period=survey.period).count():
+    if survey_locked(survey.period):
+        flash("今月と過去の月度の設問セットは削除できません。", "warning")
+    elif MonthlyResponse.query.filter_by(period=survey.period).count():
         flash("回答がある月度の設問は削除できません。", "warning")
     else:
         db.session.delete(survey)
@@ -7465,16 +7540,19 @@ QUESTION_TYPE_TEXT = {"choice": "選択（1つ）", "text": "記述", "list": "�
 
 
 def export_questions():
-    header = ["月度", "受付", "順", "設問", "種類", "選択肢", "必須", "出す条件"]
+    header = ["月度", "受付", "番号", "設問", "種類", "選択肢", "選択肢（集計に使う値）", "必須", "出す条件"]
     rows = []
     for s in sorted(MonthlySurvey.query.all(), key=lambda s: s.period):
         qs = s.questions
-        texts = {q["key"]: q.get("text") or "" for q in qs}
-        for i, q in enumerate(qs, 1):
+        by_key = {q["key"]: q for q in qs}
+        nos = question_numbers(qs)
+        for q in qs:
             dep = q.get("depends") if isinstance(q.get("depends"), dict) else {}
-            cond = f"「{texts.get(dep.get('key'), dep.get('key') or '')}」が{'／'.join(dep.get('show_if') or [])}のとき" if dep.get("key") else ""
-            rows.append([s.period, "受付中" if s.is_active else "停止", i, q.get("text") or "", QUESTION_TYPE_TEXT.get(q.get("type"), q.get("type") or ""),
-                         "／".join(q.get("options") or []) if isinstance(q.get("options"), list) else "", "○" if q.get("required") or dep.get("required") else "", cond])
+            parent = by_key.get(dep.get("key")) or {}
+            cond = (f"{nos.get(dep['key'], '?')}「{parent.get('text') or dep['key']}」で" + "か".join(f"「{option_label(parent, v)}」" for v in dep.get("show_if") or []) + "を選んだとき") if dep.get("key") else ""
+            choice = q.get("type") == "choice" and isinstance(q.get("options"), list)
+            rows.append([s.period, "受付中" if s.is_active else "停止", nos.get(q["key"], ""), q.get("text") or "", QUESTION_TYPE_TEXT.get(q.get("type"), q.get("type") or ""),
+                         "／".join(option_labels(q)) if choice else "", "／".join(q["options"]) if choice else "", "○" if q.get("required") or dep.get("required") else "", cond])
     return header, rows
 
 
@@ -7494,7 +7572,7 @@ EXPORTS = OrderedDict([
     ("members", ("人財一覧", "1人1行（対象外の人も含む）。Gr・役割・勤務形態・対象外と、月ごとの回答（回答／未回答／対象外／対象前）", export_members)),
     ("respondents", ("回答者の意欲・技術", "回答した人（対象外を除く）ごとの意欲・月次の進め方・使える技術・学びたい技術・登録した業務", export_respondents)),
     ("monthly", ("月次アンケートの回答", "1回答1行。全月度・全設問とコメント", export_monthly)),
-    ("questions", ("月次アンケートの設問", "月度ごとの設問（1設問1行）。種類・選択肢・必須・出す条件", export_questions)),
+    ("questions", ("月次アンケートの設問", "月度ごとの設問（1設問1行）。回答画面と同じ番号・種類・選択肢（表現と集計に使う値）・必須・出す条件", export_questions)),
     ("workplaces", ("Gr・役割マスタ", "Gr・役割の一覧", export_workplaces)),
     ("domains", ("業務領域マスタ", "業務領域（業務体系）の一覧", export_domains)),
 ])
@@ -9653,7 +9731,7 @@ TEMPLATES = {
 <div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">
   <div>
     <h2 class="mb-0">月次アンケートの設問</h2>
-    <div class="text-muted small">月度ごとに設問を決めます。基本設問（鍵マーク）は毎月の推移に使うため、文面だけ変えられます。選択肢と必須は固定です。</div>
+    <div class="text-muted small">月度ごとに設問を決めます。変えられるのは来月以降の月度だけです（今月と過去の月度は、すでに回答した人のデータと対応が取れなくなるため変えられません）。基本設問（鍵マーク）は毎月の推移に使うため、設問の文面と選択肢の表現だけ変えられます（選択肢の数・順番・意味と必須は固定）。</div>
   </div>
   <form method="get" class="d-flex gap-2 align-items-center">
     <input type="month" name="period" class="form-control form-control-sm" value="{{ period }}" onchange="this.form.submit()">
@@ -9664,27 +9742,45 @@ TEMPLATES = {
   <div class="col-lg-8">
     <div class="card"><div class="card-body">
       <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
-        <h5 class="card-title mb-0">{{ period_label }}の設問 {% if response_count %}<span class="badge text-bg-secondary ms-1">回答 {{ response_count }} 件</span>{% endif %}</h5>
+        <h5 class="card-title mb-0">{{ period_label }}の設問 {% if response_count %}<span class="badge text-bg-secondary ms-1">回答 {{ response_count }} 件</span>{% endif %}{% if locked %}<span class="badge text-bg-light border ms-1"><i class="bi bi-lock-fill"></i> 変更できません</span>{% endif %}</h5>
+        {% if not locked %}
         <div class="d-flex gap-1 flex-wrap">
           <button type="button" class="btn btn-sm btn-outline-secondary" id="qe-copy-prev">前月（{{ prev_period }}）をコピー</button>
           <button type="button" class="btn btn-sm btn-outline-secondary" id="qe-reset">基本設問に戻す</button>
         </div>
+        {% endif %}
       </div>
-      {% if response_count %}<div class="alert alert-warning py-2 small">この月度には回答があります。設問を変えると、変更前の回答と対応が取れなくなることがあります。</div>{% endif %}
-      {% if survey is none %}<div class="alert alert-info py-2 small">この月度の設問セットはまだありません。直近の月度（なければ基本設問）を表示しています。「保存する」を押すと作られます。</div>{% endif %}
+      {% if locked %}
+      <div class="alert alert-secondary py-2 small d-flex flex-wrap align-items-center gap-2">
+        <span class="flex-grow-1"><i class="bi bi-lock-fill me-1"></i>{{ '今月' if period == current_period else '過去の月度' }}の設問は変更できません（すでに回答した人のデータと対応が取れなくなるため）。変えるときは来月以降の月度で変更してください。</span>
+        <a class="btn btn-sm btn-outline-primary" href="{{ url_for('monthly.survey_admin', period=next_period) }}">{{ next_label }}の設問を編集する</a>
+      </div>
+      {% endif %}
+      {% if survey is none %}
+      {% if period >= current_period %}
+      <div class="alert alert-info py-2 small">この月度の設問セットはまだありません。{% if locked %}回答フォームが初めて開かれたときに、直近の月度（なければ基本設問）の設問で作られます。下はその設問です。{% else %}直近の月度（なければ基本設問）を表示しています。「保存する」を押すと作られます。{% endif %}</div>
+      {% else %}
+      <div class="alert alert-light border py-2 small">この月度の設問セットはありません。</div>
+      {% endif %}
+      {% endif %}
+      {% if has_questions %}<p class="small text-muted mb-2">番号は回答画面と同じです。字下げした設問（1-2 など）と <i class="bi bi-arrow-return-right"></i> の付いた設問は、上の設問で決まった選択肢を選んだ人にだけ出ます。どの選択肢で何が出るかは、親の設問の選択肢の横に出ます。</p>{% endif %}
       <div id="qe-list"></div>
+      {% if not locked %}
       <button type="button" class="btn btn-outline-primary w-100 mt-2" id="qe-add"><i class="bi bi-plus-lg me-1"></i>設問を追加</button>
+      {% endif %}
+      {% if not locked or can_toggle %}
       <hr>
       <div class="d-flex flex-wrap justify-content-between align-items-center gap-2">
         <div class="form-check form-switch mb-0">
           <input class="form-check-input" type="checkbox" id="qe-active" {% if is_active %}checked{% endif %}>
-          <label class="form-check-label" for="qe-active">この月度の回答を受け付ける</label>
+          <label class="form-check-label" for="qe-active">この月度の回答を受け付ける{% if locked %}<span class="text-muted small ms-1">（切り替えるとすぐ保存します）</span>{% endif %}</label>
         </div>
         <div class="d-flex align-items-center gap-2">
           <span id="qe-msg" class="small"></span>
-          <button type="button" class="btn btn-primary" id="qe-save">保存する</button>
+          {% if not locked %}<button type="button" class="btn btn-primary" id="qe-save">保存する</button>{% endif %}
         </div>
       </div>
+      {% endif %}
     </div></div>
   </div>
   <div class="col-lg-4">
@@ -9695,12 +9791,12 @@ TEMPLATES = {
         <tbody>
         {% for s in surveys %}
         <tr class="{% if s.period == period %}table-primary{% endif %}">
-          <td><a href="{{ url_for('monthly.survey_admin', period=s.period) }}">{{ s.period_label }}</a>{% if s.period == current_period %} <span class="badge text-bg-primary">今月</span>{% endif %}</td>
+          <td><a href="{{ url_for('monthly.survey_admin', period=s.period) }}">{{ s.period_label }}</a>{% if s.period == current_period %} <span class="badge text-bg-primary">今月</span>{% elif s.period > current_period %} <span class="badge text-bg-light border">編集できます</span>{% endif %}</td>
           <td class="text-end">{{ s.questions|length }}</td>
           <td class="text-end">{{ counts.get(s.period, 0) }}</td>
-          <td>{% if s.is_active %}<span class="badge text-bg-success">受付中</span>{% else %}<span class="badge text-bg-secondary">停止</span>{% endif %}</td>
+          <td>{% if s.period < current_period and s.period not in answerable %}<span class="badge text-bg-light border">終了</span>{% elif s.is_active %}<span class="badge text-bg-success">受付中</span>{% else %}<span class="badge text-bg-secondary">停止</span>{% endif %}</td>
           <td class="text-end">
-            {% if not counts.get(s.period) %}
+            {% if s.period > current_period %}
             <form method="post" action="{{ url_for('monthly.survey_admin_delete', survey_id=s.id) }}" data-confirm="{{ s.period_label }}の設問セットを削除しますか？"><button class="btn btn-sm btn-outline-danger">削除</button></form>
             {% endif %}
           </td>
@@ -9708,7 +9804,7 @@ TEMPLATES = {
         {% endfor %}
         </tbody>
       </table>
-      <p class="small text-muted mt-2 mb-0">月度の設問セットは、回答フォームが初めて開かれたときに直近の月度からコピーして自動で作られます。この編集画面は開いただけでは作らず、保存したときに作ります。</p>
+      <p class="small text-muted mt-2 mb-0">月度の設問セットは、回答フォームが初めて開かれたときに直近の月度からコピーして自動で作られます。来月以降の分は、この画面で先に作っておけます（開いただけでは作らず、保存したときに作ります）。今月と過去の月度は見るだけです。回答できるのは今月と前月だけなので、それより前の月度は「終了」と出します。</p>
     </div></div>
   </div>
 </div>
@@ -9716,28 +9812,30 @@ TEMPLATES = {
 <template id="qe-item">
   <div class="qe-q card mb-2">
     <div class="card-body py-3">
+      <div class="qe-cond small d-none"><i class="bi bi-arrow-return-right me-1"></i><span class="qe-cond-text"></span></div>
       <div class="d-flex align-items-start gap-2">
-        <div class="qe-handle text-muted small pt-2"><span class="qe-index"></span></div>
+        <div class="qe-handle pt-2"><span class="qe-index"></span></div>
         <div class="flex-grow-1">
           <div class="row g-2">
-            <div class="col-md-8"><input type="text" class="form-control qe-text" placeholder="設問の文章" maxlength="200"></div>
-            <div class="col-6 col-md-2">
-              <select class="form-select qe-type"><option value="choice">選択（1つ）</option><option value="text">記述</option><option value="list">記述（複数）</option></select>
+            <div class="col-md-7"><input type="text" class="form-control qe-text" placeholder="設問の文章" maxlength="200" aria-label="設問の文章"></div>
+            <div class="col-6 col-md-3">
+              <select class="form-select qe-type" aria-label="設問の種類"><option value="choice">選択（1つ）</option><option value="text">記述</option><option value="list">記述（複数）</option></select>
             </div>
-            <div class="col-6 col-md-2 d-flex align-items-center">
-              <div class="form-check mb-0"><input class="form-check-input qe-required" type="checkbox"><label class="form-check-label small">必須</label></div>
+            <div class="col-6 col-md-2 d-flex align-items-center qe-req-wrap">
+              <label class="form-check mb-0"><input class="form-check-input qe-required" type="checkbox"><span class="form-check-label small">必須</span></label>
             </div>
           </div>
           <div class="qe-options mt-2">
-            <label class="form-label small mb-1">選択肢（1行に1つ、2〜7個。上から順に「良い→悪い」などの順で）</label>
-            <textarea class="form-control form-control-sm qe-opts" rows="3"></textarea>
+            <div class="form-label small mb-1 qe-options-label">選択肢（1行に1つ、2〜7個。上から順に「良い→悪い」などの順で）</div>
+            <textarea class="form-control form-control-sm qe-opts" rows="3" aria-label="選択肢"></textarea>
+            <div class="qe-choices d-none"></div>
           </div>
           <div class="qe-placeholder mt-2 d-none">
-            <input type="text" class="form-control form-control-sm qe-ph" placeholder="記入欄の例文（任意）" maxlength="100">
+            <input type="text" class="form-control form-control-sm qe-ph" placeholder="記入欄の例文（任意）" maxlength="100" aria-label="記入欄の例文">
           </div>
-          <div class="small text-muted mt-1 qe-core d-none"><i class="bi bi-lock-fill me-1"></i>基本設問（毎月の推移に使います。選択肢の変更と削除はできません）</div>
+          <div class="small text-muted mt-1 qe-core d-none"><i class="bi bi-lock-fill me-1"></i><span class="qe-core-text"></span></div>
         </div>
-        <div class="btn-group-vertical btn-group-sm">
+        <div class="btn-group-vertical btn-group-sm qe-btns">
           <button type="button" class="btn btn-outline-secondary qe-up" title="上へ">▲</button>
           <button type="button" class="btn btn-outline-secondary qe-down" title="下へ">▼</button>
           <button type="button" class="btn btn-outline-danger qe-del" title="削除">×</button>
@@ -9753,44 +9851,124 @@ TEMPLATES = {
 (function () {
   var CORE = {{ core_keys|tojson }};
   var LABELS = {{ C.MONTHLY_KPI_LABELS|tojson }};
+  var LOCKED = {{ locked|tojson }};
   var list = document.getElementById("qe-list");
   var tpl = document.getElementById("qe-item");
   var questions = JSON.parse(document.getElementById("qe-data").textContent);
   var msg = document.getElementById("qe-msg");
+  var active = document.getElementById("qe-active");
+
+  function isCore(q) { return CORE.indexOf(q.key) >= 0; }
+  function depOf(q) { return q.depends && q.depends.key ? q.depends : null; }
+  function labelsOf(q) {
+    var opts = q.options || [];
+    var l = Array.isArray(q.labels) && q.labels.length === opts.length ? q.labels : opts;
+    return opts.map(function (o, k) { return String(l[k] || "").trim() || o; });
+  }
+  function indexOfKey(key) {
+    for (var j = 0; j < questions.length; j++) { if (key && questions[j].key === key) return j; }
+    return -1;
+  }
+  function numbers() {
+    var nos = {}, subs = {}, out = [], main = 0;
+    questions.forEach(function (q) {
+      var d = depOf(q);
+      if (d && !d.main) {
+        var grp = d.key + "|" + (d.show_if || []).join("/");
+        subs[grp] = (subs[grp] || 1) + 1;
+        out.push((nos[d.key] || "?") + "-" + subs[grp]);
+      } else {
+        main += 1;
+        if (q.key) nos[q.key] = main;
+        out.push(String(main));
+      }
+    });
+    return out;
+  }
+  function followers(q, value, nos) {
+    var out = [];
+    questions.forEach(function (x, j) {
+      var d = depOf(x);
+      if (q.key && d && d.key === q.key && (d.show_if || []).indexOf(value) >= 0) out.push(nos[j]);
+    });
+    return out;
+  }
+  function condText(q, nos) {
+    var d = depOf(q), pi = indexOfKey(d.key), p = questions[pi];
+    var lbl = p ? labelsOf(p) : [];
+    var vals = (d.show_if || []).map(function (v) {
+      var k = p ? (p.options || []).indexOf(v) : -1;
+      return "「" + (k >= 0 ? lbl[k] : v) + "」";
+    }).join("か");
+    return (pi >= 0 ? nos[pi] : "?") + " で" + vals + "を選んだ人にだけ出します" + (d.required ? "（出たら必須）" : "");
+  }
 
   function render() {
     list.innerHTML = "";
     questions.forEach(function (q, i) {
       var node = tpl.content.firstElementChild.cloneNode(true);
+      var core = isCore(q), d = depOf(q);
       node.dataset.index = i;
-      node.querySelector(".qe-index").textContent = (i + 1) + ".";
+      if (d && !d.main) node.classList.add("qe-sub");
       node.querySelector(".qe-text").value = q.text || "";
       node.querySelector(".qe-type").value = q.type || "choice";
       node.querySelector(".qe-required").checked = !!q.required;
-      node.querySelector(".qe-opts").value = (q.options || []).join("\n");
       node.querySelector(".qe-ph").value = q.placeholder || "";
-      var isCore = CORE.indexOf(q.key) >= 0;
-      if (isCore) {
-        node.querySelector(".qe-core").classList.remove("d-none");
-        node.querySelector(".qe-core").insertAdjacentText("beforeend", LABELS[q.key] ? "　→ " + LABELS[q.key] : "");
-        node.querySelector(".qe-del").disabled = true;
-        node.querySelector(".qe-type").disabled = true;
-        node.querySelector(".qe-opts").disabled = true;
-        node.querySelector(".qe-required").disabled = true;
+      if (d) {
+        node.querySelector(".qe-cond").classList.remove("d-none");
+        node.querySelector(".qe-req-wrap").innerHTML = '<span class="small text-muted">' + (d.required ? "出たら必須" : "任意") + "</span>";
       }
-      if (q.depends && q.depends.key) {
-        var parentQ = questions.filter(function (x) { return x.key === q.depends.key; })[0];
-        var cond = (q.depends.show_if || q.depends.required_if || []).join("／");
-        var coreNote = node.querySelector(".qe-core");
-        coreNote.classList.remove("d-none");
-        coreNote.insertAdjacentText("beforeend", "　条件つき: 「" + (parentQ ? parentQ.text : q.depends.key) + "」が「" + cond + "」のときだけ出します（出たら必須）");
+      if (core && q.type === "choice") {
+        node.querySelector(".qe-opts").classList.add("d-none");
+        node.querySelector(".qe-options-label").textContent = LOCKED ? "選択肢" : "選択肢（表現だけ変えられます。数・順番・意味は変えられません）";
+        var box = node.querySelector(".qe-choices");
+        box.classList.remove("d-none");
+        labelsOf(q).forEach(function (label, k) {
+          var row = document.createElement("div");
+          row.className = "qe-choice";
+          row.innerHTML = '<input type="text" class="form-control form-control-sm qe-label" maxlength="60"><span class="qe-follow"></span><div class="qe-orig"></div>';
+          var inp = row.querySelector(".qe-label");
+          inp.value = label;
+          inp.setAttribute("aria-label", "選択肢「" + q.options[k] + "」の表現");
+          inp.addEventListener("input", refresh);
+          box.appendChild(row);
+        });
+      } else {
+        node.querySelector(".qe-opts").value = (q.options || []).join("\n");
+      }
+      if (core) {
+        var note = node.querySelector(".qe-core");
+        note.classList.remove("d-none");
+        note.querySelector(".qe-core-text").textContent = "基本設問（毎月の推移に使います。削除・並べ替え・必須の変更はできません）" + (LABELS[q.key] ? "　→ " + LABELS[q.key] : "");
+        ["qe-del", "qe-type", "qe-required", "qe-up", "qe-down"].forEach(function (c) { var el = node.querySelector("." + c); if (el) el.disabled = true; });
+        node.querySelector(".qe-up").title = node.querySelector(".qe-down").title = "基本設問の順番は変えられません";
+      }
+      if (LOCKED) {
+        node.querySelectorAll("input, select, textarea").forEach(function (el) { el.disabled = true; });
+        node.querySelector(".qe-btns").classList.add("d-none");
       }
       toggleType(node, q.type);
       node.querySelector(".qe-type").addEventListener("change", function (e) { q.type = e.target.value; toggleType(node, q.type); });
       node.querySelector(".qe-up").addEventListener("click", function () { if (i > 0) { sync(); questions.splice(i - 1, 0, questions.splice(i, 1)[0]); render(); } });
       node.querySelector(".qe-down").addEventListener("click", function () { if (i < questions.length - 1) { sync(); questions.splice(i + 1, 0, questions.splice(i, 1)[0]); render(); } });
-      node.querySelector(".qe-del").addEventListener("click", function () { if (isCore) return; sync(); questions.splice(i, 1); render(); });
+      node.querySelector(".qe-del").addEventListener("click", function () { if (core) return; sync(); questions.splice(i, 1); render(); });
       list.appendChild(node);
+    });
+    refresh();
+  }
+  function refresh() {
+    sync();
+    var nos = numbers();
+    list.querySelectorAll(".qe-q").forEach(function (node, i) {
+      var q = questions[i];
+      node.querySelector(".qe-index").textContent = nos[i];
+      if (depOf(q)) node.querySelector(".qe-cond-text").textContent = condText(q, nos);
+      node.querySelectorAll(".qe-choice").forEach(function (row, k) {
+        var o = q.options[k], v = row.querySelector(".qe-label").value.trim();
+        var f = followers(q, o, nos);
+        row.querySelector(".qe-follow").textContent = f.length ? "→ " + f.join("・") + " を出す" : "";
+        row.querySelector(".qe-orig").textContent = !v ? "空のときは「" + o + "」と出します" : (v !== o ? "集計では「" + o + "」として数えます" : "");
+      });
     });
   }
   function toggleType(node, type) {
@@ -9802,14 +9980,18 @@ TEMPLATES = {
       var q = questions[i];
       q.text = node.querySelector(".qe-text").value.trim();
       q.type = node.querySelector(".qe-type").value;
-      q.required = node.querySelector(".qe-required").checked;
-      q.options = node.querySelector(".qe-opts").value.split("\n").map(function (s) { return s.trim(); }).filter(Boolean);
+      var req = node.querySelector(".qe-required");
+      if (req) q.required = req.checked;
+      var labels = node.querySelectorAll(".qe-label");
+      if (labels.length) q.labels = Array.prototype.map.call(labels, function (el) { return el.value.trim(); });
+      else q.options = node.querySelector(".qe-opts").value.split("\n").map(function (t) { return t.trim(); }).filter(Boolean);
       q.placeholder = node.querySelector(".qe-ph").value.trim();
     });
   }
-  function note(text, ok) { msg.textContent = text; msg.className = "small " + (ok ? "text-success" : "text-danger"); }
+  function note(text, ok) { if (!msg) return; msg.textContent = text; msg.className = "small " + (ok ? "text-success" : "text-danger"); }
+  function on(id, fn) { var el = document.getElementById(id); if (el) el.addEventListener("click", fn); }
 
-  document.getElementById("qe-add").addEventListener("click", function () {
+  on("qe-add", function () {
     sync(); questions.push({ key: "", type: "choice", text: "", options: ["そう思う", "どちらともいえない", "そう思わない"], required: true }); render();
     var last = list.lastElementChild; if (last) { last.querySelector(".qe-text").focus(); last.scrollIntoView({ behavior: "smooth", block: "center" }); }
   });
@@ -9819,19 +10001,29 @@ TEMPLATES = {
     if (!j.questions) { note(j.message || "読み込めませんでした", false); return; }
     questions = j.questions; render(); note(label + "を読み込みました。保存ボタンで確定します。", true);
   }
-  document.getElementById("qe-copy-prev").addEventListener("click", function () { load("{{ prev_period }}", "前月の設問"); });
-  document.getElementById("qe-reset").addEventListener("click", function () { if (confirm("基本設問に戻しますか？追加した設問は消えます（保存するまで確定しません）。")) load("default", "基本設問"); });
-  document.getElementById("qe-save").addEventListener("click", async function () {
+  on("qe-copy-prev", function () { load("{{ prev_period }}", "前月の設問"); });
+  on("qe-reset", function () { if (confirm("基本設問に戻しますか？追加した設問と、選択肢の表現の変更は消えます（保存するまで確定しません）。")) load("default", "基本設問"); });
+  on("qe-save", async function () {
     sync();
     var btn = this; btn.disabled = true; note("保存中…", true);
     try {
       var r = await fetch("{{ url_for('monthly.survey_admin_save') }}", { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" },
-        body: JSON.stringify({ period: "{{ period }}", questions: questions, is_active: document.getElementById("qe-active").checked }) });
+        body: JSON.stringify({ period: "{{ period }}", questions: questions, is_active: active ? active.checked : true }) });
       var j = await r.json();
       note(j.message || (j.success ? "保存しました" : "保存できませんでした"), !!j.success);
       if (j.success) setTimeout(function () { window.location.reload(); }, 600);
     } catch (e) { note("保存できませんでした。通信状態を確認してください。", false); }
     btn.disabled = false;
+  });
+  if (LOCKED && active) active.addEventListener("change", async function () {
+    var want = active.checked;
+    try {
+      var r = await fetch("{{ url_for('monthly.survey_admin_active') }}", { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ period: "{{ period }}", is_active: want }) });
+      var j = await r.json();
+      note(j.message || (j.success ? "保存しました" : "保存できませんでした"), !!j.success);
+      if (!j.success) active.checked = !want;
+    } catch (e) { active.checked = !want; note("保存できませんでした。通信状態を確認してください。", false); }
   });
   render();
 })();
@@ -9900,19 +10092,10 @@ TEMPLATES = {
         <div id="emp-prefill" class="form-text mq-prefill-note"></div>
       </div>
 
-      {% set ns = namespace(main=0, nos={}, subs={}, labels={}) %}
+      {% set qnos = C.question_numbers(questions) %}
       {% for q in questions %}
       {% set is_sub = q.depends and not q.depends.main %}
-      {% if is_sub %}
-        {% set grp = q.depends.key ~ '|' ~ ((q.depends.show_if or q.depends.required_if or [])|join('/')) %}
-        {% set _ = ns.subs.update({grp: ns.subs.get(grp, 1) + 1}) %}
-        {% set label = ns.nos.get(q.depends.key, '?') ~ '-' ~ ns.subs[grp] %}
-      {% else %}
-        {% set ns.main = ns.main + 1 %}
-        {% set _ = ns.nos.update({q.key: ns.main}) %}
-        {% set label = ns.main %}
-      {% endif %}
-      {% set _ = ns.labels.update({q.key: label}) %}
+      {% set label = qnos[q.key] %}
       <div class="mq-q{% if is_sub %} mq-sub{% endif %}{% if q.depends %} d-none{% endif %}" data-key="{{ q.key }}" data-type="{{ q.type }}" data-required="{{ 1 if q.required else 0 }}"{% if q.depends %} data-dep-key="{{ q.depends.key }}" data-dep-show='{{ (q.depends.show_if or q.depends.required_if or [])|tojson }}' data-dep-required="{{ 1 if (q.depends.required or q.depends.required_if) else 0 }}"{% endif %}>
         <div class="mq-q-head">
           <span class="mq-no">{{ label }}</span>
@@ -9921,8 +10104,9 @@ TEMPLATES = {
         </div>
         {% if q.type == 'choice' %}
         <div class="mq-options">
+          {% set lbls = C.option_labels(q) %}
           {% for opt in q.options %}
-          <label class="mq-option"><input type="radio" name="ans-{{ q.key }}" value="{{ opt }}"><span>{{ opt }}</span></label>
+          <label class="mq-option"><input type="radio" name="ans-{{ q.key }}" value="{{ opt }}"><span>{{ lbls[loop.index0] }}</span></label>
           {% endfor %}
         </div>
         {% elif q.type == 'list' %}
@@ -9932,7 +10116,7 @@ TEMPLATES = {
           <div class="mq-list-row"><input type="text" name="ans-{{ q.key }}" class="form-control" data-list-item maxlength="100" placeholder="2つ目（あれば）"><button type="button" class="mq-list-del" aria-label="この行を消す">×</button></div>
           <div class="mq-list-actions">
             <button type="button" class="btn btn-sm btn-outline-primary mq-list-add"><i class="bi bi-plus-lg"></i> 業務を追加</button>
-            {% if copy_from and ns.labels.get(copy_from) %}<button type="button" class="btn btn-sm btn-outline-secondary mq-list-copy" data-from="{{ copy_from }}"><i class="bi bi-arrow-down-short"></i> {{ ns.labels[copy_from] }} で答えた業務名を転記</button>{% endif %}
+            {% if copy_from and qnos.get(copy_from) %}<button type="button" class="btn btn-sm btn-outline-secondary mq-list-copy" data-from="{{ copy_from }}"><i class="bi bi-arrow-down-short"></i> {{ qnos[copy_from] }} で答えた業務名を転記</button>{% endif %}
           </div>
         </div>
         {% else %}
@@ -10349,13 +10533,13 @@ TEMPLATES = {
   {% for s in stats %}
   <div class="col-lg-6">
     <div class="card h-100"><div class="card-body">
-      <div class="mq-stat-head"><span class="mq-no">{{ loop.index }}</span><span class="fw-semibold">{{ s.q.text }}</span></div>
+      <div class="mq-stat-head"><span class="mq-no">{{ qnos.get(s.q.key, loop.index) }}</span><span class="fw-semibold">{{ s.q.text }}</span></div>
       {% if s.q.type == 'choice' %}
         {% if s.n %}
         <div class="mq-bars">
           {% for opt in s.options %}
           <div class="mq-bar-row">
-            <div class="mq-bar-label">{{ opt }}</div>
+            <div class="mq-bar-label">{{ s.labels[loop.index0] }}</div>
             <div class="mq-bar"><span style="width: {{ s.percents[loop.index0] }}%"></span></div>
             <div class="mq-bar-val">{{ s.counts[loop.index0] }}<span class="text-muted"> 人・{{ s.percents[loop.index0] }}%</span></div>
           </div>
@@ -10393,7 +10577,7 @@ TEMPLATES = {
     {% for r in responses %}
     <tr>
       <td class="small">{{ r.emp_id }}</td><td>{{ r.name }}</td><td class="small">{{ r.workplace.name if r.workplace else '' }}</td>
-      {% for q in survey.questions if q.type == 'choice' %}<td class="small">{{ r.answers.get(q.key, '') }}</td>{% endfor %}
+      {% for q in survey.questions if q.type == 'choice' %}<td class="small">{{ C.option_label(q, r.answers.get(q.key, '')) }}</td>{% endfor %}
       <td class="small text-muted">{{ r.created_at|jpdate('%m/%d') }}</td>
     </tr>
     {% else %}
@@ -12676,7 +12860,16 @@ summary { transition: color 0.15s ease; }
 .mq-list li:first-child { border-top: 0; padding-top: 0; }
 /* ---- 設問エディタ ---- */
 .qe-q { border: 1px solid var(--ui-line); box-shadow: none; }
-.qe-handle { min-width: 1.6rem; font-weight: 700; }
+.qe-handle { min-width: 2.4rem; }
+.qe-index { display: inline-block; min-width: 2rem; text-align: center; border-radius: 999px; padding: 0.1rem 0.45rem; background: var(--ui-fill); color: var(--ui-text); font-weight: 700; font-size: 0.85rem; }
+.qe-q.qe-sub { margin-left: 2rem; border-left: 3px solid #a5b4fc; }
+.qe-q.qe-sub .qe-index { background: var(--ui-text-2); color: #fff; }
+.qe-cond { color: #4338ca; font-weight: 600; margin-bottom: 0.5rem; }
+.qe-choice { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.15rem 0.75rem; align-items: center; margin-bottom: 0.4rem; }
+.qe-follow { color: #4338ca; font-weight: 600; font-size: 0.85rem; white-space: nowrap; }
+.qe-orig { grid-column: 1 / -1; font-size: 0.8rem; color: var(--ui-text-2); }
+.qe-orig:empty { display: none; }
+@media (max-width: 575.98px) { .qe-q.qe-sub { margin-left: 0.75rem; } .qe-choice { grid-template-columns: 1fr; } }
 /* ---- 自動化アイテム登録（1画面） ---- */
 .rq { margin: 0 auto; }
 .rq-top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.75rem 1.5rem; margin-bottom: 1rem; }
