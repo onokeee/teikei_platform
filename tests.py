@@ -90,11 +90,54 @@ def smoke_bizmap_edit():
         dg.edge("t1", "p_a", "work", handoff="push")
         dg.edge("s_b", "t1", "info", method="system", show_method=app_module.show_method_for("system", "system"))
         src = dg.render()
-        check("s_a:::source@{ shape: doc, label:" in src and "bi-file-earmark-excel-fill" in src and 's_b[("' in src and 't1["週報の作成"]:::task' in src
-              and "<b>製造1課 課長</b>" in src and 'p_a["' in src and '== "前が伝えに行く" ==>' in src and "linkStyle 1 stroke:#495057" in src and "システム（登録・参照）" not in src,
-              "Mermaid: 作業は四角（だれを太字で）、情報は媒体の形とアイコン、仕事の流れは太い灰の矢印に引き継ぎ方、媒体から分かる方法は書かない")
+        check("s_a:::source@{ shape: doc, label:" in src and "bi-file-earmark-excel-fill" in src and 's_b[("' in src and 't1["<b>製造1課</b><br/>週報の作成"]:::task' in src
+              and "<b>製造1課 課長</b>" in src and 'p_a["' in src and '== "前が伝えに行く" ==>' in src and "linkStyle 1 stroke:#495057" in src
+              and "\"<i class='bi bi-database-fill fl'></i> システム（登録・参照）\"" in src and "\"<span class='mg'><i class='bi bi-folder-fill fl'></i> 共有フォルダ</span>\"" in src,
+              "Mermaid: 作業は四角（だれを太字で。業務の箱にも）、情報は媒体の形とアイコン、仕事の流れは太い灰の矢印に引き継ぎ方。方法は媒体から分かるものも書き、分からない線は媒体から推定して灰色で書く")
         legend = app_module.map_legend_html(dg)
         check("箱と線" in legend and "仕事の流れ" in legend and "情報の流れ" in legend and "Excel" in legend and "PowerPoint" not in legend and "上司・役職" in legend, "凡例は箱と線の2種類と、図に出てくる色・媒体・だれだけ")
+        check('<span class="legend-title">箱と線<span class="tip"' in legend and "前の業務・次の業務でつながった作業の間に引きます" in legend and '<span class="legend-title">方法<span class="tip"' in legend
+              and "灰色の方法は、方法の分からない線に、情報の媒体から推定して出しています" in legend,
+              "凡例: 仕事の流れがどこに引かれるかを ⓘ で説明し、推定した方法（灰色）があれば「方法」の ⓘ で説明する")
+        dl = app_module.Diagram("LR")
+        dl.node("t1", "前の業務", "task")
+        dl.node("t2", "次の業務", "task")
+        dl.node("o1", "集計表（Excel）", "output")
+        dl.edge("t1", "t2", "work", inferred=True)
+        dl.edge("t1", "o1", "info")
+        legend_l = app_module.map_legend_html(dl)
+        check('<i class="lg-line lg-line-work-guess"></i>仕事の流れ（名前から推定）' in legend_l and ">仕事の流れ</span>" not in legend_l and ">情報の流れ</span>" in legend_l
+              and "名前から推定したつながり" not in legend_l and ".lg-line-work-guess { border-top: 3px dashed #495057; }" in client.get("/static/style.css").data.decode("utf-8"),
+              "凡例: 名前から推定した仕事の流れは「仕事の流れ（名前から推定）」（濃い太い点線）として並べ、図にない実線の仕事の流れは並べない")
+        check(app_module.CLS_LABELS["work"] == "使う人・関わる人" and "他の人・部署の作業" not in app_module.CLS_LABELS.values(),
+              "色の「他の人・部署の作業」は、全体を見る図でも分かるよう「使う人・関わる人」と呼ぶ")
+        dm = app_module.Diagram("LR")
+        dm.node("s_mail", "メールで届く内容", "source", hint="mail")
+        dm.node("t1", "クレーム対応の進捗報告", "task", who={"actor": "team", "label": "試験 花子", "state": "ok"})
+        dm.node("o1", "進捗報告メール", "output")
+        dm.node("p_boss", "使いみち未確認", "work", who=app_module.who_of("課長", "製造1課"))
+        dm.node("s_paper", "紙の帳票", "source")
+        dm.node("o_x", "集計表（Excel）", "output")
+        dm.node("o_pdf", "検査成績書（PDF）", "output")
+        dm.node("p_ext", "使いみち未確認", "work", who={"actor": "external", "label": "顧客", "state": "ok"})
+        dm.info_edge("s_mail", "t1", "mail")
+        dm.edge("t1", "o1", "info")
+        dm.info_edge("o1", "p_boss", "")
+        dm.info_edge("s_paper", "t1", "")
+        dm.edge("t1", "o_x", "info")
+        dm.info_edge("o_pdf", "p_ext", "")
+        sh = {k: dm.shown(k[0], k[1], e) for k, e in dm.edges.items()}
+        lab = lambda a, b: (app_module.edge_label(sh[(a, b)]), bool(sh[(a, b)].get("method_guess")))
+        got_m = [lab("s_mail", "t1"), lab("t1", "o1"), lab("o1", "p_boss"), lab("s_paper", "t1"), lab("t1", "o_x"), lab("o_pdf", "p_ext")]
+        check(got_m == [("メール", False), ("", False), ("メール", False), ("手渡し", True), ("共有フォルダ", True), ("メール", True)] and not dm.edges[("s_mail", "t1")]["show_method"],
+              f"線の方法: 媒体と同じ方法も出し（メールで届く内容→メール）、箱の名前の語からも決め（進捗報告メール→メール）、分からなければ媒体の既定の方法を推定で出す（紙→手渡し、作るものの線は置き場だけ、社外へは共有フォルダでなくメール）: {got_m}")
+        src_m = dm.render()
+        check("\"<span class='mg'><i class='bi bi-person-walking fl'></i> 手渡し</span>\"" in src_m and "\"<i class='bi bi-envelope-fill fl'></i> メール\"" in src_m and 't1["<b>試験 花子</b><br/>' in src_m,
+              "一覧の図: 推定した方法は灰色（アイコンも）、分かっている方法は青のアイコン＋名前。業務の箱にだれを太字で出す")
+        dw = lambda x: app_module.doer_who(x, "製造1課")
+        check((dw("佐藤さん")["label"], dw("佐藤さん")["state"]) == ("佐藤さん", "ok") and (dw("佐藤課長")["label"], dw("佐藤課長")["actor"]) == ("佐藤課長", "boss")
+              and (dw("2班")["label"], dw("2班")["state"]) == ("2班", "ok") and dw("課長")["label"] == "製造1課 課長",
+              "作業のだれは、氏名や班もそのまま出す（役職だけならGr・役割を付ける）")
         check('"how"' in app_module.INTAKE_PROMPT and '"use"' in app_module.INTAKE_PROMPT and '"receive"' in app_module.INTAKE_PROMPT and "誰にどうやって渡し" in app_module.INTAKE_PROMPT
               and "氏名・〇〇さん" in app_module.INTAKE_PROMPT and "{methods}" not in app_module._intake_prompt() and "state.purpose" in app_module.FINALIZE_PROMPT,
               "聞き取り: 渡す相手・渡し方・使いみちを1問で聞き、受け取り方も集め、氏名は書かない")
@@ -109,8 +152,16 @@ def smoke_bizmap_edit():
               f"AI の state の手順に、受け取り元ごとの receive（どこから・何を・どのように）とだれがを残す（空の行は捨てる）: {cleaned['receive']}")
         rec_flow = app_module.build_steps_flow([dict(cleaned, no=1, system="", output="", to=""),
                                                  {"no": 2, "action": "課長が内容を承認する", "who": "課長", "receive": [{"from": "", "what": "", "how": ""}], "system": "", "output": "", "to": ""}], "製造1課")
-        check(labels(rec_flow, "st1") == {"ライン管理": "生産状況／電話", "PMK": "トラブル装置の対応状況／システム（登録・参照）"} and rec_flow.nodes["st2"]["who"] == "製造1課 課長" and rec_flow.nodes["st1"]["who"] == "製造1課",
+        check(labels(rec_flow, "st1") == {"ライン管理": "生産状況／電話", "PMK": "トラブル装置の対応状況／システム（登録・参照）"} and rec_flow.nodes["st2"]["who"] == "製造1課 課長" and rec_flow.nodes["st1"]["who"] == "",
               f"流れ図は receive から描く（並べ方によらず、受け取り元ごとに受け取る情報と受け取り方を線に書く）。本人以外がやる手順はそのだれ: {labels(rec_flow, 'st1')} {rec_flow.nodes['st2']['who']}")
+        t_me = app_module.Task(id=99903, name="手順の箱のだれ", headcount=3, steps_json=json.dumps([{"no": 1, "action": "集計する", "who": "自分"}, {"no": 2, "action": "確認する", "who": "佐藤さん"},
+                                                                                              {"no": 3, "action": "まとめる", "who": ""}], ensure_ascii=False))
+        t_me.respondent = app_module.Respondent(name="試験 花子", work_pattern="交代勤務", shift_team="2班")
+        f_me = app_module.build_task_flow(t_me)
+        whos_me = [f_me.nodes[k]["who"] for k in ("st1", "st2", "st3")]
+        check(app_module.task_doer(t_me) == "試験 花子（2班） ほか2人" and whos_me == ["試験 花子（2班） ほか2人", "佐藤さん", "試験 花子（2班） ほか2人"]
+              and all(app_module.show_who(f_me.nodes[k]) for k in ("st1", "st2", "st3")),
+              f"案件の流れ図: 手順の箱すべてに「だれが」を出す（自分・空なら登録した人の氏名と班・担当人数、ほかの人は書いたまま）: {whos_me}")
         t_rec = app_module.Task(id=99902, name="朝会資料準備2", steps_json=json.dumps([dict(cleaned, no=1)], ensure_ascii=False))
         rec_src = {x["name"]: (x["method"], x["info"]) for x in app_module._raw_task_sources(t_rec)}
         check(rec_src == {"ライン管理": ("phone", "生産状況"), "PMK": ("system", "トラブル装置の対応状況")}, f"業務マップの受け取り元も receive から（受け取り方・情報つき）: {rec_src}")
@@ -179,9 +230,13 @@ def smoke_bizmap_edit():
     check("auto_method" in fe and "classifySeq" in fe and "history[historyIndex] = snapshot()" in fe and "SELECT" in fe and "pop.offsetHeight" in fe,
           "編集: 「自動」で元の方法に戻す、判定の結果は履歴に入れ古い応答は捨てる、選択欄で Delete しても箱を消さない、ポップアップは実際の高さで収める")
     css_fe = client.get("/static/style.css").data.decode("utf-8")
-    check("function iconGlyph(icon)" in fe and 'getComputedStyle(i, "::before").content' in fe and '"class": "fe-edge-icon"' in fe and "function edgeMethodRow(e)" in fe
-          and '<span class="legend-title">方法</span>' in fe and '.fe-edge-label .fe-edge-icon { font-family: "bootstrap-icons"; fill: #5b8def; }' in css_fe and ".fl { color: #5b8def; }" in css_fe,
+    check("function iconGlyph(icon)" in fe and 'getComputedStyle(i, "::before").content' in fe and '"class": ("fe-edge-icon " + gc).trim()' in fe and "function edgeMethodRow(e)" in fe
+          and "<span class=\"legend-title\">方法'" in fe and '.fe-edge-label .fe-edge-icon { font-family: "bootstrap-icons"; fill: #5b8def; }' in css_fe and ".fl { color: #5b8def; }" in css_fe,
           "編集画面: 線のラベルの方法の名前の前にアイコン（bootstrap-icons の字・情報の線と同じ色）を出し、凡例に「方法」を並べる")
+    check("(KC.who_classes || []).indexOf(n.cls) >= 0" in fe and 'gc = e.method_guess ? "fe-edge-guess" : ""' in fe and "e.method_guess = !!e.auto_method_guess;" in fe
+          and "'-guess\"></i>' + k[1] + \"（名前から推定）</span>\"" in fe and "tipHtml(KC.tips.lines)" in fe and "tipHtml(KC.tips.guess)" in fe
+          and ".fe-edge-label .fe-edge-guess { fill: #9aa0a6; }" in css_fe and ".mg, .mg .fl { color: #9aa0a6; }" in css_fe,
+          "編集画面: 業務の箱にもだれを出し、推定した方法は灰色。手で方法を選ぶと推定の印を外し、「自動」で戻す。凡例は図にある線だけ並べ、ⓘ で説明する")
 
     # ---- 区分のキー: 追加した行のキーは保存し直しても変わらず、消したキーは使い回さない ----
     with app.app_context():
@@ -202,6 +257,17 @@ def smoke_bizmap_edit():
 
     # ---- 方法のアイコン: 管理で選べ（なしも選べる）、線のラベルの名前の前に出す ----
     html_mv = client.get("/admin/map-vocab").data.decode("utf-8")
+    check("<th>形</th><th>線の既定の方法</th>" in html_mv and 'var ms = { "": "なし" }; V.methods.forEach' in html_mv and 'row.shape = "doc"; row.method = "";' in html_mv
+          and "方法の分からない線に推定として灰色で出す方法です" in html_mv,
+          "管理 → 業務マップの区分: 媒体に「線の既定の方法」の欄（「なし」も選べる）")
+    with app.app_context():
+        v_media = app_module.vocab_public()
+    media0 = {x["key"]: x["method"] for x in v_media["media"]}
+    posted_m = [dict(x, method="") if x["key"] == "paper" else (dict(x, method="bogus") if x["key"] == "excel" else x) for x in v_media["media"]]
+    media5 = {x["key"]: x["method"] for x in client.post("/admin/map-vocab", json={"vocab": dict(v_media, media=posted_m)}).get_json()["vocab"]["media"]}
+    client.post("/admin/map-vocab", json={"reset": True})
+    check((media0["paper"], media0["excel"], media0["mail"], media0["system"], media0["unknown"]) == ("hand", "folder", "mail", "system", "") and (media5["paper"], media5["excel"], media5["mail"]) == ("", "", "mail"),
+          f"媒体の線の既定の方法: 紙＝手渡し、Excel＝共有フォルダ、メール本文＝メール、システム＝システム、不明＝なし。「なし」は空のまま、ない方法は空にする: {media5}")
     check("<th>除く語</th><th>アイコン</th><th>種類</th>" in html_mv and 'var icons = group === "methods" ? { "": "なし" } : {};' in html_mv and 'row.icon = "";' in html_mv
           and 'if (group !== "methods")' not in html_mv and "アイコンを選ぶと、線のラベルの方法の名前の前に出ます" in html_mv,
           "管理 → 業務マップの区分: 情報の流れの方法にもアイコンの欄（「なし」も選べる）")
@@ -586,8 +652,8 @@ def smoke_bizmap_edit():
         stored = json.loads(FlowMap.query.filter_by(scope=f"wp:{wp1}|dom:0").first().data)
         m_who = next(n for n in stored["nodes"] if n["id"] == "m_who")
         e_who = next(e for e in stored["edges"] if e["to"] == "m_who")
-    check(r.status_code == 200 and m_who["who"] == "担当者" and m_who["text"] == "課長に確認" and e_who["label"] == "担当者に電話",
-          f"保存するときにサーバーで氏名を置き換える（だれ・箱の名前・線のラベル。だれの区分を手で選んでいても）: {m_who['who']} / {m_who['text']} / {e_who['label']}")
+    check(r.status_code == 200 and m_who["who"] == "山田さん" and m_who["text"] == "課長に確認" and e_who["label"] == "担当者に電話",
+          f"保存するときにサーバーで箱の名前・線のラベルの氏名を置き換える（作業のだれは氏名・班のまま残す）: {m_who['who']} / {m_who['text']} / {e_who['label']}")
     with app.app_context():
         db.session.add(Task(name="日報の集計・確認", respondent_id=Respondent.query.filter_by(emp_id="DEMO-001").first().id, workplace_id=wp1, frequency="毎日", duration="15分未満"))
         db.session.commit()

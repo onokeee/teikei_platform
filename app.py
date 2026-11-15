@@ -1638,21 +1638,21 @@ DEFAULT_MAP_VOCAB = {
         {"key": "unknown", "label": "不明", "words": "不明、分からない、わからない", "exclude": "", "icon": "bi-question-circle-fill", "user": "分からない"},
     ],
     "media": [
-        {"key": "excel", "label": "Excel", "words": "Excel、エクセル、xlsx、xlsm、xls、スプレッドシート、表計算", "exclude": "", "icon": "bi-file-earmark-excel-fill", "shape": "doc"},
-        {"key": "word", "label": "Word", "words": "Word、ワード、docx", "exclude": "パスワード、キーワード", "icon": "bi-file-earmark-word-fill", "shape": "doc"},
-        {"key": "ppt", "label": "PowerPoint", "words": "PowerPoint、パワーポイント、パワポ、ppt、pptx、スライド", "exclude": "", "icon": "bi-file-earmark-ppt-fill", "shape": "doc"},
-        {"key": "pdf", "label": "PDF", "words": "PDF", "exclude": "", "icon": "bi-file-earmark-pdf-fill", "shape": "doc"},
-        {"key": "csv", "label": "CSV", "words": "CSV", "exclude": "", "icon": "bi-filetype-csv", "shape": "doc"},
-        {"key": "paper", "label": "紙・帳票", "words": "紙、帳票、伝票、用紙、手書き、印刷、プリント、チェックシート、チェック表、記録表、メモ", "exclude": "", "icon": "bi-file-earmark-text-fill", "shape": "doc"},
-        {"key": "photo", "label": "写真・画像", "words": "写真、画像、スクリーンショット、スクショ", "exclude": "", "icon": "bi-file-earmark-image-fill", "shape": "doc"},
-        {"key": "system", "label": "システムのデータ", "words": "システム、DB、データベース、SAP、基幹、MES、ERP、Access、サーバ、データ、モニタ、モニター、画面、端末、ディスプレイ、タブレット、表示器、表示盤、パネル、HMI", "exclude": "ファイルサーバ", "icon": "bi-database-fill", "shape": "cyl"},
-        {"key": "web", "label": "Web", "words": "Web、ウェブ、ホームページ、サイト、ブラウザ、ポータル、イントラ、URL", "exclude": "", "icon": "bi-globe2", "shape": "stadium"},
-        {"key": "mail", "label": "メール本文", "words": "メール本文、～メール", "exclude": "", "icon": "bi-envelope-fill", "shape": "stadium"},
-        {"key": "chat", "label": "チャット", "words": "チャット、Teams、Slack", "exclude": "", "icon": "bi-chat-dots-fill", "shape": "stadium"},
-        {"key": "verbal", "label": "口頭", "words": "口頭、伝言、聞いた内容、言われたこと、指示", "exclude": "指示書", "icon": "bi-chat-quote-fill", "shape": "stadium"},
-        {"key": "board", "label": "掲示・ホワイトボード", "words": "ホワイトボード、掲示物、掲示板、アンドン", "exclude": "", "icon": "bi-easel-fill", "shape": "stadium"},
-        {"key": "doc", "label": "その他の書類", "words": "日報、週報、月報、年報、報告書、集計表、一覧表、管理表、台帳、記録、帳簿、計画書、指示書、手順書、資料、リスト、～表、～書、～票、～簿", "exclude": "", "icon": "bi-file-earmark", "shape": "doc"},
-        {"key": "unknown", "label": "不明", "words": "", "exclude": "", "icon": "bi-question-square", "shape": "doc"},
+        {"key": "excel", "label": "Excel", "words": "Excel、エクセル、xlsx、xlsm、xls、スプレッドシート、表計算", "exclude": "", "icon": "bi-file-earmark-excel-fill", "shape": "doc", "method": "folder"},
+        {"key": "word", "label": "Word", "words": "Word、ワード、docx", "exclude": "パスワード、キーワード", "icon": "bi-file-earmark-word-fill", "shape": "doc", "method": "folder"},
+        {"key": "ppt", "label": "PowerPoint", "words": "PowerPoint、パワーポイント、パワポ、ppt、pptx、スライド", "exclude": "", "icon": "bi-file-earmark-ppt-fill", "shape": "doc", "method": "folder"},
+        {"key": "pdf", "label": "PDF", "words": "PDF", "exclude": "", "icon": "bi-file-earmark-pdf-fill", "shape": "doc", "method": "folder"},
+        {"key": "csv", "label": "CSV", "words": "CSV", "exclude": "", "icon": "bi-filetype-csv", "shape": "doc", "method": "folder"},
+        {"key": "paper", "label": "紙・帳票", "words": "紙、帳票、伝票、用紙、手書き、印刷、プリント、チェックシート、チェック表、記録表、メモ", "exclude": "", "icon": "bi-file-earmark-text-fill", "shape": "doc", "method": "hand"},
+        {"key": "photo", "label": "写真・画像", "words": "写真、画像、スクリーンショット、スクショ", "exclude": "", "icon": "bi-file-earmark-image-fill", "shape": "doc", "method": "folder"},
+        {"key": "system", "label": "システムのデータ", "words": "システム、DB、データベース、SAP、基幹、MES、ERP、Access、サーバ、データ、モニタ、モニター、画面、端末、ディスプレイ、タブレット、表示器、表示盤、パネル、HMI", "exclude": "ファイルサーバ", "icon": "bi-database-fill", "shape": "cyl", "method": "system"},
+        {"key": "web", "label": "Web", "words": "Web、ウェブ、ホームページ、サイト、ブラウザ、ポータル、イントラ、URL", "exclude": "", "icon": "bi-globe2", "shape": "stadium", "method": "system"},
+        {"key": "mail", "label": "メール本文", "words": "メール本文、～メール", "exclude": "", "icon": "bi-envelope-fill", "shape": "stadium", "method": "mail"},
+        {"key": "chat", "label": "チャット", "words": "チャット、Teams、Slack", "exclude": "", "icon": "bi-chat-dots-fill", "shape": "stadium", "method": "chat"},
+        {"key": "verbal", "label": "口頭", "words": "口頭、伝言、聞いた内容、言われたこと、指示", "exclude": "指示書", "icon": "bi-chat-quote-fill", "shape": "stadium", "method": "verbal"},
+        {"key": "board", "label": "掲示・ホワイトボード", "words": "ホワイトボード、掲示物、掲示板、アンドン", "exclude": "", "icon": "bi-easel-fill", "shape": "stadium", "method": "board"},
+        {"key": "doc", "label": "その他の書類", "words": "日報、週報、月報、年報、報告書、集計表、一覧表、管理表、台帳、記録、帳簿、計画書、指示書、手順書、資料、リスト、～表、～書、～票、～簿", "exclude": "", "icon": "bi-file-earmark", "shape": "doc", "method": "folder"},
+        {"key": "unknown", "label": "不明", "words": "", "exclude": "", "icon": "bi-question-square", "shape": "doc", "method": ""},
     ],
     "methods": [
         {"key": "phs", "label": "PHS", "words": "PHS、ピッチ", "exclude": "", "kind": "channel", "direction": "", "medium": "verbal", "icon": "bi-phone-fill"},
@@ -1749,6 +1749,8 @@ def _clean_vocab(data):
                 row["user"] = r.get("user") if r.get("user") in USER_CHOICES else (defaults[key]["user"] if key in defaults else "")
             if group == "media":
                 row["shape"] = r.get("shape") if r.get("shape") in SHAPE_CHOICES else "doc"
+                method = r.get("method") if "method" in r else (defaults[key].get("method", "") if key in defaults else "")
+                row["method"] = str(method or "")[:20]
             if group == "methods":
                 row["kind"] = r.get("kind") if r.get("kind") in METHOD_KIND_CHOICES else "channel"
                 row["direction"] = r.get("direction") if r.get("direction") in DIRECTION_CHOICES else ""
@@ -1762,6 +1764,10 @@ def _clean_vocab(data):
     for r in out["methods"]:
         if r["medium"] not in media_keys:
             r["medium"] = "unknown"
+    method_keys = {r["key"] for r in out["methods"]}
+    for r in out["media"]:
+        if r.get("method") not in method_keys:
+            r["method"] = ""
     out["_seq"] = seq
     hand = data.get("handoff") if isinstance(data.get("handoff"), dict) else {}
     out["handoff"] = {}
@@ -2063,7 +2069,7 @@ SHAPES = {
     "cyl": ('[("', '")]'),
 }
 CLS_LABELS = OrderedDict([
-    ("task", "登録済みの業務"), ("done", "完了した業務"), ("hold", "保留中の業務"), ("abolished", "廃止した業務"), ("work", "他の人・部署の作業"), ("pending", "未登録の業務（月次）"), ("warn", "使う人が分からない"),
+    ("task", "登録済みの業務"), ("done", "完了した業務"), ("hold", "保留中の業務"), ("abolished", "廃止した業務"), ("work", "使う人・関わる人"), ("pending", "未登録の業務（月次）"), ("warn", "使う人が分からない"),
     ("source", "取り出し元の情報"), ("output", "できるもの"), ("dupout", "同じできるもの（統合候補）"),
 ])
 CLS_TYPE = {"task": "work", "done": "work", "hold": "work", "abolished": "work", "work": "work", "pending": "work", "warn": "work", "source": "info", "output": "info", "dupout": "info"}
@@ -2168,9 +2174,33 @@ def node_icon(n):
     row = vocab_row("actors", n["actor"])
     return (row["icon"] if row else "bi-person-fill"), f"a-{n['actor']}"
 
+WHO_CLASSES = ("work", "warn", "pending") + TASK_CLASSES
+_SELF_WHO = {"自分", "本人", "私", "わたし"}
+_TEAM_RX = re.compile(r"(?:第?[0-9一二三四五六七八九十]+|[A-Za-z])班")
+
+
 def show_who(n):
     who = (n.get("who") or "").strip()
-    return n.get("type") == "work" and n.get("cls") in ("work", "warn") and n.get("who_state") in ("ok", "unknown") and who and normalize_text(who) != normalize_text(n.get("text"))
+    return n.get("type") == "work" and n.get("cls") in WHO_CLASSES and n.get("who_state") in ("ok", "unknown") and who and normalize_text(who) != normalize_text(n.get("text"))
+
+def doer_who(text, own_wp="", vocab=None):
+    raw = str(text or "").strip()[:30]
+    w = who_of(raw, own_wp, vocab)
+    if raw and (mask_person_names(raw, vocab) != raw or (w["state"] == "unconfirmed" and _TEAM_RX.search(vnorm(raw)))):
+        return {"actor": w["actor"] if w["actor"] and w["state"] == "ok" else "team", "label": raw, "state": "ok"}
+    return w
+
+def task_doer(t):
+    r = t.respondent
+    if r is None:
+        return _own_wp(t)
+    name = (r.name or "").strip()
+    if not name and r.emp_id:
+        e = Employee.query.filter(same_emp_id(Employee.emp_id, r.emp_id)).first()
+        name = (e.name or "").strip() if e is not None else ""
+    team = clean_team(r.work_pattern, r.shift_team)
+    label = (name or _own_wp(t)) + (f"（{team}）" if team else "")
+    return label + (f" ほか{t.headcount - 1}人" if (t.headcount or 1) > 1 else "")
 
 NODE_COLORS = {"white": "#ffffff", "red": "#fee2e2", "orange": "#fed7aa", "yellow": "#fef3c7", "green": "#d1fae5", "blue": "#dbeafe", "purple": "#e9d5ff", "pink": "#fce7f3"}
 PERSON_ACTORS = ("external", "dept", "boss", "team")
@@ -2201,10 +2231,30 @@ def edge_label(e):
 def edge_label_html(e):
     shown = e.get("type") != "work" and not (e.get("label") or "").strip() and e.get("show_method") and e.get("method")
     row = vocab_row("methods", e["method"]) if shown else None
-    if not row or not row.get("icon"):
+    if not row:
         return esc(edge_label(e))
-    method = f"<i class='bi {row['icon']} fl'></i> " + esc(row["label"])
+    method = (f"<i class='bi {row['icon']} fl'></i> " if row.get("icon") else "") + esc(row["label"])
+    if e.get("method_guess"):
+        method = f"<span class='mg'>{method}</span>"
     return "／".join(v for v in (esc(e.get("note")), method) if v)
+
+def fill_method(na, nb):
+    if na.get("type") == "info":
+        info, made = na, False
+    elif nb.get("type") == "info":
+        info, made = nb, True
+    else:
+        return "", False
+    found = method_of(info.get("text") or "")
+    if found and (not made or vocab_row("methods", found)["kind"] == "place"):
+        return found, False
+    guess = (vocab_row("media", info.get("medium") or "unknown") or {}).get("method") or ""
+    row = vocab_row("methods", guess) if guess else None
+    if not row or (made and row["kind"] != "place"):
+        return "", False
+    if not made and row["kind"] == "place" and nb.get("type") == "work" and nb.get("actor") == "external" and vocab_row("methods", "mail"):
+        return "mail", True
+    return guess, True
 
 def show_method_for(method, medium):
     row = vocab_row("methods", method) if method else None
@@ -2239,18 +2289,21 @@ class Diagram:
             self.nodes[node_id]["group_title"] = title
         return node_id
 
-    def edge(self, a, b, kind="info", label="", method="", handoff="", show_method=False, inferred=False, note=""):
+    def edge(self, a, b, kind="info", label="", method="", handoff="", show_method=False, inferred=False, note="", method_guess=False):
         if not a or not b or a == b:
             return
-        new = {"type": kind, "label": label, "method": method or "", "handoff": handoff or "", "show_method": bool(show_method), "inferred": bool(inferred), "note": (note or "").strip()}
+        new = {"type": kind, "label": label, "method": method or "", "handoff": handoff or "", "show_method": bool(show_method), "inferred": bool(inferred), "note": (note or "").strip(),
+               "method_guess": bool(method_guess and method)}
         old = self.edges.get((a, b))
         if old is None:
             self.edges[(a, b)] = new
         elif old["inferred"] and not new["inferred"]:
-            self.edges[(a, b)] = dict(new, method=new["method"] or old["method"], show_method=new["show_method"] or old["show_method"], note=new["note"] or old.get("note", ""))
+            keep = not new["method"]
+            self.edges[(a, b)] = dict(new, method=new["method"] or old["method"], show_method=new["show_method"] or old["show_method"], note=new["note"] or old.get("note", ""),
+                                      method_guess=old.get("method_guess", False) if keep else new["method_guess"])
         else:
             if not old["method"] and new["method"]:
-                old.update(method=new["method"], show_method=new["show_method"])
+                old.update(method=new["method"], show_method=new["show_method"], method_guess=new["method_guess"])
             if new["note"] and not old.get("note"):
                 old["note"] = new["note"]
 
@@ -2260,6 +2313,14 @@ class Diagram:
 
     def click(self, node_id, url, tooltip=""):
         self.clicks[node_id] = (url, tooltip)
+
+    def shown(self, a, b, e):
+        if e["type"] != "info" or (e.get("label") or "").strip():
+            return e
+        if e.get("method"):
+            return dict(e, show_method=True)
+        method, guess = fill_method(self.nodes.get(a) or {}, self.nodes.get(b) or {})
+        return dict(e, method=method, show_method=bool(method), method_guess=guess)
 
     def derive_roles(self):
         made = {b for (a, b), e in self.edges.items() if e["type"] == "info" and self.nodes.get(a, {}).get("cls") in TASK_CLASSES}
@@ -2302,6 +2363,7 @@ class Diagram:
                 lines.append(f"  style {i} fill:{NODE_COLORS[n['color']]}")
         work_links = []
         for idx, ((a, b), e) in enumerate(self.edges.items()):
+            e = self.shown(a, b, e)
             lab = edge_label_html(e)
             if e.get("inferred"):
                 lines.append(f'  {a} -. "{lab}" .-> {b}' if lab else f"  {a} -.-> {b}")
@@ -2333,10 +2395,12 @@ class Diagram:
             )
         edges = []
         for (a, b), e in self.edges.items():
+            e = self.shown(a, b, e)
             edges.append(
                 {
                     "id": f"{a}->{b}", "from": a, "to": b, "type": e["type"], "method": e["method"], "handoff": e["handoff"],
-                    "show_method": e["show_method"], "inferred": e["inferred"], "label": e["label"], "note": e.get("note", ""), "source": "auto", "reversed": False, "label_edited": False,
+                    "show_method": e["show_method"], "method_guess": bool(e.get("method_guess")), "inferred": e["inferred"], "label": e["label"], "note": e.get("note", ""),
+                    "source": "auto", "reversed": False, "label_edited": False,
                 }
             )
         return {"schema": 2, "nodes": nodes, "edges": edges, "suppressed_nodes": [], "suppressed_edges": [], "view": None}
@@ -2363,7 +2427,7 @@ def graph_to_diagram(graph, direction="LR"):
         if a not in types or b not in types:
             continue
         kind = e.get("type") if e.get("type") in ("work", "info") else ("work" if types[a] == "work" and types[b] == "work" else "info")
-        d.edge(a, b, kind, e.get("label") or "", e.get("method") or "", e.get("handoff") or "", bool(e.get("show_method")), bool(e.get("inferred")) or (types[a] == "info" and types[b] == "info"), note=e.get("note") or "")
+        d.edge(a, b, kind, e.get("label") or "", e.get("method") or "", e.get("handoff") or "", bool(e.get("show_method")), bool(e.get("inferred")) or (types[a] == "info" and types[b] == "info"), note=e.get("note") or "", method_guess=bool(e.get("method_guess")))
     return d.derive_roles()
 
 def upgrade_graph(saved):
@@ -2448,7 +2512,7 @@ def _ghost_twin(sn, nodes, saved_edges, auto_edges):
     task_boxes = {f"t{i}" for i in tids}
     feeders |= task_boxes | {f"o{i}" for i in tids}
     fed = {e["to"] for e in auto_edges if e["from"] in feeders}
-    own = {x.get("who") for x in nodes if x["id"] in task_boxes and x.get("who")}
+    own = {x.get("group_title") for x in nodes if x["id"] in task_boxes and x.get("group_title")}
     whos = {normalize_text(sn.get("who"))} | {normalize_text(recipient_who(sn.get("who"), wp)["label"]) for wp in own}
     return next((x for x in nodes if x.get("source") == "auto" and x.get("type") == "work" and x["id"] in fed
                  and normalize_text(x.get("who")) in whos), None)
@@ -2458,7 +2522,7 @@ def merge_graph(auto, saved):
         "schema": 2, "nodes": [], "edges": [], "suppressed_nodes": [], "suppressed_edges": [], "view": None,
         "new_node_ids": [], "needs_layout": True,
     }
-    auto_values = lambda e: {"auto_method": e.get("method") or "", "auto_show_method": bool(e.get("show_method")), "auto_handoff": e.get("handoff") or ""}
+    auto_values = lambda e: {"auto_method": e.get("method") or "", "auto_show_method": bool(e.get("show_method")), "auto_method_guess": bool(e.get("method_guess")), "auto_handoff": e.get("handoff") or ""}
     if not saved:
         result["nodes"] = [dict(n) for n in auto["nodes"]]
         result["edges"] = [dict(e, **auto_values(e)) for e in auto["edges"]]
@@ -2490,7 +2554,7 @@ def merge_graph(auto, saved):
                 if sn.get("actor_locked") and vocab_row("actors", sn.get("actor")):
                     m["actor"], m["who_state"], m["actor_locked"] = sn["actor"], "unknown" if sn["actor"] == "unknown" else "ok", True
                 elif normalize_text(m["who"]) != normalize_text(auto_who):
-                    w = who_of(m["who"], (m.get("group_title") or "") if auto_actor in ("team", "boss") else "")
+                    w = doer_who(m["who"], (m.get("group_title") or "") if auto_actor in ("team", "boss") else "")
                     m["actor"], m["who_state"] = w["actor"], w["state"]
         else:
             result["new_node_ids"].append(n["id"])
@@ -2518,7 +2582,7 @@ def merge_graph(auto, saved):
         elif not m.get("who_edited") and m.get("source") == "manual":
             m["who"], m["actor"], m["who_state"] = "", "", "unconfirmed"
         elif not (m.get("actor_locked") and vocab_row("actors", m.get("actor"))):
-            w = who_of(m.get("who"), m.get("group_title") or "")
+            w = doer_who(m.get("who"), m.get("group_title") or "")
             m["actor"], m["who_state"], m["actor_locked"] = w["actor"], w["state"], False
         nodes.append(m)
         by_id[m["id"]] = m
@@ -2547,7 +2611,7 @@ def merge_graph(auto, saved):
                 m["label_edited"] = True
             if se.get("method_edited") and (not se.get("method") or vocab_row("methods", se.get("method"))):
                 m["method"] = se.get("method") or ""
-                m["show_method"], m["method_edited"] = bool(m["method"]), True
+                m["show_method"], m["method_edited"], m["method_guess"] = bool(m["method"]), True, False
             if se.get("handoff_edited") and se.get("handoff") in ("push", "pull", "none", ""):
                 m["handoff"], m["handoff_edited"] = se.get("handoff"), True
         edges.append(m)
@@ -2566,7 +2630,7 @@ def merge_graph(auto, saved):
             b = next((x for x in fed[tid] if by_id.get(x, {}).get("cls") == "work" and normalize_text(by_id[x].get("who")) == normalize_text(by_id[b].get("who"))), b)
         if a not in node_ids or b not in node_ids or a == b or (a, b) in pairs:
             continue
-        m = dict(se, id=f"{a}->{b}", auto_method="", auto_show_method=False, auto_handoff="", **{"from": a, "to": b})
+        m = dict(se, id=f"{a}->{b}", auto_method="", auto_show_method=False, auto_method_guess=False, method_guess=False, auto_handoff="", **{"from": a, "to": b})
         if m.get("method") and not vocab_row("methods", m["method"]):
             m["method"], m["show_method"], m["method_edited"] = "", False, False
         ta, tb = by_id[a].get("type"), by_id[b].get("type")
@@ -2606,7 +2670,7 @@ def sanitize_graph(data):
             {
                 "id": str(n["id"])[:80], "text": mask(n.get("text"))[:200], "type": ntype,
                 "cls": _cls_for(n.get("cls"), ntype),
-                "medium": _key(n.get("medium")), "actor": _key(n.get("actor")), "who": mask(n.get("who"))[:100],
+                "medium": _key(n.get("medium")), "actor": _key(n.get("actor")), "who": str(n.get("who") or "").strip()[:100],
                 "who_state": n.get("who_state") if n.get("who_state") in ("ok", "unconfirmed", "unknown") else "",
                 "hint": _key(n.get("hint")) or None, "group": n.get("group"), "group_title": n.get("group_title"),
                 "url": n.get("url"), "source": "manual" if n.get("source") == "manual" else "auto",
@@ -2939,7 +3003,7 @@ def task_cls(t):
 def _task_node(d, t):
     tid = f"t{t.id}"
     d.node(tid, t.name, task_cls(t), subgraph=_frame(t.workplace_id, _wp_name(t)),
-           who={"actor": "team", "label": _own_wp(t), "state": "ok"})
+           who={"actor": "team", "label": task_doer(t), "state": "ok"})
     d.click(tid, url_for("cases.detail", task_id=t.id), "案件詳細を開く")
     return tid
 
@@ -3526,9 +3590,9 @@ _CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
 def _circled(n):
     return _CIRCLED[n - 1] if 1 <= n <= len(_CIRCLED) else f"({n})"
 
-def build_steps_flow(steps, own_wp="", purpose=""):
+def build_steps_flow(steps, own_wp="", purpose="", me_label=""):
     d = Diagram("LR")
-    me = {"actor": "team", "label": own_wp or "本人", "state": "ok"}
+    me = {"actor": "team", "label": me_label, "state": "ok"}
     purpose = _purpose(purpose)
     total = sum(len(_names(x.get("to"))) for x in steps)
     seen, latest, prev = [], None, None
@@ -3549,7 +3613,7 @@ def build_steps_flow(steps, own_wp="", purpose=""):
         sid = f"st{x['no']}"
         action = mask_person_names(x.get("action") or "")
         doer = (x.get("who") or "").strip()
-        d.node(sid, f"{_circled(x['no'])} {action}", "task", who=who_of(mask_person_names(doer), own_wp) if doer else me)
+        d.node(sid, f"{_circled(x['no'])} {action}", "task", who=doer_who(doer, own_wp) if doer and doer not in _SELF_WHO else me)
         system, inp, to, how, out = [(x.get(k) or "").strip() for k in ("system", "input", "to", "how", "output")]
         recv = method_of(x.get("how_from") or "")
         role, m = field_role(system)
@@ -3684,7 +3748,7 @@ def build_task_flow(t):
     steps = t.steps
     cls = task_cls(t)
     if steps:
-        d = build_steps_flow(steps, own, t.purpose or "")
+        d = build_steps_flow(steps, own, t.purpose or "", me_label=task_doer(t))
         _extra_case_links(d, t, steps)
         first, last = "st1", f"st{steps[-1]['no']}"
         if cls != "task":
@@ -3693,7 +3757,7 @@ def build_task_flow(t):
     else:
         d = Diagram("LR")
         first = last = f"t{t.id}"
-        d.node(first, t.name, cls, width=16, who={"actor": "team", "label": own, "state": "ok"})
+        d.node(first, t.name, cls, width=16, who={"actor": "team", "label": task_doer(t), "state": "ok"})
         _add_task_info(d, t, first)
     others = Task.query.filter(Task.id != t.id).all() if t.id else []
     boxes = []
@@ -3732,18 +3796,21 @@ def build_task_flow(t):
     return d.derive_roles()
 
 # ----- 凡例・閲覧と編集画面に渡すもの -----
+MAP_LINE_TIP = "仕事の流れ（濃い太い線）は、前の業務・次の業務でつながった作業の間に引きます（つながりのない図には出ません）。前の業務・次の業務に書いた名前がほかの業務の名前と一致してつないだものは点線（名前から推定）で、編集画面で確かめて書き戻すと実線になります。情報の流れ（青い細い線）は情報の受け渡しです。"
+METHOD_GUESS_TIP = "灰色の方法は、方法の分からない線に、情報の媒体から推定して出しています（媒体ごとの既定の方法は 管理 →「業務マップの区分」で変えられます）。編集画面で線を押すと直せます。"
+
+
 def map_legend_html(d):
     vocab = map_vocab()
     nodes = list(d.nodes.values())
-    edges = list(d.edges.values())
-    parts = ['<div class="map-legend">', '<div class="legend-row lg-grammar"><span class="legend-title">箱と線</span>',
+    edges = [d.shown(a, b, e) for (a, b), e in d.edges.items()]
+    parts = ['<div class="map-legend">', '<div class="legend-row lg-grammar"><span class="legend-title">箱と線' + str(tip(MAP_LINE_TIP)) + '</span>',
              '<span class="lg-item">' + shape_glyph("rect") + '作業</span>', '<span class="lg-item">' + shape_glyph("doc") + '情報</span>']
-    if any(e["type"] == "work" for e in edges):
-        parts.append('<span class="lg-item"><i class="lg-line lg-line-work"></i>仕事の流れ</span>')
-    if any(e["type"] == "info" for e in edges):
-        parts.append('<span class="lg-item"><i class="lg-line lg-line-info"></i>情報の流れ</span>')
-    if any(e.get("inferred") for e in edges):
-        parts.append('<span class="lg-item"><i class="lg-line lg-line-guess"></i>名前から推定したつながり</span>')
+    for kind, label in (("work", "仕事の流れ"), ("info", "情報の流れ")):
+        if any(e["type"] == kind and not e.get("inferred") for e in edges):
+            parts.append(f'<span class="lg-item"><i class="lg-line lg-line-{kind}"></i>{label}</span>')
+        if any(e["type"] == kind and e.get("inferred") for e in edges):
+            parts.append(f'<span class="lg-item"><i class="lg-line lg-line-{kind}-guess"></i>{label}（名前から推定）</span>')
     parts.append("</div>")
     roles = [c for c in CLS_LABELS if any(n["cls"] == c for n in nodes)]
     if roles:
@@ -3754,8 +3821,9 @@ def map_legend_html(d):
             f'<span class="kind-chip">{shape_glyph(r["shape"])}<i class="bi {r["icon"]} fi m-{r["key"]}"></i>{esc(r["label"])}</span>' for r in media) + "</div>")
     used = {e["method"] for e in edges if e["type"] == "info" and e.get("show_method") and e.get("method") and not (e.get("label") or "").strip()}
     methods = [r for r in vocab["methods"] if r["key"] in used and r.get("icon")]
+    guessed = any(e.get("method_guess") and e.get("show_method") for e in edges)
     if methods:
-        parts.append('<div class="kind-legend"><span class="legend-title">方法</span>' + "".join(
+        parts.append('<div class="kind-legend"><span class="legend-title">方法' + (str(tip(METHOD_GUESS_TIP)) if guessed else "") + '</span>' + "".join(
             f'<span class="kind-chip"><i class="bi {r["icon"]} fi fl"></i>{esc(r["label"])}</span>' for r in methods) + "</div>")
     actors = [r for r in vocab["actors"] if any((n["type"] == "work" and n["cls"] in ("work", "warn") and n["actor"] == r["key"] and n["who_state"] != "unconfirmed") or person_source_actor(n) == r["key"] for n in nodes)]
     unconfirmed = any(n["type"] == "work" and n["cls"] == "work" and n["who_state"] == "unconfirmed" for n in nodes)
@@ -3775,6 +3843,7 @@ def flow_view(d):
 def editor_config():
     return {
         "vocab": vocab_public(), "cls_labels": CLS_LABELS, "cls_type": CLS_TYPE, "glyphs": _SHAPE_GLYPHS, "status_marks": STATUS_MARKS,
+        "who_classes": list(WHO_CLASSES), "tips": {"lines": MAP_LINE_TIP, "guess": METHOD_GUESS_TIP},
         "classify_url": url_for("bizmap.api_classify"),
     }
 
@@ -6629,7 +6698,7 @@ def api_classify():
         if it.get("type") == "info":
             out.append({"id": it.get("id"), "medium": medium_of(str(it.get("text") or "")[:200])})
         else:
-            w = who_of(str(it.get("who") or "")[:100], str(it.get("workplace") or "")[:100])
+            w = doer_who(str(it.get("who") or "")[:100], str(it.get("workplace") or "")[:100])
             out.append({"id": it.get("id"), "actor": w["actor"], "who": w["label"], "who_state": w["state"]})
     return jsonify({"items": out})
 
@@ -8014,8 +8083,8 @@ TEMPLATES = {
     <button type="button" class="btn btn-sm btn-outline-primary mv-add" data-group="actors"><i class="bi bi-plus-lg"></i> 区分を追加</button>
   </div></div>
   <div class="card mb-3 mv-card"><div class="card-body">
-    <h5 class="card-title">情報の媒体{{ C.tip("情報の箱の形とアイコンになる「どんな形の情報か」。どれにも当たらないものは「不明」になります。") }}</h5>
-    <div class="table-responsive"><table class="table table-sm align-middle mv-table" data-group="media"><thead><tr><th></th><th>名前</th><th>判定に使う語</th><th>除く語</th><th>アイコン</th><th>形</th><th></th></tr></thead><tbody></tbody></table></div>
+    <h5 class="card-title">情報の媒体{{ C.tip("情報の箱の形とアイコンになる「どんな形の情報か」。どれにも当たらないものは「不明」になります。線の既定の方法は、方法の分からない線に推定として灰色で出す方法です（「なし」なら出しません）。") }}</h5>
+    <div class="table-responsive"><table class="table table-sm align-middle mv-table" data-group="media"><thead><tr><th></th><th>名前</th><th>判定に使う語</th><th>除く語</th><th>アイコン</th><th>形</th><th>線の既定の方法</th><th></th></tr></thead><tbody></tbody></table></div>
     <button type="button" class="btn btn-sm btn-outline-primary mv-add" data-group="media"><i class="bi bi-plus-lg"></i> 媒体を追加</button>
   </div></div>
   <div class="card mb-3 mv-card"><div class="card-body">
@@ -8092,7 +8161,11 @@ TEMPLATES = {
       wrap.appendChild(prev);
       cell(tr, wrap);
       if (group === "actors") cell(tr, select(CH.users, r.user, function (v) { r.user = v; }));
-      if (group === "media") cell(tr, select(CH.shapes, r.shape, function (v) { r.shape = v; }));
+      if (group === "media") {
+        cell(tr, select(CH.shapes, r.shape, function (v) { r.shape = v; }));
+        var ms = { "": "なし" }; V.methods.forEach(function (m) { ms[m.key] = m.label; });
+        cell(tr, select(ms, r.method || "", function (v) { r.method = v; }));
+      }
       if (group === "methods") {
         cell(tr, select(CH.kinds, r.kind, function (v) { r.kind = v; }));
         cell(tr, select(CH.directions, r.direction, function (v) { r.direction = v; }));
@@ -8122,7 +8195,7 @@ TEMPLATES = {
       var g = b.dataset.group;
       var row = { key: "", label: "", words: "", exclude: "" };
       if (g === "actors") { row.icon = "bi-person-fill"; row.user = ""; }
-      if (g === "media") { row.icon = "bi-file-earmark"; row.shape = "doc"; }
+      if (g === "media") { row.icon = "bi-file-earmark"; row.shape = "doc"; row.method = ""; }
       if (g === "methods") { row.icon = ""; row.kind = "channel"; row.direction = ""; row.medium = "unknown"; }
       V[g].push(row);
       touch();
@@ -8686,7 +8759,7 @@ TEMPLATES = {
 <div class="bizmap-sections">
   <div>
     {{ flow_panel('info', '業務マップ',
-       '取り出し元の情報 → 業務 → できるもの → 渡す相手の作業。箱は作業（四角・だれつき）と情報（媒体の形とアイコン）の2種類、線は仕事の流れ（太い灰）と情報の流れ（細い青）の2種類です。聞き取りで答えた名前で描き、同じ名前は1つの箱にまとめます。Gr・役割ごとの枠に業務を置き、点線は名前から推定したつながり（ある業務のできるものを別の業務が使っている、前後の業務）です。灰色の点線の箱は、月次アンケートで挙がったものの、まだ流れを登録していない業務です。保留中の業務は点線の枠に「（保留）」、廃止した業務は薄い色に「（廃止済み）」を付けます。',
+       '取り出し元の情報 → 業務 → できるもの → 渡す相手の作業。箱は作業（四角・だれつき）と情報（媒体の形とアイコン）の2種類、線は仕事の流れ（濃い太い線）と情報の流れ（青い細い線）の2種類で、名前から推定したつながりはそれぞれ点線です。聞き取りで答えた名前で描き、同じ名前は1つの箱にまとめます。Gr・役割ごとの枠に業務を置き、点線は名前から推定したつながり（ある業務のできるものを別の業務が使っている、前後の業務）です。灰色の点線の箱は、月次アンケートで挙がったものの、まだ流れを登録していない業務です。保留中の業務は点線の枠に「（保留）」、廃止した業務は薄い色に「（廃止済み）」を付けます。',
        flows.info, '業務が登録されると図が描かれます。') }}
 
     <div class="row g-3 mt-1">
@@ -11118,8 +11191,9 @@ document.addEventListener("DOMContentLoaded", function () {
   }
   function normText(v) { return String(v || "").replace(/[\s　（）()・,、。.／/\-−―「」『』]/g, "").toLowerCase(); }
   function showWho(n) {
-    return typeOf(n) === "work" && (n.cls === "work" || n.cls === "warn") && (n.who_state === "ok" || n.who_state === "unknown") && n.who && normText(n.who) !== normText(n.text);
+    return typeOf(n) === "work" && (KC.who_classes || []).indexOf(n.cls) >= 0 && (n.who_state === "ok" || n.who_state === "unknown") && n.who && normText(n.who) !== normText(n.text);
   }
+  function tipHtml(text) { return '<span class="tip" tabindex="0" role="button" aria-label="説明" data-tip="' + escHtml(text) + '"><i class="bi bi-info-circle" aria-hidden="true"></i></span>'; }
   function edgeMethodRow(e) {
     return !e.label && e.type !== "work" && e.show_method && e.method ? vrow("methods", e.method) : null;
   }
@@ -11156,9 +11230,13 @@ document.addEventListener("DOMContentLoaded", function () {
   function renderLegend() {
     var box = document.getElementById("fe-kind-legend");
     if (!box) return;
-    var html = '<div class="legend-row lg-grammar"><span class="legend-title">箱と線</span><span class="lg-item">' + glyph("rect") + '作業</span><span class="lg-item">' + glyph("doc") + "情報</span>" +
-      '<span class="lg-item"><i class="lg-line lg-line-work"></i>仕事の流れ</span><span class="lg-item"><i class="lg-line lg-line-info"></i>情報の流れ</span>' +
-      '<span class="lg-item"><i class="lg-line lg-line-guess"></i>名前から推定</span></div>';
+    var lines = "";
+    [["work", "仕事の流れ"], ["info", "情報の流れ"]].forEach(function (k) {
+      var of = G.edges.filter(function (e) { return (e.type === "work") === (k[0] === "work"); });
+      if (of.some(function (e) { return !e.inferred; })) lines += '<span class="lg-item"><i class="lg-line lg-line-' + k[0] + '"></i>' + k[1] + "</span>";
+      if (of.some(function (e) { return e.inferred; })) lines += '<span class="lg-item"><i class="lg-line lg-line-' + k[0] + '-guess"></i>' + k[1] + "（名前から推定）</span>";
+    });
+    var html = '<div class="legend-row lg-grammar"><span class="legend-title">箱と線' + tipHtml(KC.tips.lines) + '</span><span class="lg-item">' + glyph("rect") + '作業</span><span class="lg-item">' + glyph("doc") + "情報</span>" + lines + "</div>";
     var roles = Object.keys(KC.cls_labels).filter(function (c) { return G.nodes.some(function (n) { return n.cls === c; }); });
     if (roles.length) html += '<div class="legend-row"><span class="legend-title">色</span>' + roles.map(function (c) { return '<span class="legend-chip lg-' + c + '">' + escHtml(KC.cls_labels[c]) + "</span>"; }).join("") + "</div>";
     var media = (KC.vocab.media || []).filter(function (r) { return G.nodes.some(function (n) { return typeOf(n) === "info" && (n.medium || "unknown") === r.key; }); });
@@ -11168,7 +11246,8 @@ document.addEventListener("DOMContentLoaded", function () {
     var usedMethods = {};
     G.edges.forEach(function (e) { var r = edgeMethodRow(e); if (r && r.icon) usedMethods[r.key] = true; });
     var methods = (KC.vocab.methods || []).filter(function (r) { return usedMethods[r.key]; });
-    if (methods.length) html += '<div class="kind-legend"><span class="legend-title">方法</span>' + methods.map(function (r) {
+    var guessed = G.edges.some(function (e) { return e.method_guess && edgeMethodRow(e); });
+    if (methods.length) html += '<div class="kind-legend"><span class="legend-title">方法' + (guessed ? tipHtml(KC.tips.guess) : "") + '</span>' + methods.map(function (r) {
       return '<span class="kind-chip"><i class="bi ' + r.icon + ' fi fl"></i>' + escHtml(r.label) + "</span>";
     }).join("") + "</div>";
     var actors = (KC.vocab.actors || []).filter(function (r) { return G.nodes.some(function (n) { return typeOf(n) === "work" && (n.cls === "work" || n.cls === "warn") && n.actor === r.key && n.who_state !== "unconfirmed"; }); });
@@ -11406,14 +11485,16 @@ document.addEventListener("DOMContentLoaded", function () {
       var lab = edgeLabel(e);
       if (lab) {
         var t = svgEl("text", { x: c.mx, y: c.my - 4, "class": "fe-edge-label", "text-anchor": "middle" });
-        var mr = edgeMethodRow(e), glyph = mr && mr.icon ? iconGlyph(mr.icon) : "";
-        if (glyph) {
+        var mr = edgeMethodRow(e), glyph = mr && mr.icon ? iconGlyph(mr.icon) : "", gc = e.method_guess ? "fe-edge-guess" : "";
+        if (mr) {
           var before = lab.slice(0, lab.length - mr.label.length);
           if (before) { var bt = svgEl("tspan", {}); bt.textContent = before; t.appendChild(bt); }
-          var it = svgEl("tspan", { "class": "fe-edge-icon" });
-          it.textContent = glyph;
-          t.appendChild(it);
-          var mt = svgEl("tspan", { dx: 2 });
+          if (glyph) {
+            var it = svgEl("tspan", { "class": ("fe-edge-icon " + gc).trim() });
+            it.textContent = glyph;
+            t.appendChild(it);
+          }
+          var mt = svgEl("tspan", glyph ? { dx: 2, "class": gc } : { "class": gc });
           mt.textContent = mr.label;
           t.appendChild(mt);
         } else {
@@ -11760,11 +11841,11 @@ document.addEventListener("DOMContentLoaded", function () {
     var v = els.methodSelect.value;
     if (!v) {
       e.method_edited = false;
-      if (e.source === "manual") { e.method = ""; e.show_method = false; }
-      else { e.method = e.auto_method || ""; e.show_method = !!e.auto_show_method; }
+      if (e.source === "manual") { e.method = ""; e.show_method = false; e.method_guess = false; }
+      else { e.method = e.auto_method || ""; e.show_method = !!e.auto_show_method; e.method_guess = !!e.auto_method_guess; }
     }
-    else if (v === "-") { e.method = ""; e.show_method = false; e.method_edited = true; }
-    else { e.method = v; e.show_method = true; e.method_edited = true; }
+    else if (v === "-") { e.method = ""; e.show_method = false; e.method_edited = true; e.method_guess = false; }
+    else { e.method = v; e.show_method = true; e.method_edited = true; e.method_guess = false; }
     drawEdges();
     pushHistory();
   });
@@ -12341,7 +12422,8 @@ document.addEventListener("DOMContentLoaded", function () {
 .lg-line { display: inline-block; width: 26px; height: 0; vertical-align: middle; }
 .lg-line-work { border-top: 3px solid #495057; }
 .lg-line-info { border-top: 1.5px solid #5b8def; }
-.lg-line-guess { border-top: 2px dashed #6c757d; }
+.lg-line-work-guess { border-top: 3px dashed #495057; }
+.lg-line-info-guess { border-top: 1.5px dashed #5b8def; }
 .lg-work { background: #fff; border-color: #6c757d; }
 .lg-source { background: #fff3cd; border-color: #e0a800; }
 .lg-output { background: #fff; border-color: #0d6efd; border-style: solid; }
@@ -12382,6 +12464,8 @@ body.flow-max-open { overflow: hidden; }
 .fe-edge-label { font-size: 11px; fill: #343a40; paint-order: stroke; stroke: #fff; stroke-width: 3px; pointer-events: none; }
 .fe-edge-label .fe-edge-icon { font-family: "bootstrap-icons"; fill: #5b8def; }
 .fl { color: #5b8def; }
+.mg, .mg .fl { color: #9aa0a6; }
+.fe-edge-label .fe-edge-guess { fill: #9aa0a6; }
 .fe-temp-line { fill: none; stroke: #60a5fa; stroke-width: 2px; stroke-dasharray: 4 4; }
 #fe-nodes { position: absolute; left: 0; top: 0; }
 .fe-node { position: absolute; width: max-content; min-width: 90px; max-width: 150px; padding: 6px 10px; border: 2px solid var(--fe-stroke, #0d6efd); border-radius: 8px; background: var(--fe-fill, #fff);
