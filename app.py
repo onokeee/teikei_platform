@@ -66,10 +66,8 @@ TOOLS = ["Excel", "Access", "メール", "社内システム", "紙", "VBA・マ
 NATURES = ["転記・コピー", "集計・グラフ作成", "資料作成", "確認・チェック", "データ取得", "メール・配布", "台帳更新", "判断を伴う"]
 PAINS = ["時間がかかる", "ミスが起きやすい", "同じ情報を何度も入力する", "手順が人によって違う", "急ぎで割り込まれる", "何のためか分からない", "特になし"]
 WISHES = ["なくしたい", "減らしたい", "まずは相談したい"]
-LEGACY_WISHES = {"自動化したい": "減らしたい", "分からない": "まずは相談したい"}
 SYSTEM_SOURCES = {"生産管理システム", "品質システム", "設備データ"}
 SELF_IMPROVE_YES = "スキルを身につけながら、一緒にやってみたい"
-SELF_IMPROVE_NO = "改善チームに任せたい"
 SELF_IMPROVE_UNCHECKED = "チェックなし"
 SELF_IMPROVE_LATER_ASK = "その後の月次で依頼したい"
 ASSIGNMENT_REVIEW = "担当区分の見直しを"
@@ -105,6 +103,9 @@ DURATION_MINUTES = {
 
 # ---- 案件管理 ----
 STATUSES = ["受付", "対応中", "完了", "保留"]
+STATUS_BADGE = {"受付": "secondary", "対応中": "primary", "完了": "success", "保留": "warning"}
+MERMAID_JS = "https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"
+CHART_JS = "https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"
 DECISIONS = ["未定", "廃止", "統合", "簡素化", "自動化", "高度化", "現状維持"]
 ASSIGNMENTS = ["未定", "改善チーム主導", "自主改善"]
 REQUIRED_FIELDS = [("domain_id", "業務領域"), ("purpose", "目的"), ("output", "アウトプット"), ("output_users", "利用者"), ("inputs", "入力元"), ("frequency", "頻度"), ("duration", "時間")]
@@ -167,15 +168,13 @@ MONTHLY_HOURS_OPTIONS = {
     "15分未満": 0.125, "15〜30分": 0.375, "30〜45分": 0.625, "45分〜1時間": 0.875, "1〜1.5時間": 1.25,
     "1.5〜2時間": 1.75, "2〜3時間": 2.5, "3〜4時間": 3.5, "4〜6時間": 5.0, "6時間以上": 7.0,
 }
-MONTHLY_HOURS_LEGACY = {"0時間": 0.0, "30分未満": 0.25, "30分〜1時間": 0.75, "1〜2時間": 1.5, "2〜4時間": 3.0, "4時間以上": 5.0}
-MONTHLY_HOURS_VALUE = {**MONTHLY_HOURS_OPTIONS, **MONTHLY_HOURS_LEGACY}
 MONTHLY_TREND_GROUPS = {
     "hours": {
-        "30分未満": ["0時間", "30分未満", "15分未満", "15〜30分"],
-        "30分〜1時間": ["30分〜1時間", "30〜45分", "45分〜1時間"],
-        "1〜2時間": ["1〜2時間", "1〜1.5時間", "1.5〜2時間"],
-        "2〜4時間": ["2〜4時間", "2〜3時間", "3〜4時間"],
-        "4時間以上": ["4時間以上", "4〜6時間", "6時間以上"],
+        "30分未満": ["15分未満", "15〜30分"],
+        "30分〜1時間": ["30〜45分", "45分〜1時間"],
+        "1〜2時間": ["1〜1.5時間", "1.5〜2時間"],
+        "2〜4時間": ["2〜3時間", "3〜4時間"],
+        "4時間以上": ["4〜6時間", "6時間以上"],
     },
 }
 _IF_HAS = {"key": "has", "show_if": ["ある"], "required": True}
@@ -345,7 +344,6 @@ class Task(db.Model):
     pains_note = db.Column(db.Text, default="")
     wish = db.Column(db.String(30))
     self_improve = db.Column(db.String(50))
-    note = db.Column(db.Text, default="")
 
     _actors = db.Column("actors", db.Text, default="")
     actors = _name_field("actors")
@@ -432,10 +430,6 @@ class Task(db.Model):
     @property
     def actors_list(self):
         return [a.strip() for a in re.split(r"[、,，/／\n;；]+", self.actors or "") if a.strip()]
-
-    @property
-    def has_flow_info(self):
-        return bool(self.actors or self.info_from)
 
     @property
     def unknown_required(self):
@@ -744,7 +738,7 @@ class MonthlyResponse(db.Model):
 
     @property
     def hours_shift(self):
-        return C.MONTHLY_HOURS_VALUE.get(self.answer("hours"), 0.0)
+        return C.MONTHLY_HOURS_OPTIONS.get(self.answer("hours"), 0.0)
 
 def period_label(period):
     try:
@@ -762,52 +756,8 @@ class FlowMap(db.Model):
     data = db.Column(db.Text, default="{}")
     updated_at = db.Column(db.DateTime, default=datetime.now, onupdate=datetime.now)
 
-_ADDED_COLUMNS = {
-    "respondents": {
-        "emp_id": "VARCHAR(50)",
-        "work_pattern": "VARCHAR(20) DEFAULT ''",
-        "shift_team": "VARCHAR(10) DEFAULT ''",
-    },
-    "employees": {
-        "work_pattern": "VARCHAR(20) DEFAULT ''",
-        "shift_team": "VARCHAR(10) DEFAULT ''",
-        "created_at": "DATETIME",
-        "excluded_at": "DATETIME",
-        "excluded_spans": "TEXT DEFAULT ''",
-    },
-    "monthly_responses": {
-        "survey_id": "INTEGER",
-        "answers_json": "TEXT DEFAULT '{}'",
-        "comment": "TEXT DEFAULT ''",
-        "work_pattern": "VARCHAR(20) DEFAULT ''",
-        "shift_team": "VARCHAR(10) DEFAULT ''",
-    },
-    "tasks": {
-        "names_json": "TEXT DEFAULT '{}'",
-        "actors": "TEXT DEFAULT ''",
-        "info_from": "TEXT DEFAULT ''",
-        "stage": "VARCHAR(20)",
-        "stage_at": "DATETIME",
-        "progress_note": "TEXT DEFAULT ''",
-        "steps_json": "TEXT DEFAULT '[]'",
-        "intake_json": "TEXT DEFAULT '[]'",
-        "ai_fields": "TEXT DEFAULT ''",
-        "ai_extra": "TEXT DEFAULT '{}'",
-        "shift": "VARCHAR(20) DEFAULT ''",
-        "monthly_name": "VARCHAR(200) DEFAULT ''",
-    },
-}
-
-_BACKFILL = {
-    ("tasks", "stage"): [
-        "UPDATE tasks SET stage = CASE status WHEN '完了' THEN 'done' WHEN '対応中' THEN 'request' ELSE 'start' END WHERE stage IS NULL",
-        "UPDATE tasks SET stage_at = COALESCE(completed_at, updated_at, created_at) WHERE stage_at IS NULL",
-        "INSERT INTO stage_logs (task_id, stage, at, by, note) SELECT id, stage, stage_at, '', '' FROM tasks WHERE stage <> 'start'",
-    ],
-}
-
-
-_DROPPED_TABLES = ("resources", "allowed_users", "mail_logs")
+# あとから足した列（{テーブル名: {列名: 型}}）。起動時に、既存のデータベースにない列だけ ALTER TABLE で足す
+_ADDED_COLUMNS = {}
 
 
 def ensure_schema():
@@ -815,11 +765,6 @@ def ensure_schema():
 
     inspector = inspect(db.engine)
     changed = False
-    added = []
-    for table in _DROPPED_TABLES:
-        if table in inspector.get_table_names():
-            db.session.execute(text(f"DROP TABLE {table}"))
-            changed = True
     for table, columns in _ADDED_COLUMNS.items():
         if table not in inspector.get_table_names():
             continue
@@ -827,11 +772,7 @@ def ensure_schema():
         for name, ddl in columns.items():
             if name not in existing:
                 db.session.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
-                added.append((table, name))
                 changed = True
-    for key in added:
-        for sql in _BACKFILL.get(key, []):
-            db.session.execute(text(sql))
     if changed:
         db.session.commit()
 
@@ -1592,7 +1533,7 @@ def monthly_question_trends():
         for opt in (list(group) if group else q["options"]):
             counts = [c.get(opt, 0) for c in counters]
             series.append({"option": opt, "percents": [round(c / n * 100) if n else 0 for c, n in zip(counts, n_list)]})
-        note = "以前の区切り（30分・1時間・2時間・4時間）にまとめて表示。細かい区分は月度の詳細で見られます" if group else ""
+        note = "30分・1時間・2時間・4時間の区切りにまとめて表示。細かい区分は月度の詳細で見られます" if group else ""
         trends.append({"q": q, "label": C.MONTHLY_KPI_LABELS.get(q["key"], ""), "note": note, "periods": periods, "labels": [period_label(p) for p in periods], "n": n_list, "series": series})
     return trends
 
@@ -1945,11 +1886,7 @@ WORKPLACE_ALIASES_KEY = "workplace_aliases"
 
 
 def workplace_aliases():
-    try:
-        data = _json_column(Setting.get(WORKPLACE_ALIASES_KEY, ""), {})
-    except Exception:
-        data = {}
-    return data if isinstance(data, dict) else {}
+    return _json_typed(Setting.get(WORKPLACE_ALIASES_KEY, ""), {})
 
 def remember_workplace_name(workplace_id, old, new):
     data = workplace_aliases()
@@ -2155,11 +2092,6 @@ CLASS_DEFS = [
 INPUT_SOURCE_MAP = {
     "紙の帳票": ("paper", "", "紙の帳票"), "他のExcel": ("excel", "", "他のExcel"), "メール": ("mail", "mail", "メールで届く内容"),
     "人から聞く": ("verbal", "verbal", "人から聞く内容"), "その他": ("unknown", "", "その他の情報"),
-}
-LEGACY_CLS = {
-    "task": ("work", "task"), "done": ("work", "done"), "pending": ("work", "pending"), "warn": ("work", "warn"), "work": ("work", "work"),
-    "wp": ("work", "work"), "ext": ("work", "work"), "person": ("work", "work"), "note": ("work", "work"), "place": ("work", "work"), "goods": ("work", "work"),
-    "source": ("info", "source"), "system": ("info", "source"), "output": ("info", "output"), "dupout": ("info", "dupout"),
 }
 _SHAPE_GLYPHS = {
     "rect": '<rect x="1" y="1.5" width="16" height="11" rx="0.5"/>',
@@ -2499,67 +2431,6 @@ def graph_to_diagram(graph, direction="LR"):
         d.edge(a, b, kind, e.get("label") or "", e.get("method") or "", e.get("handoff") or "", bool(e.get("show_method")), bool(e.get("inferred")) or (types[a] == "info" and types[b] == "info"), note=e.get("note") or "", method_guess=bool(e.get("method_guess")))
     return d.derive_roles()
 
-def upgrade_graph(saved):
-    if not isinstance(saved, dict) or saved.get("schema") == 2:
-        return saved
-    out = dict(saved)
-    nodes, types = [], {}
-    for n in saved.get("nodes") or []:
-        if not isinstance(n, dict) or not n.get("id"):
-            continue
-        m = dict(n)
-        old = m.get("cls") or "manual"
-        if old in LEGACY_CLS:
-            m["type"], m["cls"] = LEGACY_CLS[old]
-        else:
-            m["type"] = "info" if medium_of(m.get("text")) != "unknown" else "work"
-            m["cls"] = "source" if m["type"] == "info" else "work"
-        if old in ("wp", "ext", "person", "warn"):
-            m["who"] = m.get("who") or m.get("text") or ""
-            w = who_of(m["who"], m.get("group_title") or "") if old != "warn" else {"actor": "unknown", "state": "unknown"}
-            m["actor"], m["who_state"] = w["actor"], w["state"]
-            if m.get("source") == "manual" or m.get("text_edited"):
-                m["who_edited"] = True
-            elif old != "warn":
-                m["text"] = "使いみち未確認"
-        if old == "system":
-            m["medium"] = "system"
-            if m.get("source") == "manual":
-                m["medium_edited"] = True
-        types[m["id"]] = m["type"]
-        nodes.append(m)
-    edges = []
-    for e in saved.get("edges") or []:
-        if not isinstance(e, dict) or not e.get("from") or not e.get("to"):
-            continue
-        m = dict(e)
-        kind = m.get("kind")
-        a, b = m["from"], m["to"]
-        if kind in ("seq", "relation", "goods"):
-            m["type"] = "work"
-        elif kind == "info":
-            m["type"] = "info"
-        else:
-            m["type"] = "work" if types.get(a) == "work" and types.get(b) == "work" else "info"
-        label = (m.get("label") or "").strip()
-        if label in ("次の業務", "前の業務", "関与"):
-            m["label"] = ""
-        elif label and m["type"] == "info" and (m.get("source") == "manual" or m.get("label_edited")) and _exact_method(label):
-            m.update(method=_exact_method(label), show_method=True, method_edited=True, label="", label_edited=False)
-        if m["type"] == "info" and types.get(a) == "info" and types.get(b) == "info":
-            m["inferred"] = True
-        if m["type"] == "info" and types.get(a) == "work" and types.get(b) == "work":
-            m["type"] = "work"
-        edges.append(m)
-    out.update(nodes=nodes, edges=edges, schema=2)
-    return out
-
-def _exact_method(label):
-    v = vnorm(label).strip().lower()
-    for r in map_vocab()["methods"]:
-        if v == vnorm(r["label"]).strip().lower() or v in {w.lower() for w in _plain_words(r)}:
-            return r["key"]
-    return ""
 
 PLACEHOLDER_TEXTS = {"使いみち未確認", "使う人が分からない", "（渡すもの未確認）", "新しい作業", "新しい情報"}
 
@@ -2597,7 +2468,6 @@ def merge_graph(auto, saved):
         result["edges"] = [dict(e, **auto_values(e)) for e in auto["edges"]]
         return result
 
-    saved = upgrade_graph(saved)
     s_nodes = {n["id"]: n for n in saved.get("nodes", []) if n.get("id")}
     s_edges = {e["id"]: e for e in saved.get("edges", []) if e.get("id")}
     sup_n = set(saved.get("suppressed_nodes") or [])
@@ -2789,8 +2659,7 @@ _TAIL_BRACKET_RX = re.compile(r"^(.*?)[（(]([^（()）]*)[）)]\s*$")
 
 @_per_request
 def _map_same():
-    data = _json_column(Setting.get(MAP_SAME_KEY, ""), {})
-    data = data if isinstance(data, dict) else {}
+    data = _json_typed(Setting.get(MAP_SAME_KEY, ""), {})
     return {"info": data.get("info") if isinstance(data.get("info"), dict) else {},
             "distinct": [x for x in (data.get("distinct") or []) if isinstance(x, str)]}
 
@@ -2935,11 +2804,7 @@ MAP_WRITTEN_KEY = "map_written"
 
 @_per_request
 def _map_written():
-    try:
-        data = _json_column(Setting.get(MAP_WRITTEN_KEY, ""), {})
-    except Exception:
-        data = {}
-    return data if isinstance(data, dict) else {}
+    return _json_typed(Setting.get(MAP_WRITTEN_KEY, ""), {})
 
 def remember_written(kind, task_id, value):
     data = _map_written()
@@ -2973,7 +2838,6 @@ def writeback_candidates(saved, tasks_by_id):
     cands = []
     if not saved:
         return cands
-    saved = upgrade_graph(saved)
     nodes = {n["id"]: n for n in saved.get("nodes", []) if n.get("id")}
 
     def task_of(node_id):
@@ -3345,6 +3209,32 @@ def _purpose(text):
 def _task_outputs(t, steps):
     return [m for m in [x.get("output") or "" for x in steps] + [t.output or ""] if m.strip()]
 
+def _step_sources(x, internal):
+    """1つの手順の情報の出どころを (名前, 方法, 種類のヒント, 中身, 受け取り方) の順に返す。
+    受け取り方は、取り出し元の名前に方法が書かれていないときに使う、その手順の「どう受け取るか」。"""
+    system, inp, action, to = [(x.get(k) or "").strip() for k in ("system", "input", "action", "to")]
+    recv = method_of(x.get("how_from") or "")
+    recs = step_receives(x)
+    for r in recs:
+        r_role, r_m = field_role(r["from"]) if r["from"] else ("box", "")
+        if r["from"] and r_role != "line":
+            if not internal(r["from"]):
+                yield r["from"], method_of(r["how"]) or r_m, None, r["what"], ""
+        elif r["what"] and not internal(r["what"]):
+            yield r["what"], r_m or method_of(r["how"]), _method_medium(r_m) if r_role == "line" else None, "", ""
+    role, m = field_role(system) if system else ("box", "")
+    if system and role == "line":
+        if not recs and inp and not to and not internal(inp):
+            yield inp, m, _method_medium(m), "", ""
+        return
+    covered = _receive_covers(recs)
+    names = [n for n in _names(system) if normalize_text(n) not in covered and field_role(n)[0] != "line" and not internal(n) and not _is_destination(n, action)]
+    notes = {} if recs else source_infos(_names(system), inp, action)
+    for n in names:
+        yield n, field_role(n)[1], None, notes.get(n, ""), recv
+    if not recs and not names and inp and not to and not internal(inp):
+        yield inp, recv, None, "", ""
+
 def _raw_task_sources(t):
     items = []
     written = written_sources(t)
@@ -3371,28 +3261,8 @@ def _raw_task_sources(t):
         return any(same_thing(v, m) for m in made)
 
     for x in steps:
-        system, inp, action, to = [(x.get(k) or "").strip() for k in ("system", "input", "action", "to")]
-        recv = method_of(x.get("how_from") or "")
-        recs = step_receives(x)
-        for r in recs:
-            r_role, r_m = field_role(r["from"]) if r["from"] else ("box", "")
-            if r_role == "line" or not r["from"]:
-                if r["what"] and not internal(r["what"]):
-                    add(r["what"], hint=_method_medium(r_m) if r_role == "line" else None, method=r_m or method_of(r["how"]))
-            elif not internal(r["from"]):
-                add(r["from"], method=method_of(r["how"]) or r_m, info=r["what"])
-        role, m = field_role(system)
-        if system and role == "line":
-            if not recs and not to and inp and not internal(inp):
-                add(inp, hint=_method_medium(m), method=m)
-            continue
-        covered = _receive_covers(recs)
-        names = [n for n in _names(system) if normalize_text(n) not in covered and field_role(n)[0] != "line" and not internal(n) and not _is_destination(n, action)]
-        notes = {} if recs else source_infos(_names(system), inp, action)
-        for n in names:
-            add(n, method=field_role(n)[1] or recv, info=notes.get(n, ""))
-        if not recs and not names and inp and not internal(inp) and not to:
-            add(inp, method=recv)
+        for name, method, hint, info, via in _step_sources(x, internal):
+            add(name, hint=hint, method=method or via, info=info)
     if not items:
         for v in _names(t.inputs_note, dots=True):
             add(v, method=method_of(v))
@@ -4736,7 +4606,6 @@ def task_payload(task):
         "困りごと": task.pains_list + ([task.pains_note] if task.pains_note else []),
         "改善の希望": task.wish or "",
         "自分で改善": task.self_improve or C.SELF_IMPROVE_UNCHECKED,
-        "補足": task.note or "",
         "勤務": task.shift or "",
         "手順（聞き取り）": [f"{x['no']}. {x['action']}" + (f"［{x['system']}］" if x.get("system") else "") + (f" → {x['output']}" if x.get("output") else "") for x in task.steps],
     }
@@ -4771,7 +4640,7 @@ def _domain_keywords(d):
     return list(dict.fromkeys(list(words) + [w for w in own if len(w) >= 2 and w not in _DOMAIN_GENERIC_WORDS]))
 
 def rule_domain(task, domains):
-    texts = [task.name, "" if task.purpose_unknown else task.purpose, task.output, task.note, task.inputs_note]
+    texts = [task.name, "" if task.purpose_unknown else task.purpose, task.output, task.inputs_note]
     texts += [x.get(k) or "" for x in task.steps for k in ("action", "system", "input", "output")]
     text = " ".join(t or "" for t in texts)
     best, best_score = None, 0
@@ -4914,14 +4783,9 @@ DEFAULT_SETTINGS = {
     "openai_model": "",
 }
 
-RENAMED_DEFAULTS = {
-    "project_name": ("製造部 繰り返しPC業務ゼロ化ポータル", "製造部 PC定型業務ゼロ化ポータル"),
-}
-
-REMOVED_SETTINGS = ("survey_deadline", "contact", "portal_base_url", "monthly_deadline", "mail_subject", "mail_body", "board_message", "target_respondents", "deadline", "catchphrase", "sub_message")
 
 def seed_masters():
-    changed = _backfill_excluded_at()
+    changed = False
     if Workplace.query.count() == 0:
         for i, name in enumerate(DEFAULT_WORKPLACES):
             db.session.add(Workplace(name=name, sort=i))
@@ -4934,224 +4798,9 @@ def seed_masters():
         if db.session.get(Setting, key) is None:
             db.session.add(Setting(key=key, value=value))
             changed = True
-    for key, old_values in RENAMED_DEFAULTS.items():
-        row = db.session.get(Setting, key)
-        if row is not None and row.value in old_values:
-            row.value = DEFAULT_SETTINGS[key]
-            changed = True
-    for key in REMOVED_SETTINGS:
-        row = db.session.get(Setting, key)
-        if row is not None:
-            db.session.delete(row)
-            changed = True
-    for migrate in (_migrate_wishes, _backfill_work_patterns, _backfill_member_since, _merge_employees, _sync_members,
-                    _migrate_monthly_questions, _migrate_task_minutes, _migrate_self_improve, _drop_old_flow_maps):
-        changed = migrate() or changed
     if changed:
         db.session.commit()
 
-def _migrate_wishes():
-    rows = Task.query.filter(Task.wish.in_(list(C.LEGACY_WISHES))).all()
-    for t in rows:
-        t.wish = C.LEGACY_WISHES[t.wish]
-    old_ai = Task.query.filter(Task.ai_source == "claude").all()
-    for t in old_ai:
-        t.ai_source = "openai"
-    return bool(rows or old_ai)
-
-def _backfill_work_patterns():
-    patterns = {emp_key(e.emp_id): e.work_pattern for e in Employee.query.filter(Employee.work_pattern != "").all()}
-    if not patterns:
-        return False
-    changed = False
-    for model in (Respondent, MonthlyResponse):
-        for row in model.query.filter(db.or_(model.work_pattern.is_(None), model.work_pattern == "")).all():
-            if emp_key(row.emp_id) in patterns:
-                row.work_pattern = patterns[emp_key(row.emp_id)]
-                changed = True
-    return changed
-
-def _drop_old_flow_maps():
-    rows = FlowMap.query.filter(FlowMap.kind != "info").all()
-    for m in rows:
-        db.session.delete(m)
-    return bool(rows)
-
-def _sync_members():
-    answered = {}
-    for m in MonthlyResponse.query.order_by(MonthlyResponse.created_at, MonthlyResponse.id).all():
-        if emp_key(m.emp_id):
-            answered[emp_key(m.emp_id)] = (m.emp_id, m.name, m.workplace_id, m.work_pattern)
-    for r in Respondent.query.all():
-        if emp_key(r.emp_id) and r.tasks:
-            answered.setdefault(emp_key(r.emp_id), (r.emp_id, r.name, r.workplace_id, r.work_pattern))
-    existing = {emp_key(e.emp_id): e for e in Employee.query.all()}
-    changed = False
-    for key, (emp_id, name, wp, pat) in answered.items():
-        if key not in existing:
-            db.session.add(Employee(emp_id=norm_emp_id(emp_id), name=name or "", workplace_id=wp, work_pattern=pat or "", source="answer"))
-            changed = True
-    for key, e in existing.items():
-        if e.source == "ldap" and key not in answered:
-            db.session.delete(e)
-            changed = True
-    return changed
-
-_SOURCE_RANK = {"manual": 0, "csv": 1, "answer": 2, "ldap": 3}
-_RESPONDENT_FIELDS = ("name", "workplace_id", "work_pattern", "c2_skills", "c3_learn")
-
-
-def _merge_employees():
-    groups, monthly, resps = defaultdict(list), defaultdict(list), defaultdict(list)
-    for e in Employee.query.order_by(Employee.id).all():
-        groups[emp_key(e.emp_id)].append(e)
-    for m in MonthlyResponse.query.order_by(MonthlyResponse.created_at, MonthlyResponse.id).all():
-        if emp_key(m.emp_id):
-            monthly[emp_key(m.emp_id)].append(m)
-    for r in Respondent.query.order_by(Respondent.id).all():
-        if emp_key(r.emp_id):
-            resps[emp_key(r.emp_id)].append(r)
-    changed = False
-    for key in dict.fromkeys(list(groups) + list(monthly) + list(resps)):
-        rows = sorted(groups.get(key, []), key=lambda e: (e.emp_id != norm_emp_id(e.emp_id), _SOURCE_RANK.get(e.source, 9), e.id))
-        used = Counter(norm_emp_id(x.emp_id) for x in monthly.get(key, []) + resps.get(key, []))
-        spelling = used.most_common(1)[0][0] if used else norm_emp_id(rows[0].emp_id)
-        if rows:
-            changed = _merge_employee_rows(rows, spelling) or changed
-        changed = _merge_answer_rows(monthly.get(key, []), resps.get(key, []), spelling) or changed
-    if changed:
-        db.session.flush()
-    return changed
-
-def _merge_employee_rows(rows, spelling):
-    keep, others = rows[0], rows[1:]
-    if others:
-        named = sorted((e for e in rows if (e.name or "").strip()), key=lambda e: e.updated_at or datetime.min, reverse=True)
-        named.sort(key=lambda e: _SOURCE_RANK.get(e.source, 9) > 1)
-        keep.name = named[0].name.strip() if named else ""
-        excluded = [e.excluded_at for e in rows if e.active is False]
-        keep.active = not excluded
-        keep.excluded_at = None if keep.active or None in excluded else min(excluded)
-        closed = [x for e in rows for x in exclusion_spans(e) if x[1] is not None]
-        keep.excluded_spans = json.dumps(_merge_spans(closed)) if closed else ""
-        keep.is_demo = all(e.is_demo for e in rows)
-        for field in ("work_pattern", "workplace_id"):
-            if not getattr(keep, field):
-                setattr(keep, field, next((getattr(e, field) for e in others if getattr(e, field)), getattr(keep, field)))
-        keep.created_at = min((e.created_at for e in rows if e.created_at), default=keep.created_at)
-        for e in others:
-            db.session.delete(e)
-        db.session.flush()
-    if others or keep.emp_id != spelling:
-        keep.emp_id = spelling
-        return True
-    return False
-
-def _merge_answer_rows(monthly_rows, resp_rows, spelling):
-    changed, periods, kept = False, {}, []
-    for m in monthly_rows:
-        if m.period in periods:
-            first = periods[m.period]
-            log.warning("ユーザーIDのまとめ: 同じ月度の月次の回答が重なっていたため、後から送られた回答を消しました（月度 %s、ユーザーID %s、消した回答 #%s %s、残した回答 #%s %s）",
-                        m.period, m.emp_id, m.id, m.created_at, first.id, first.created_at)
-            db.session.delete(m)
-            changed = True
-        else:
-            periods[m.period] = m
-            kept.append(m)
-    keep = min(resp_rows, key=lambda r: (norm_emp_id(r.emp_id) != spelling, r.id)) if resp_rows else None
-    for r in resp_rows:
-        if r is keep:
-            continue
-        for t in list(r.tasks):
-            t.respondent = keep
-        for m in MonthlyResponse.query.filter_by(respondent_id=r.id).all():
-            m.respondent_id = keep.id
-        for field in _RESPONDENT_FIELDS:
-            if not getattr(keep, field) and getattr(r, field):
-                setattr(keep, field, getattr(r, field))
-        keep.is_demo = bool(keep.is_demo and r.is_demo)
-        keep.created_at = min((x for x in (keep.created_at, r.created_at) if x), default=None)
-        db.session.flush()
-        db.session.delete(r)
-        changed = True
-    if changed:
-        db.session.flush()
-    for x in kept + ([keep] if keep is not None else []):
-        if x.emp_id != spelling:
-            x.emp_id = spelling
-            changed = True
-    return changed
-
-def _backfill_excluded_at():
-    from sqlalchemy import text
-
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
-    result = db.session.execute(text("UPDATE employees SET excluded_at = COALESCE(updated_at, :now) WHERE active = 0 AND excluded_at IS NULL"), {"now": now})
-    return bool(result.rowcount)
-
-def _backfill_member_since():
-    rows = Employee.query.filter(Employee.created_at.is_(None)).all()
-    if not rows:
-        return False
-    first = {}
-
-    def seen(emp_id, at):
-        key = emp_key(emp_id)
-        if key and at and (key not in first or at < first[key]):
-            first[key] = at
-
-    for emp_id, at in db.session.query(MonthlyResponse.emp_id, MonthlyResponse.created_at).all():
-        seen(emp_id, at)
-    for emp_id, at in db.session.query(Respondent.emp_id, Task.created_at).join(Task, Task.respondent_id == Respondent.id).all():
-        seen(emp_id, at)
-    for e in rows:
-        e.created_at = min([x for x in (first.get(emp_key(e.emp_id)), e.updated_at) if x], default=None) or datetime.now()
-    return True
-
-def _migrate_task_minutes():
-    changed = False
-    for t in Task.query.filter(db.or_(Task.frequency == "不定期", Task.ai_fields.like("%headcount%"))).all():
-        if "headcount" in t.ai_fields_list and not t.verified:
-            t.ai_extra = json.dumps(dict(t.ai_extra_dict, headcount_guess=t.headcount), ensure_ascii=False)
-            t.headcount = 1
-            t.ai_fields = C.join_list([k for k in t.ai_fields_list if k != "headcount"])
-            changed = True
-        before = t.monthly_minutes
-        if t.compute_minutes() != before:
-            changed = True
-    return changed
-
-def _migrate_self_improve():
-    changed = False
-    for t in Task.query.filter(Task.self_improve == C.SELF_IMPROVE_NO).all():
-        if t.steps:
-            t.self_improve = ""
-            changed = True
-    return changed
-
-def _stance_from_old(ask, self_answer):
-    if self_answer == "取り組みたい":
-        return C.STANCE_SELF
-    if self_answer == "教えてもらえれば取り組みたい":
-        return C.STANCE_TOGETHER
-    if ask in ("頼みたい", "相談したい"):
-        return C.STANCE_ASK
-    return ""
-
-_STANCE_OLD_TO_NEW = {"教えてもらいながら自分で取り組みたい": STANCE_TOGETHER, "改善チームに頼みたい": STANCE_ASK, "今は特にない": ""}
-
-
-_HOURS_WEEK_TO_SHIFT = {"1時間未満": "30分未満", "1〜3時間": "30分未満", "3〜5時間": "30分〜1時間", "5〜10時間": "1〜2時間", "10時間以上": "2〜4時間"}
-_PREVIOUS_TEXTS = {
-    "has": {"今月、PC定型業務（繰り返しの手作業）はありますか", "PCでおこなう定型業務（繰り返しの手動作業）はありますか"},
-    "hours": {"1週間あたり、PC定型業務にかかっている時間は", "1シフト（1出勤）あたり、PCの定型業務を行っている時間は", "1シフト（1出勤）あたり、PCの定型・定期業務を行っている時間は"},
-    "trend": {"先月と比べて、PC定型業務は"},
-    "wants": {"なくしたい・自動化したい業務はありますか", "なくしたい・自動化したいPC定型業務はありますか"},
-    "stance": {"なくしたい業務の改善は、どう進めたいですか"},
-    "new_tasks": {"今月、新たに発生したPC定型業務", "増えたPC定型業務名"},
-    "wants_tasks": {"あれば、その業務名（1行に1件）"},
-}
 
 
 def _core_copy(q):
@@ -5171,90 +4820,6 @@ def _core_in_order(qs):
         qs[i] = q
     return qs, True
 
-def _migrate_monthly_questions():
-    core = {q["key"]: q for q in C.MONTHLY_CORE_QUESTIONS}
-    changed = False
-    for survey in MonthlySurvey.query.all():
-        qs = survey.questions
-        new_qs, placed, touched = [], False, False
-        for q in qs:
-            if q.get("key") in ("ask", "self"):
-                if not placed:
-                    new_qs.append(_core_copy(core["stance"]))
-                    placed = True
-                touched = True
-                continue
-            base = core.get(q.get("key"))
-            if base is not None:
-                if q.get("type") != base["type"]:
-                    q["type"] = base["type"]
-                    if base.get("placeholder"):
-                        q["placeholder"] = base["placeholder"]
-                    touched = True
-                if q.get("text") in _PREVIOUS_TEXTS.get(q["key"], set()):
-                    q["text"] = base["text"]
-                    touched = True
-                if base["type"] == "choice" and list(q.get("options") or []) != list(base["options"]):
-                    q["options"] = list(base["options"])
-                    q.pop("labels", None)
-                    touched = True
-                if "labels" in q and (base["type"] != "choice" or not isinstance(q["labels"], list) or len(q["labels"]) != len(q["options"])):
-                    q.pop("labels")
-                    touched = True
-                if bool(q.get("required")) != bool(base.get("required")):
-                    q["required"] = bool(base.get("required"))
-                    touched = True
-                if (base.get("depends") or None) != (q.get("depends") or None):
-                    if base.get("depends"):
-                        q["depends"] = dict(base["depends"])
-                    else:
-                        q.pop("depends", None)
-                    touched = True
-            new_qs.append(q)
-        present = {q.get("key") for q in new_qs}
-        for idx, cq in enumerate(C.MONTHLY_CORE_QUESTIONS):
-            if cq["key"] in present:
-                continue
-            before = {c["key"] for c in C.MONTHLY_CORE_QUESTIONS[:idx]}
-            pos = max([i for i, q in enumerate(new_qs) if q.get("key") in before], default=-1) + 1
-            new_qs.insert(pos, _core_copy(cq))
-            present.add(cq["key"])
-            touched = True
-        new_qs, reordered = _core_in_order(new_qs)
-        touched = touched or reordered
-        if touched:
-            survey.set_questions(new_qs)
-            changed = True
-    for r in MonthlyResponse.query.all():
-        answers = r.answers
-        touched = False
-        if "stance" not in answers and ("ask" in answers or "self" in answers):
-            value = _stance_from_old(answers.get("ask", ""), answers.get("self", ""))
-            if value:
-                answers["stance"] = value
-                touched = True
-        if answers.get("hours") in _HOURS_WEEK_TO_SHIFT:
-            answers["hours"] = _HOURS_WEEK_TO_SHIFT[answers["hours"]]
-            touched = True
-        if answers.get("has") == "少しある":
-            answers["has"] = "ある"
-            touched = True
-        if answers.get("has") == "ない" and answers.get("hours"):
-            answers["hours"] = ""
-            touched = True
-        if answers.get("trend") == "初回なので分からない":
-            answers["trend"] = ""
-            touched = True
-        if answers.get("stance") in _STANCE_OLD_TO_NEW:
-            answers["stance"] = _STANCE_OLD_TO_NEW[answers["stance"]]
-            touched = True
-        if answers.get("wants") == "ない" and answers.get("stance"):
-            answers["stance"] = ""
-            touched = True
-        if touched:
-            r.answers_json = json.dumps(answers, ensure_ascii=False)
-            changed = True
-    return changed
 
 # ----- デモデータ -----
 DEMO_RESPONDENTS = [
@@ -5614,8 +5179,7 @@ def seed_demo():
         if t.name in DEMO_AI_EXTRA:
             t.ai_extra = json.dumps(dict(t.ai_extra_dict, **DEMO_AI_EXTRA[t.name], ai_plan_demo=True), ensure_ascii=False)
     by_name = {t.name: t for t, _state, _raw in made}
-    written = _json_column(Setting.get(MAP_WRITTEN_KEY, ""), {})
-    written = written if isinstance(written, dict) else {}
+    written = _json_typed(Setting.get(MAP_WRITTEN_KEY, ""), {})
     for a_name, b_name in DEMO_WRITTEN_LINKS:
         ta, tb = by_name.get(a_name), by_name.get(b_name)
         if ta is not None and tb is not None:
@@ -5716,7 +5280,7 @@ def _seed_employees_and_monthly(resp_by_name, wp_by_name, created):
             )
 
 def _clear_demo_masters():
-    made = _json_column(Setting.get(DEMO_MASTERS_KEY), {})
+    made = _json_typed(Setting.get(DEMO_MASTERS_KEY), {})
     for sid in made.get("surveys") or []:
         s = db.session.get(MonthlySurvey, sid)
         used = s is not None and MonthlyResponse.query.filter(db.or_(MonthlyResponse.survey_id == s.id, MonthlyResponse.period == s.period)).first() is not None
@@ -5767,8 +5331,8 @@ def clear_demo():
     if task_ids:
         StageLog.query.filter(StageLog.task_id.in_(task_ids)).delete(synchronize_session=False)
         Task.query.filter(Task.id.in_(task_ids)).delete(synchronize_session=False)
-        written = _json_column(Setting.get(MAP_WRITTEN_KEY, ""), {})
-        if isinstance(written, dict):
+        written = _json_typed(Setting.get(MAP_WRITTEN_KEY, ""), {})
+        if written:
             gone = {str(i) for i in task_ids}
             for kind in written.values():
                 for key in [k for k in (kind if isinstance(kind, dict) else {}) if k in gone]:
@@ -6274,25 +5838,7 @@ def _state_sources(state):
     internal = lambda v: any(same_thing(v, m) for m in made)
     found = [(v, "") for v in state["sources"]]
     for x in state["steps"]:
-        system, inp, action, to = [(x.get(k) or "").strip() for k in ("system", "input", "action", "to")]
-        recs = step_receives(x)
-        for r in recs:
-            r_role, r_m = field_role(r["from"]) if r["from"] else ("box", "")
-            if r["from"] and r_role != "line":
-                if not internal(r["from"]):
-                    found.append((r["from"], method_of(r["how"]) or r_m))
-            elif r["what"] and not internal(r["what"]):
-                found.append((r["what"], r_m or method_of(r["how"])))
-        role, m = field_role(system) if system else ("box", "")
-        if system and role == "line":
-            if not recs and inp and not to and not internal(inp):
-                found.append((inp, m))
-            continue
-        covered = _receive_covers(recs)
-        names = [n for n in _names(system) if normalize_text(n) not in covered and field_role(n)[0] != "line" and not internal(n) and not _is_destination(n, action)]
-        found.extend((n, field_role(n)[1]) for n in names)
-        if not recs and not names and inp and not to and not internal(inp):
-            found.append((inp, method_of(x.get("how_from") or "")))
+        found.extend((name, method) for name, method, _hint, _info, _via in _step_sources(x, internal))
     return found
 
 
@@ -7049,15 +6595,7 @@ def domain(domain_id):
         info_legend=info_legend,
     )
 
-# ===== 画面: 人財一覧の集計（以前の DX人財情報のアドレス /people/ は人財一覧へ送る） =====
-bp_people = Blueprint("people", __name__, url_prefix="/people")
-
-
-@bp_people.route("/")
-def index():
-    args = {k: v for k, v in (("wish", (request.args.get("wish") or "").strip()), ("workplace_id", request.args.get("workplace_id", type=int))) if v}
-    return redirect(url_for("admin.employees", **args))
-
+# ===== 画面: 人財一覧の集計 =====
 def people_summary(everyone):
     have, learn = skills_summary(everyone)
     latest_period = max((p["latest_period"] for p in everyone if p["latest_period"]), default="")
@@ -7338,8 +6876,7 @@ def employees():
         "wants_month": months("monthly_wants_period") + [("-", "（なし）")],
     }
     learn_arg = (request.args.get("learn") or "").strip()
-    filter_selected = {"wp": [wp.name] if wp is not None else [], "learn": [learn_arg] if learn_arg else [],
-                       "checked": ["1"] if (request.args.get("wish") or "").strip() == C.SELF_IMPROVE_YES else []}
+    filter_selected = {"wp": [wp.name] if wp is not None else [], "learn": [learn_arg] if learn_arg else []}
     return render_template(
         "admin/employees.html",
         rows=rows,
@@ -7853,7 +7390,7 @@ def export_tasks():
         "ID", "業務名", "回答者", "Gr・役割", "業務領域", "目的", "アウトプット", "利用者", "利用者補足", "入力情報", "入力情報補足",
         "前の業務", "後の業務", "関わる人・部署", "情報の受取元",
         "頻度", "1回あたり時間", "担当人数", "月間時間(分)", "使用ツール", "作業の性質", "困りごと", "困りごと補足",
-        "改善の希望", "自分で改善", "補足", "ステータス", "進捗段階", "段階更新日", "活動状況のひとこと", "改善方針", "担当区分", "担当者", "手順完了", "改善後月間時間(分)", "削減(分/月)",
+        "改善の希望", "自分で改善", "ステータス", "進捗段階", "段階更新日", "活動状況のひとこと", "改善方針", "担当区分", "担当者", "手順完了", "改善後月間時間(分)", "削減(分/月)",
         "担当者確認", "AI領域", "AI優先度", "AIフラグ", "AI要約", "登録日", "勤務", "手順（聞き取り）", "AI推定の項目",
         "分からなかったこと", "改善後の流れ（AI案）", *[f"ECRSメモ {label}" for _key, label, _q in C.ECRS], "改善内容・結果", "確認者",
     ]
@@ -7867,7 +7404,7 @@ def export_tasks():
             t.actors, t.info_from,
             t.frequency, t.duration, t.headcount,
             t.monthly_minutes, "・".join(t.tools_list), "・".join(t.nature_list), "・".join(t.pains_list), t.pains_note,
-            t.wish, t.self_improve or C.SELF_IMPROVE_UNCHECKED, t.note, t.status, t.stage_name, t.stage_since.strftime("%Y-%m-%d") if t.stage_since else "", t.progress_note,
+            t.wish, t.self_improve or C.SELF_IMPROVE_UNCHECKED, t.status, t.stage_name, t.stage_since.strftime("%Y-%m-%d") if t.stage_since else "", t.progress_note,
             t.decision, t.assignment, t.assignee, "・".join(str(s) for s in t.steps_done_list),
             "" if t.after_minutes is None else t.after_minutes, t.saved_minutes, "済" if t.verified else "",
             t.ai_domain or "", t.ai_priority or "", "・".join(t.ai_flags_list), (f"［{t.ai_stale_note}］" if t.ai_stale_note else "") + (t.ai_summary or ""),
@@ -8051,15 +7588,17 @@ def index():
         hl=highlights(tasks),
         workplaces=workplaces,
         selected_wp=selected,
-        show_names=Setting.get("board_show_names", "1") != "0",
+        show_names=board_shows_names(),
     )
 
 @bp_board.route("/<int:task_id>")
 def task_detail(task_id):
     task = _get_or_404(Task, task_id)
     task_flow, task_legend = flow_view(build_task_flow(task))
-    return render_template("board/detail.html", task=task, task_flow=task_flow, task_legend=task_legend,
-                           show_names=Setting.get("board_show_names", "1") != "0")
+    return render_template("board/detail.html", task=task, task_flow=task_flow, task_legend=task_legend, show_names=board_shows_names())
+
+def board_shows_names():
+    return Setting.get("board_show_names", "1") != "0"
 
 def highlights(tasks):
     total_minutes = sum(t.monthly_minutes or 0 for t in tasks)
@@ -8780,6 +8319,7 @@ TEMPLATES = {
 </html>
 ''',
     'bizmap/domain.html': r'''{% extends "base.html" %}
+{% from "flow/_macros.html" import zoom_toolbar %}
 {% block title %}{{ d.name }}{% endblock %}
 {% block content %}
 <nav aria-label="breadcrumb"><ol class="breadcrumb small mb-2">
@@ -8812,11 +8352,7 @@ TEMPLATES = {
       <h5 class="mb-1">この領域の業務マップ{{ C.tip("取り出し元の情報 → 業務 → できるもの → 渡す相手の作業。業務の箱をクリックすると案件詳細を開きます。") }}</h5>
       {{ info_legend|safe }}
     </div>
-    <div class="btn-group btn-group-sm flow-toolbar" data-target="info" role="group">
-      <button type="button" class="btn btn-outline-secondary" data-zoom="out">－</button>
-      <button type="button" class="btn btn-outline-secondary" data-zoom="reset">100%</button>
-      <button type="button" class="btn btn-outline-secondary" data-zoom="in">＋</button>
-    </div>
+    {{ zoom_toolbar('info') }}
   </div>
   <div class="flow-canvas"><div class="flow-inner" id="flow-info" data-def="def-info"><span class="text-muted small">描画中…</span></div></div>
   <script type="text/plain" id="def-info">{{ info_flow|safe }}</script>
@@ -8836,7 +8372,7 @@ TEMPLATES = {
       <td class="small">{{ t.purpose }}</td>
       <td class="small">{{ t.output }}</td>
       <td class="text-end">{{ t.monthly_minutes|hours }} h</td>
-      <td><span class="badge text-bg-{{ {'受付':'secondary','対応中':'primary','完了':'success','保留':'warning'}.get(t.status, 'secondary') }}">{{ t.status }}</span></td>
+      <td><span class="badge text-bg-{{ C.STATUS_BADGE.get(t.status, 'secondary') }}">{{ t.status }}</span></td>
       <td>{% if t.verified %}<span class="badge text-bg-success">済</span>{% else %}<span class="badge text-bg-light text-muted">未</span>{% endif %}</td>
     </tr>
     {% else %}
@@ -8873,7 +8409,7 @@ TEMPLATES = {
 </div>
 {% endblock %}
 {% block scripts %}
-<script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"></script>
+<script src="{{ C.MERMAID_JS }}"></script>
 <script src="{{ url_for('static', filename='flows.js') }}"></script>
 {% endblock %}
 ''',
@@ -8979,6 +8515,7 @@ TEMPLATES = {
 {% endblock %}
 ''',
     'bizmap/index.html': r'''{% extends "base.html" %}
+{% from "flow/_macros.html" import zoom_toolbar %}
 {% block title %}業務マップ{% endblock %}
 {% macro flow_panel(key, title, desc, definition, empty_msg) -%}
 <div class="card"><div class="card-body">
@@ -8992,11 +8529,7 @@ TEMPLATES = {
     <div class="d-flex flex-column align-items-end gap-1">
       <a class="btn btn-sm btn-primary" href="{{ url_for('bizmap.edit', kind=key, workplace_id=args.get('workplace_id') or None, domain_id=args.get('domain_id') or None) }}">✎ この図を編集する</a>
       {% if definition %}
-      <div class="btn-group btn-group-sm flow-toolbar" data-target="{{ key }}" role="group" aria-label="表示操作">
-        <button type="button" class="btn btn-outline-secondary" data-zoom="out" title="縮小">－</button>
-        <button type="button" class="btn btn-outline-secondary" data-zoom="reset" title="元の大きさ">100%</button>
-        <button type="button" class="btn btn-outline-secondary" data-zoom="in" title="拡大">＋</button>
-      </div>
+      {{ zoom_toolbar(key) }}
       {% endif %}
     </div>
   </div>
@@ -9229,7 +8762,7 @@ TEMPLATES = {
 </div>
 {% endblock %}
 {% block scripts %}
-<script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"></script>
+<script src="{{ C.MERMAID_JS }}"></script>
 <script src="{{ url_for('static', filename='flows.js') }}"></script>
 {% endblock %}
 ''',
@@ -9361,6 +8894,7 @@ TEMPLATES = {
 {% endmacro %}
 ''',
     'board/detail.html': r'''{% extends "base.html" %}
+{% from "flow/_macros.html" import zoom_toolbar %}
 {% from "board/_macros.html" import stepper with context %}
 {% block title %}{{ task.name }}{% endblock %}
 {% block content %}
@@ -9379,7 +8913,7 @@ TEMPLATES = {
     </div>
   </div>
   <div>
-    <span class="badge fs-6 text-bg-{{ {'受付':'secondary','対応中':'primary','完了':'success','保留':'warning'}.get(task.status, 'secondary') }}">{{ '順番待ち' if task.status == '受付' else task.status }}</span>
+    <span class="badge fs-6 text-bg-{{ C.STATUS_BADGE.get(task.status, 'secondary') }}">{{ '順番待ち' if task.status == '受付' else task.status }}</span>
     {% if task.decision and task.decision != '未定' %}<span class="badge fs-6 text-bg-dark">{{ task.decision }}</span>{% endif %}
   </div>
 </div>
@@ -9420,11 +8954,7 @@ TEMPLATES = {
           <h5 class="mb-1">この業務の流れ</h5>
           {{ task_legend|safe }}
         </div>
-        <div class="btn-group btn-group-sm flow-toolbar" data-target="task" role="group">
-          <button type="button" class="btn btn-outline-secondary" data-zoom="out">－</button>
-          <button type="button" class="btn btn-outline-secondary" data-zoom="reset">100%</button>
-          <button type="button" class="btn btn-outline-secondary" data-zoom="in">＋</button>
-        </div>
+        {{ zoom_toolbar('task') }}
       </div>
       {% if task_flow %}
       <div class="flow-canvas"><div class="flow-inner" id="flow-task" data-def="def-task"><span class="text-muted small">描画中…</span></div></div>
@@ -9435,7 +8965,7 @@ TEMPLATES = {
 </div>
 {% endblock %}
 {% block scripts %}
-<script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"></script>
+<script src="{{ C.MERMAID_JS }}"></script>
 <script src="{{ url_for('static', filename='flows.js') }}"></script>
 {% endblock %}
 ''',
@@ -9446,6 +8976,7 @@ TEMPLATES = {
 {% endblock %}
 ''',
     'cases/detail.html': r'''{% extends "base.html" %}
+{% from "flow/_macros.html" import zoom_toolbar %}
 {% from "board/_macros.html" import stepper with context %}
 {% block title %}{{ task.name }}{% endblock %}
 {% block content %}
@@ -9464,7 +8995,7 @@ TEMPLATES = {
     </div>
   </div>
   <div>
-    <span class="badge fs-6 text-bg-{{ {'受付':'secondary','対応中':'primary','完了':'success','保留':'warning'}.get(task.status, 'secondary') }}">{{ task.status }}</span>
+    <span class="badge fs-6 text-bg-{{ C.STATUS_BADGE.get(task.status, 'secondary') }}">{{ task.status }}</span>
     {% if task.decision and task.decision != '未定' %}<span class="badge fs-6 text-bg-dark">{{ task.decision }}</span>{% endif %}
     {% if task.verified %}<span class="badge fs-6 text-bg-success">担当者確認済み</span>{% else %}<span class="badge fs-6 text-bg-light text-muted">未確認</span>{% endif %}
   </div>
@@ -9494,7 +9025,6 @@ TEMPLATES = {
         <tr><th>困りごと</th><td>{{ mark('pains') }}{{ task.pains_list|join('・') }}{% if task.pains_note %}<div class="small text-muted">{{ task.pains_note }}</div>{% endif %}</td></tr>
         <tr><th>改善の希望</th><td>{{ task.wish or '' }}</td></tr>
         <tr><th>自分で改善</th><td>{{ task.self_improve or C.SELF_IMPROVE_UNCHECKED }}</td></tr>
-        {% if task.note %}<tr><th>補足</th><td>{{ task.note }}</td></tr>{% endif %}
       </table>
       {% if task.intake %}
       <details class="small mt-2"><summary class="text-muted">聞き取りの記録（{{ task.intake|length }} 件）</summary>
@@ -9510,11 +9040,7 @@ TEMPLATES = {
           <p class="small text-muted mb-0"><a href="{{ url_for('bizmap.index', workplace_id=task.workplace_id) }}">Gr・役割全体の流れ図</a></p>
           {{ task_legend|safe }}
         </div>
-        <div class="btn-group btn-group-sm flow-toolbar" data-target="task" role="group">
-          <button type="button" class="btn btn-outline-secondary" data-zoom="out">－</button>
-          <button type="button" class="btn btn-outline-secondary" data-zoom="reset">100%</button>
-          <button type="button" class="btn btn-outline-secondary" data-zoom="in">＋</button>
-        </div>
+        {{ zoom_toolbar('task') }}
       </div>
       <div class="flow-canvas"><div class="flow-inner" id="flow-task" data-def="def-task"><span class="text-muted small">描画中…</span></div></div>
       <script type="text/plain" id="def-task">{{ task_flow|safe }}</script>
@@ -9798,7 +9324,7 @@ TEMPLATES = {
 </div>
 {% endblock %}
 {% block scripts %}
-<script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"></script>
+<script src="{{ C.MERMAID_JS }}"></script>
 <script src="{{ url_for('static', filename='flows.js') }}"></script>
 {% endblock %}
 ''',
@@ -9890,7 +9416,7 @@ TEMPLATES = {
     <td class="text-end">{{ t.monthly_minutes|hours }} h</td>
     <td class="small">{{ t.wish or '' }}</td>
     <td class="small">{% if t.self_improve in C.SELF_IMPROVE_POSITIVE %}<span class="badge text-bg-success">希望</span>{% else %}{{ t.self_improve or C.SELF_IMPROVE_UNCHECKED }}{% endif %}</td>
-    <td><span class="badge text-bg-{{ {'受付':'secondary','対応中':'primary','完了':'success','保留':'warning'}.get(t.status, 'secondary') }}">{{ t.status }}</span>{% if t.decision and t.decision != '未定' %}<div class="small">{{ t.decision }}</div>{% endif %}</td>
+    <td><span class="badge text-bg-{{ C.STATUS_BADGE.get(t.status, 'secondary') }}">{{ t.status }}</span>{% if t.decision and t.decision != '未定' %}<div class="small">{{ t.decision }}</div>{% endif %}</td>
     <td class="small" style="min-width: 150px"><div class="fw-semibold">{{ t.stage_index + 1 }}. {{ t.stage_name }}</div>{{ stepper(t, small=True) }}</td>
     <td class="small">{{ t.steps_done_list|length }}/5</td>
     <td>{% if t.verified %}<span class="badge text-bg-success">済</span>{% else %}<span class="badge text-bg-light text-muted">未</span>{% endif %}</td>
@@ -9930,6 +9456,15 @@ TEMPLATES = {
   </div></div>
 </div>
 {% endblock %}
+''',
+    'flow/_macros.html': r'''
+{% macro zoom_toolbar(target) -%}
+<div class="btn-group btn-group-sm flow-toolbar" data-target="{{ target }}" role="group" aria-label="表示操作">
+  <button type="button" class="btn btn-outline-secondary" data-zoom="out" title="縮小">－</button>
+  <button type="button" class="btn btn-outline-secondary" data-zoom="reset" title="元の大きさ">100%</button>
+  <button type="button" class="btn btn-outline-secondary" data-zoom="in" title="拡大">＋</button>
+</div>
+{%- endmacro %}
 ''',
     'index.html': r'''{% extends "base.html" %}
 {% block title %}ダッシュボード{% endblock %}
@@ -10170,7 +9705,7 @@ TEMPLATES = {
           <td>{{ t.domain.name if t.domain else '' }}</td>
           <td class="text-end">{{ t.monthly_minutes|hours }} h</td>
           <td>{{ t.wish or '' }}</td>
-          <td><span class="badge text-bg-{{ {'受付':'secondary','対応中':'primary','完了':'success','保留':'warning'}.get(t.status, 'secondary') }}">{{ t.status }}</span></td>
+          <td><span class="badge text-bg-{{ C.STATUS_BADGE.get(t.status, 'secondary') }}">{{ t.status }}</span></td>
         </tr>
         {% else %}
         <tr><td colspan="6" class="text-muted">まだ登録がありません</td></tr>
@@ -10185,24 +9720,13 @@ TEMPLATES = {
 
 {% block scripts %}
 <script id="chart-data" type="application/json">{{ charts_json|safe }}</script>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="{{ C.CHART_JS }}"></script>
 <script>
 (function () {
   var data = JSON.parse(document.getElementById("chart-data").textContent);
   var C = { blue: "#0a84ff", green: "#30d158", orange: "#ff9f0a", purple: "#bf5af2", red: "#ff453a", teal: "#5ac8fa", indigo: "#5e5ce6", yellow: "#ffd60a" };
   var palette = [C.blue, C.green, C.orange, C.purple, C.red, C.teal, C.indigo, C.yellow];
-  Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
-  Chart.defaults.font.size = 12;
-  Chart.defaults.color = "#6e6e73";
-  Chart.defaults.borderColor = "#ececf0";
-  Chart.defaults.plugins.legend.labels.usePointStyle = true;
-  Chart.defaults.plugins.legend.labels.boxWidth = 8;
-  Chart.defaults.plugins.legend.labels.boxHeight = 8;
-  Chart.defaults.plugins.tooltip.backgroundColor = "#1d1d1f";
-  Chart.defaults.plugins.tooltip.padding = 10;
-  Chart.defaults.plugins.tooltip.cornerRadius = 8;
-  Chart.defaults.animation.duration = 900;
-  Chart.defaults.animation.easing = "easeOutQuart";
+  chartTheme();
   var axisX = { grid: { display: false }, border: { display: false } };
   var axisY = function (extra) { return Object.assign({ beginAtZero: true, grid: { color: "#ececf0" }, border: { display: false, dash: [4, 4] } }, extra || {}); };
   new Chart(document.getElementById("chart-wish"), {
@@ -10914,6 +10438,27 @@ TEMPLATES = {
 ''',
     'monthly/results.html': r'''{% extends "base.html" %}
 {% block title %}月次アンケート 集計{% endblock %}
+{% macro trend_table(head, trends) -%}
+<div class="card mb-2"><div class="card-body">
+  <div class="table-responsive">
+  <table class="table table-sm trend-table mb-0">
+    <thead><tr><th>{{ head }}</th>{% for l in trends.labels %}<th class="text-end">{{ l|replace('年', '/')|replace('月度', '') }}</th>{% endfor %}</tr></thead>
+    <tbody>
+    {% for row in trends.rows %}
+    <tr>
+      <td>{{ caller(row) }}</td>
+      {% for c in row.cells %}
+      <td class="text-end">{% if c.n %}<div>{{ '%.0f'|format(c.has_rate) }}%</div><div class="cell-sub">{{ '%.0f'|format(c.hours_month) }} h・{{ c.n }}人</div>{% else %}<span class="text-muted">－</span>{% endif %}</td>
+      {% endfor %}
+    </tr>
+    {% else %}
+    <tr><td colspan="{{ 1 + trends.labels|length }}" class="text-muted">回答はまだありません</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div></div>
+{%- endmacro %}
 {% block content %}
 <div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-1">
   <div>
@@ -10997,46 +10542,10 @@ TEMPLATES = {
 </div>
 
 <h2 class="section-title">Gr・役割別の推移{{ C.tip("PCの定型・定期業務あり率と推計月間時間\n上段がPCの定型・定期業務あり率、下段が推計月間時間と回答者数です。") }}</h2>
-<div class="card mb-2"><div class="card-body">
-  <div class="table-responsive">
-  <table class="table table-sm trend-table mb-0">
-    <thead><tr><th>Gr・役割</th>{% for l in wp_trends.labels %}<th class="text-end">{{ l|replace('年', '/')|replace('月度', '') }}</th>{% endfor %}</tr></thead>
-    <tbody>
-    {% for row in wp_trends.rows %}
-    <tr>
-      <td>{{ row.workplace.name }}</td>
-      {% for c in row.cells %}
-      <td class="text-end">{% if c.n %}<div>{{ '%.0f'|format(c.has_rate) }}%</div><div class="cell-sub">{{ '%.0f'|format(c.hours_month) }} h・{{ c.n }}人</div>{% else %}<span class="text-muted">－</span>{% endif %}</td>
-      {% endfor %}
-    </tr>
-    {% else %}
-    <tr><td colspan="{{ 1 + wp_trends.labels|length }}" class="text-muted">回答はまだありません</td></tr>
-    {% endfor %}
-    </tbody>
-  </table>
-  </div>
-</div></div>
+{% call(row) trend_table('Gr・役割', wp_trends) %}{{ row.workplace.name }}{% endcall %}
 
 <h2 class="section-title">勤務形態別の推移{{ C.tip("普通勤務と交代勤務の違い\n勤務形態はその月の回答で選んだものです。「未設定」は勤務形態を聞く前の回答です。") }}</h2>
-<div class="card mb-2"><div class="card-body">
-  <div class="table-responsive">
-  <table class="table table-sm trend-table mb-0">
-    <thead><tr><th>勤務形態</th>{% for l in pattern_trends.labels %}<th class="text-end">{{ l|replace('年', '/')|replace('月度', '') }}</th>{% endfor %}</tr></thead>
-    <tbody>
-    {% for row in pattern_trends.rows %}
-    <tr>
-      <td>{{ row.pattern }}</td>
-      {% for c in row.cells %}
-      <td class="text-end">{% if c.n %}<div>{{ '%.0f'|format(c.has_rate) }}%</div><div class="cell-sub">{{ '%.0f'|format(c.hours_month) }} h・{{ c.n }}人</div>{% else %}<span class="text-muted">－</span>{% endif %}</td>
-      {% endfor %}
-    </tr>
-    {% else %}
-    <tr><td colspan="{{ 1 + pattern_trends.labels|length }}" class="text-muted">回答はまだありません</td></tr>
-    {% endfor %}
-    </tbody>
-  </table>
-  </div>
-</div></div>
+{% call(row) trend_table('勤務形態', pattern_trends) %}{{ row.pattern }}{% endcall %}
 {% endif %}
 
 <h2 class="section-title" id="detail">月度の詳細
@@ -11115,20 +10624,12 @@ TEMPLATES = {
 {% if rows %}
 <script id="monthly-chart" type="application/json">{{ chart_json|safe }}</script>
 <script id="monthly-trends" type="application/json">{{ trends_json|safe }}</script>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="{{ C.CHART_JS }}"></script>
 <script>
 (function () {
   var d = JSON.parse(document.getElementById("monthly-chart").textContent);
   var trends = JSON.parse(document.getElementById("monthly-trends").textContent);
-  Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
-  Chart.defaults.color = "#6e6e73";
-  Chart.defaults.plugins.legend.labels.usePointStyle = true;
-  Chart.defaults.plugins.legend.labels.boxWidth = 8;
-  Chart.defaults.plugins.tooltip.backgroundColor = "#1d1d1f";
-  Chart.defaults.plugins.tooltip.padding = 10;
-  Chart.defaults.plugins.tooltip.cornerRadius = 8;
-  Chart.defaults.animation.duration = 900;
-  Chart.defaults.animation.easing = "easeOutQuart";
+  chartTheme();
   var line = function (label, data, color) { return { label: label, data: data, borderColor: color, backgroundColor: color, tension: 0.35, pointRadius: 3, borderWidth: 2.5 }; };
   new Chart(document.getElementById("chart-rates"), {
     type: "line",
@@ -11305,7 +10806,7 @@ TEMPLATES = {
     }
   };
 </script>
-<script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"></script>
+<script src="{{ C.MERMAID_JS }}"></script>
 <script src="{{ url_for('static', filename='survey.js') }}"></script>
 {% endblock %}
 ''',
@@ -11332,6 +10833,23 @@ STATIC = {
     if (fs && inst && inst.tip && fs.contains(e.target) && !fs.contains(inst.tip)) fs.appendChild(inst.tip);
   });
 })();
+
+// グラフ（Chart.js）の見た目の既定。ダッシュボードと月次集計で同じにする
+window.chartTheme = function () {
+  var d = Chart.defaults;
+  d.font.family = getComputedStyle(document.body).fontFamily;
+  d.font.size = 12;
+  d.color = "#6e6e73";
+  d.borderColor = "#ececf0";
+  d.plugins.legend.labels.usePointStyle = true;
+  d.plugins.legend.labels.boxWidth = 8;
+  d.plugins.legend.labels.boxHeight = 8;
+  d.plugins.tooltip.backgroundColor = "#1d1d1f";
+  d.plugins.tooltip.padding = 10;
+  d.plugins.tooltip.cornerRadius = 8;
+  d.animation.duration = 900;
+  d.animation.easing = "easeOutQuart";
+};
 
 document.addEventListener("DOMContentLoaded", function () {
   document.querySelectorAll("form[data-confirm]").forEach(function (form) {
@@ -14462,7 +13980,7 @@ def create_app(test_config=None):
         app.config.update(test_config)
 
     db.init_app(app)
-    for blueprint in (bp_main, bp_survey, bp_cases, bp_bizmap, bp_people, bp_admin, bp_monthly, bp_export, bp_board, bp_auth):
+    for blueprint in (bp_main, bp_survey, bp_cases, bp_bizmap, bp_admin, bp_monthly, bp_export, bp_board, bp_auth):
         app.register_blueprint(blueprint)
 
     @app.route("/static/<path:filename>", endpoint="static")
