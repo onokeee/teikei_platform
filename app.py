@@ -965,21 +965,61 @@ def kpis():
         "insufficient_domains": [d for d in domain_rows if d["level"] <= 1],
     }
 
-def dashboard_chart_data():
+
+DASH_DECISIONS = ("廃止", "統合", "簡素化", "自動化", "高度化")
+DASH_MONTHS = 24
+
+
+def dashboard_progress():
+    """ダッシュボードの進み具合と成果: 月ごとの登録・完了・累計削減工数、案件の段階、改善の決め方、人材育成、Gr・役割別の参加状況"""
     tasks = Task.query.all()
-    wish_counter = Counter(t.wish or "未回答" for t in tasks)
-    pain_counter = Counter(p for t in tasks for p in t.pains_list if p != "特になし")
-    wish_labels = [w for w in C.WISHES + ["未回答"] if wish_counter.get(w)]
-    pain_counts = pain_counter.most_common()
+    completed = [t for t in tasks if t.status == "完了"]
+    srows = monthly_summary()
+    cur = current_period()
+    starts = [x for x in [_period_of(t.created_at) for t in tasks] + [r["period"] for r in srows] if x]
+    months, p = [], min(starts) if starts else cur
+    while p <= cur:
+        months.append(p)
+        p = shift_period(p, 1)
+    months = months[-C.DASH_MONTHS:]
+    by_period = {r["period"]: r for r in srows}
+    timeline = []
+    for p in months:
+        done = [t for t in completed if t.completed_at and _period_of(t.completed_at) <= p]
+        r = by_period.get(p) or {}
+        timeline.append({
+            "period": p, "label": period_label(p), "new": len([t for t in tasks if _period_of(t.created_at) == p]),
+            "done": len([t for t in completed if _period_of(t.completed_at) == p]),
+            "registered": len([t for t in tasks if (_period_of(t.created_at) or "") <= p]), "completed": len(done),
+            "saved_annual": round(sum(t.saved_minutes for t in done) * 12 / 60.0, 1),
+            "response_rate": r.get("response_rate"), "has_rate": r.get("has_rate"), "self_rate": r.get("self_rate"), "hours_month": r.get("hours_month"),
+        })
+    stages = [{"name": STAGE_NAMES[key], "n": len([t for t in tasks if t.status != "保留" and t.stage_key == key])} for key in STAGE_KEYS]
+    stages.append({"name": "保留", "n": len([t for t in tasks if t.status == "保留"])})
+    decided = Counter(t.decision for t in tasks if (t.decision or "未定") != "未定")
+    done_decisions = Counter(t.decision for t in completed if t.decision in C.DASH_DECISIONS)
+    self_done = [t for t in completed if t.assignment == "自主改善"]
+    member = member_rows()
+    latest = srows[-1]["period"] if srows else None
+    rates = survey_response_rates(member, [latest], "wp") if latest else {}
+    wp_rows = []
+    for w in workplace_stats():
+        mine = [t for t in tasks if t.workplace_id == w["workplace"].id]
+        done_w = [t for t in mine if t.status == "完了"]
+        cell = rates.get(w["workplace"].name, {}).get(latest) if latest else None
+        wp_rows.append(dict(w, response_rate=(cell or {}).get("rate"), members=(cell or {}).get("members", 0), member_answered=(cell or {}).get("answered", 0),
+                            completed=len(done_w), saved_annual=sum(t.saved_minutes for t in done_w) * 12 / 60.0))
     return {
-        "wish": {
-            "labels": wish_labels,
-            "values": [wish_counter[w] for w in wish_labels],
-        },
-        "pains": {
-            "labels": [p for p, _ in pain_counts],
-            "values": [n for _, n in pain_counts],
-        },
+        "timeline": timeline, "stages": stages,
+        "decisions": [{"name": d, "n": decided[d]} for d in C.DECISIONS if decided.get(d)],
+        "done_decisions": [(d, done_decisions[d]) for d in C.DASH_DECISIONS if done_decisions.get(d)],
+        "completion_rate": len(completed) / len(tasks) * 100.0 if tasks else None,
+        "accompanied": len([t for t in tasks if _accompanied(t) and t.status != "完了"]), "self_done": len(self_done),
+        "independent_rate": len(self_done) / len(completed) * 100.0 if completed else None,
+        "ai_analyzed": len([t for t in tasks if t.ai_source == "openai"]),
+        "new_this_month": len([t for t in tasks if _period_of(t.created_at) == cur]),
+        "survey_last": srows[-1] if srows else None, "survey_prev": srows[-2] if len(srows) > 1 else None,
+        "workplaces": wp_rows, "active_workplaces": len([w for w in wp_rows if w["respondents"] or w["tasks"]]),
     }
 
 # ----- 職場別・領域別 -----
@@ -5897,36 +5937,25 @@ def _resolve_urls(suggestions):
             s["href"] = None
     return suggestions
 
-def _rounded_series(rows, *keys):
-    return {key: [round(r[key], 1) for r in rows] for key in keys}
 
 @bp_main.route("/")
 def index():
     if not session.get("user"):
         return redirect(url_for("board.index"))
     k = kpis()
-    charts = dashboard_chart_data()
-    suggestions = _resolve_urls(suggest_actions())
-    ai_suggestions = _json_column(Setting.get("ai_suggestions"), [])
-    recent = Task.query.order_by(Task.created_at.desc()).limit(8).all()
+    progress = dashboard_progress()
     _summary, wish_counts, have, learn, _stances = people_summary(dx_people())
-    monthly_rows = monthly_summary()
-    charts["monthly"] = {
-        "labels": [r["label"] for r in monthly_rows],
-        **_rounded_series(monthly_rows, "has_rate", "decreased_rate", "self_rate"),
-    }
+    charts = {"timeline": progress["timeline"], "stages": progress["stages"], "decisions": progress["decisions"]}
     return render_template(
         "index.html",
         k=k,
-        charts_json=json.dumps(charts, ensure_ascii=False),
-        suggestions=suggestions,
-        ai_suggestions=ai_suggestions,
-        workplaces=workplace_stats(),
-        recent=recent,
+        pr=progress,
+        charts_json=json.dumps(charts, ensure_ascii=False).replace("</", "<\\/"),
+        suggestions=_resolve_urls(suggest_actions()),
+        ai_suggestions=_json_column(Setting.get("ai_suggestions"), []),
         wish_counts=wish_counts,
-        have=have.most_common(),
-        learn=learn.most_common(),
-        monthly_latest=monthly_rows[-1] if monthly_rows else None,
+        have=have.most_common(6),
+        learn=learn.most_common(6),
     )
 
 @bp_main.post("/ai/suggest")
@@ -9997,6 +10026,24 @@ TEMPLATES = {
 ''',
     'index.html': r'''{% extends "base.html" %}
 {% block title %}ダッシュボード{% endblock %}
+{% macro num(v, digits=0) -%}{% if v is none %}－{% else %}{{ ('%.' ~ digits ~ 'f')|format(v) }}{% endif %}{%- endmacro %}
+{% macro delta(cur, prev, unit='', better='up', digits=0) -%}
+{%- if cur is not none and prev is not none -%}
+{%- set d = cur - prev -%}
+{%- set good = (d > 0 and better == 'up') or (d < 0 and better == 'down') -%}
+{%- set bad = (d < 0 and better == 'up') or (d > 0 and better == 'down') -%}
+<span class="sa-delta{% if good %} is-good{% elif bad %} is-bad{% endif %}">{{ '▲' if d > 0 else ('▼' if d < 0 else '±') }}{{ ('%.' ~ digits ~ 'f')|format(d|abs) }}{{ unit }}</span>
+{%- endif -%}
+{%- endmacro %}
+{% macro card(icon, tile, label, value, unit, tip='') -%}
+<div class="col-6 col-lg-3">
+  <div class="card stat h-100"><div class="card-body">
+    <div class="stat-head"><span class="stat-tile {{ tile }}"><i class="bi {{ icon }}"></i></span><span class="stat-label">{{ label }}{% if tip %}{{ C.tip(tip) }}{% endif %}</span></div>
+    <div class="stat-value">{{ value }}<span class="stat-unit">{{ unit }}</span></div>
+    <div class="stat-sub">{{ caller() }}</div>
+  </div></div>
+</div>
+{%- endmacro %}
 {% block content %}
 {% if k.task_count == 0 %}
 <div class="alert alert-info">
@@ -10004,133 +10051,55 @@ TEMPLATES = {
   <a href="{{ url_for('admin.index') }}">管理</a>画面からデモデータを投入すると画面の動きを確認できます。
 </div>
 {% endif %}
+<h2 class="mb-2">ダッシュボード{{ C.tip("3本柱（業務改革・AI活用・人材育成）と活動定着の進み具合と成果を、1か所で見るページです。詳しい内容は、改善案件一覧・業務マップ・アンケート結果分析・人財一覧で見られます。") }}</h2>
+{% set sl, sp = pr.survey_last, pr.survey_prev %}
 
 <h2 class="section-title">活動の成果</h2>
-<div class="row g-3 mb-4">
-  <div class="col-6 col-lg-3">
-    <div class="card stat h-100"><div class="card-body">
-      <div class="stat-head"><span class="stat-tile tile-blue"><i class="bi bi-kanban"></i></span><span class="stat-label">累計改善案件</span></div>
-      <div class="stat-value">{{ k.task_count }}<span class="stat-unit">件</span></div>
-      <div class="stat-sub">受付 {{ k.status_counts.get('受付', 0) }} ・ 対応中 {{ k.status_counts.get('対応中', 0) }} ・ 完了 {{ k.completed_count }} ・ 保留 {{ k.status_counts.get('保留', 0) }}</div>
-    </div></div>
-  </div>
-  <div class="col-6 col-lg-3">
-    <div class="card stat h-100"><div class="card-body">
-      <div class="stat-head"><span class="stat-tile tile-green"><i class="bi bi-hourglass-split"></i></span><span class="stat-label">年間削減工数</span></div>
-      <div class="stat-value">{{ '%.0f'|format(k.saved_annual_hours) }}<span class="stat-unit">時間</span></div>
-      <div class="stat-sub">削減率 {{ '%.1f'|format(k.reduction_rate) }}%（棚卸し月間 {{ '%.1f'|format(k.total_hours) }} 時間に対して）</div>
-    </div></div>
-  </div>
-  <div class="col-6 col-lg-3">
-    <div class="card stat h-100"><div class="card-body">
-      <div class="stat-head"><span class="stat-tile tile-indigo"><i class="bi bi-people"></i></span><span class="stat-label">自主改善者{{ C.tip("自ら改善に取り組みたい人") }}</span></div>
-      <div class="stat-value">{{ k.self_improver_count }}<span class="stat-unit">人</span></div>
-      <div class="stat-sub">回答した人 {{ k.respondent_count }} 人中</div>
-    </div></div>
-  </div>
-  <div class="col-6 col-lg-3">
-    <div class="card stat h-100"><div class="card-body">
-      <div class="stat-head"><span class="stat-tile tile-orange"><i class="bi bi-lightning-charge"></i></span><span class="stat-label">自動化・廃止業務{{ C.tip("完了案件のうち廃止・自動化したもの") }}</span></div>
-      <div class="stat-value">{{ k.automated_count }}<span class="stat-unit">件</span></div>
-    </div></div>
-  </div>
+<div class="row g-3 mb-2">
+  {% call card('bi-hourglass-split', 'tile-green', '年間削減工数', '%.0f'|format(k.saved_annual_hours), '時間', '完了した案件の、改善前後の月間時間の差 × 12') %}削減率 {{ '%.1f'|format(k.reduction_rate) }}%（棚卸し月間 {{ '%.1f'|format(k.total_hours) }} 時間に対して）{% endcall %}
+  {% call card('bi-trophy', 'tile-teal', '完了した改善', k.completed_count, '件', '活動状況で「完了」になった案件') %}案件完了率 {{ num(pr.completion_rate) }}%（全 {{ k.task_count }} 件）{% endcall %}
+  {% call card('bi-list-check', 'tile-orange', 'PCの定型・定期業務', num(sl.hours_month) if sl else '－', '時間/月', '月次アンケートの推計 月間時間（いちばん新しい月度）。減っていけば効果あり') %}{% if sl %}{{ sl.label }}{% if sp %} {{ delta(sl.hours_month, sp.hours_month, ' 時間', 'down') }}<span class="text-muted"> 前の月度と比べて</span>{% endif %}{% else %}月次アンケートの回答はまだありません{% endif %}{% endcall %}
+  {% call card('bi-people', 'tile-indigo', '自主改善者', k.self_improver_count, '人', '自ら改善に取り組みたい人') %}回答した人 {{ k.respondent_count }} 人中{% endcall %}
+</div>
+<div class="card mb-2"><div class="card-body">
+  <h5 class="card-title">進み具合の推移{{ C.tip("月ごとに登録された業務と完了した案件の件数、完了した案件の年間削減工数の累計") }}</h5>
+  <div class="chart-box" style="height: 260px"><canvas id="dash-progress"></canvas></div>
+</div></div>
+
+<h2 class="section-title">柱① 業務改革{{ C.tip("業務を棚卸しし、ECRS で最適化してから自動化・高度化する活動の進み具合") }}</h2>
+<div class="row g-3 mb-2">
+  {% call card('bi-kanban', 'tile-blue', '棚卸し（登録業務）', k.task_count, '件', '自動化アイテム登録で登録された業務') %}月間 {{ '%.1f'|format(k.total_hours) }} 時間・案件候補 {{ k.candidate_count }} 件{% endcall %}
+  {% call card('bi-arrow-repeat', 'tile-purple', '対応中の案件', k.status_counts.get('対応中', 0), '件', '要求定義から確認までの段階にある案件') %}順番待ち {{ k.status_counts.get('受付', 0) }} 件・保留 {{ k.status_counts.get('保留', 0) }} 件{% endcall %}
+  {% call card('bi-check2-all', 'tile-green', '案件完了率', num(pr.completion_rate), '%', '完了した案件 ÷ 登録された業務') %}完了 {{ k.completed_count }} 件／全 {{ k.task_count }} 件{% endcall %}
+  {% call card('bi-lightning-charge', 'tile-orange', '廃止・統合・簡素化・自動化', pr.done_decisions|sum(attribute=1), '件', '完了した案件のうち、決めた改善の方向（ECRS と自動化・高度化）ごとの件数') %}{% for d, n in pr.done_decisions %}{{ d }} {{ n }}{% if not loop.last %}・{% endif %}{% else %}完了した改善はまだありません{% endfor %}{% endcall %}
+</div>
+<div class="row g-3 mb-2">
+  <div class="col-lg-7"><div class="card h-100"><div class="card-body">
+    <h5 class="card-title">改善案件の段階{{ C.tip("いまどの段階にある案件が何件あるか（開始 → 要求定義 → 要件定義 → 作成 → テスト → 確認 → 完了）") }}</h5>
+    <div class="chart-box" style="height: 260px"><canvas id="dash-stages"></canvas></div>
+  </div></div></div>
+  <div class="col-lg-5"><div class="card h-100"><div class="card-body">
+    <h5 class="card-title">改善の方向{{ C.tip("改善の方向を決めた案件（完了していないものも含む）の内訳") }}</h5>
+    <div class="chart-box" style="height: 260px"><canvas id="dash-decisions"></canvas></div>
+  </div></div></div>
 </div>
 
-<h2 class="section-title"><span>現状の把握{{ C.tip("自動化アイテム登録（棚卸し）から") }}</span></h2>
-<div class="row g-3 mb-4">
-  <div class="col-6 col-lg-3">
-    <div class="card stat h-100"><div class="card-body">
-      <div class="stat-head"><span class="stat-tile tile-teal"><i class="bi bi-list-check"></i></span><span class="stat-label">PCの定型・定期業務の月間時間</span></div>
-      <div class="stat-value">{{ '%.1f'|format(k.total_hours) }}<span class="stat-unit">時間/月</span></div>
-      <div class="stat-sub">年間換算 {{ '%.0f'|format(k.annual_hours) }} 時間 ・ <a href="{{ url_for('cases.index', filter='candidates') }}">案件候補 {{ k.candidate_count }} 件</a>{{ C.tip("まだ手を付けていない（受付の）業務のうち、希望がなくしたい・減らしたいか、困りごとのあるもの") }}</div>
-    </div></div>
-  </div>
-  <div class="col-6 col-lg-3">
-    <div class="card stat h-100"><div class="card-body">
-      <div class="stat-head"><span class="stat-tile tile-pink"><i class="bi bi-envelope-paper"></i></span><span class="stat-label">月次アンケート回答率</span></div>
-      <div class="stat-value">{% if k.response_rate is not none %}{{ '%.0f'|format(k.response_rate) }}<span class="stat-unit">%</span>{% else %}－{% endif %}</div>
-      <div class="stat-sub">{% if k.response_period %}{{ k.response_period }}：回答 {{ k.response_answered }} 人 ／ 対象 {{ k.response_members }} 人{% else %}回答はまだありません{% endif %}</div>
-    </div></div>
-  </div>
-  <div class="col-6 col-lg-3">
-    <div class="card stat h-100"><div class="card-body">
-      <div class="stat-head"><span class="stat-tile tile-purple"><i class="bi bi-check2-circle"></i></span><span class="stat-label">業務情報の充足率</span></div>
-      <div class="stat-value">{{ '%.0f'|format(k.sufficient_rate) }}<span class="stat-unit">%</span></div>
-      <div class="stat-sub">必須項目あり {{ '%.0f'|format(k.filled_rate) }}% ・ 担当者確認済み {{ '%.0f'|format(k.verified_rate) }}%</div>
-    </div></div>
-  </div>
-  <div class="col-6 col-lg-3">
-    <div class="card stat h-100"><div class="card-body">
-      <div class="stat-head"><span class="stat-tile tile-red"><i class="bi bi-exclamation-triangle"></i></span><span class="stat-label">分析不足の領域</span></div>
-      <div class="stat-value">{{ k.insufficient_domains|length }}<span class="stat-unit">/ {{ k.domain_rows|length }} 領域</span></div>
-      <div class="stat-sub">{% if k.insufficient_domains %}{{ k.insufficient_domains|map(attribute='domain.name')|join('、') }}{% else %}すべての領域で情報が集まっています{% endif %} <a href="{{ url_for('bizmap.index') }}#tab-domains">領域別の把握状況</a></div>
-    </div></div>
-  </div>
+<h2 class="section-title">柱② AI活用（業務の見える化）{{ C.tip("登録した業務の情報がそろい、業務の全体像が見えてきているか") }}</h2>
+<div class="row g-3 mb-2">
+  {% call card('bi-check2-circle', 'tile-purple', '業務情報の充足率', '%.0f'|format(k.sufficient_rate), '%', '必要な項目がそろい、推進メンバーの確認が済んだ業務の割合') %}必要な項目がそろった業務 {{ '%.0f'|format(k.filled_rate) }}%{% endcall %}
+  {% call card('bi-patch-check', 'tile-teal', '確認済みの業務', '%.0f'|format(k.verified_rate), '%', '担当者確認が済んだ業務の割合') %}登録された業務 {{ k.task_count }} 件のうち{% endcall %}
+  {% call card('bi-exclamation-triangle', 'tile-red', '分析不足の領域', k.insufficient_domains|length, '領域', '業務の件数や情報が足りず、全体像をつかめていない業務領域') %}業務領域 {{ k.domain_rows|length }} 領域のうち{% endcall %}
+  {% call card('bi-cpu', 'tile-blue', 'AIで分析した業務', pr.ai_analyzed, '件', '登録時や再分析で、AI が分類・改善案を出した業務') %}案件候補 {{ k.candidate_count }} 件{% endcall %}
 </div>
 
-<p class="dash-link"><a href="{{ url_for('board.index') }}"><i class="bi bi-kanban"></i>活動状況で案件の進み具合を見る<i class="bi bi-arrow-right-short"></i></a></p>
-
-<h2 class="section-title">アンケートとGr・役割の状況</h2>
-<div class="row g-3 mb-4">
-  <div class="col-lg-5">
-    <div class="card h-100"><div class="card-body">
-      <div class="d-flex justify-content-between align-items-center">
-        <h5 class="card-title mb-0">月次アンケート（時系列）{{ C.tip("毎月同じ設問でPCの定型・定期業務の変化を追います。") }}</h5>
-      </div>
-      {% if monthly_latest %}
-      <div class="small text-muted mb-2">最新 {{ monthly_latest.label }}：回答 {{ monthly_latest.n }} 人{% if monthly_latest.member_answered != monthly_latest.n %}（うち対象者 {{ monthly_latest.member_answered }} 人）{% endif %}{% if monthly_latest.pattern_counts %}・{% for k, v in monthly_latest.pattern_counts.items() %}{{ k }} {{ v }}人{% if not loop.last %}／{% endif %}{% endfor %}{% endif %}</div>
-      <div class="row g-2 text-center mb-2">
-        <div class="col-4"><div class="kpi-label">PCの定型・定期業務あり</div><div class="mini-value">{{ '%.0f'|format(monthly_latest.has_rate) }}%</div></div>
-        <div class="col-4"><div class="kpi-label">先月より減った</div><div class="mini-value text-green">{{ '%.0f'|format(monthly_latest.decreased_rate) }}%</div></div>
-        <div class="col-4"><div class="kpi-label">自分で・一緒に取り組みたい</div><div class="mini-value text-blue">{{ '%.0f'|format(monthly_latest.self_rate) }}%</div></div>
-      </div>
-      <div class="chart-box" style="height: 150px"><canvas id="chart-monthly"></canvas></div>
-      {% else %}
-      <p class="text-muted small mb-2">まだ回答がありません。</p>
-      <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('monthly.form') }}">回答フォーム</a>
-      {% endif %}
-    </div></div>
-  </div>
-  <div class="col-lg-7">
-    <div class="card h-100"><div class="card-body">
-      <h5 class="card-title">Gr・役割別の回答状況{{ C.tip("回答した人は、業務を1件以上登録したか、月次アンケートに回答した人（対象外は除く）を、いまのGr・役割（月次アンケートか「自動化アイテム登録」のいちばん新しい回答で選んだGr・役割）で1人1回数えます。自主改善はそのうち自ら改善に取り組みたい人です。業務・月間時間・案件候補は、業務を登録したときのGr・役割で数えます。") }}</h5>
-      <div class="table-responsive">
-      <table class="table table-sm mb-0">
-        <thead><tr><th>Gr・役割</th><th class="text-end">回答した人</th><th class="text-end">業務</th><th class="text-end">月間時間</th><th class="text-end" title="まだ手を付けていない（受付の）業務のうち、希望が「なくしたい・減らしたい」か、困りごとのあるもの">案件候補</th><th class="text-end">自主改善</th></tr></thead>
-        <tbody>
-        {% for w in workplaces %}
-        <tr class="{% if w.respondents == 0 %}text-muted{% endif %}">
-          <td>{{ w.workplace.name }}</td>
-          <td class="text-end">{{ w.respondents }}</td>
-          <td class="text-end">{{ w.tasks }}</td>
-          <td class="text-end">{{ w.minutes|hours }} h</td>
-          <td class="text-end">{{ w.candidates }}</td>
-          <td class="text-end">{{ w.self_improvers }}</td>
-        </tr>
-        {% endfor %}
-        </tbody>
-      </table>
-      </div>
-    </div></div>
-  </div>
+<h2 class="section-title">柱③ 人材育成{{ C.tip("自ら改善できる人を増やす活動の進み具合") }}</h2>
+<div class="row g-3 mb-2">
+  {% call card('bi-person-workspace', 'tile-indigo', '伴走中の案件', pr.accompanied, '件', '担当区分が「自主改善」で、改善チームが伴走している案件（完了を除く）') %}自主改善を希望した人と一緒に進めています{% endcall %}
+  {% call card('bi-award', 'tile-green', '自主改善で完了', pr.self_done, '件', '担当区分が「自主改善」で完了した案件') %}完了した改善のうち {{ num(pr.independent_rate) }}%（改善チームの直接開発によらない割合）{% endcall %}
+  {% call card('bi-hand-thumbs-up', 'tile-blue', '自分で・一緒に取り組みたい率', num(sl.self_rate) if sl else '－', '%', '月次アンケートで「自分で取り組みたい」か「学びながら改善チームと一緒に取り組みたい」と答えた人の割合（いちばん新しい月度）') %}{% if sl %}{{ sl.label }}{% if sp %} {{ delta(sl.self_rate, sp.self_rate, 'pt') }}<span class="text-muted"> 前の月度と比べて</span>{% endif %}{% else %}月次アンケートの回答はまだありません{% endif %}{% endcall %}
+  {% call card('bi-mortarboard', 'tile-orange', '学びたい技術', learn|length, '種類', '自動化アイテム登録で、学びたい技術として挙げられたもの') %}{% for skill, n in learn[:3] %}{{ skill }} {{ n }} 人{% if not loop.last %}・{% endif %}{% else %}まだありません{% endfor %}{% endcall %}
 </div>
-
-<div class="row g-3 mb-4">
-  <div class="col-lg-5">
-    <div class="card h-100"><div class="card-body">
-      <h5 class="card-title">改善の希望</h5>
-      <div class="chart-box"><canvas id="chart-wish"></canvas></div>
-    </div></div>
-  </div>
-  <div class="col-lg-7">
-    <div class="card h-100"><div class="card-body">
-      <h5 class="card-title">困りごと（ムリ・ムダ・ムラ）</h5>
-      <div class="chart-box"><canvas id="chart-pains"></canvas></div>
-    </div></div>
-  </div>
-</div>
-
-<h2 class="section-title"><span>意欲と技術{{ C.tip("回答した人（対象外を除く）で数えます。月次アンケートの改善の進め方は、直近" ~ C.STANCE_MONTHS ~ "か月の答えで数えます。") }}</span></h2>
+<h5 class="sub-title mt-3 mb-2"><span>意欲と技術{{ C.tip("回答した人（対象外を除く）で数えます。月次アンケートの改善の進め方は、直近" ~ C.STANCE_MONTHS ~ "か月の答えで数えます。") }}</span></h5>
 <div class="row g-3 mb-4">
   <div class="col-lg-4">
     <div class="card h-100"><div class="card-body">
@@ -10177,9 +10146,44 @@ TEMPLATES = {
   </div>
 </div>
 
+<h2 class="section-title">活動定着{{ C.tip("アンケートへの参加と、Gr・役割ごとの活動の広がり") }}</h2>
+<div class="row g-3 mb-2">
+  {% call card('bi-envelope-paper', 'tile-pink', '月次アンケート回答率', num(k.response_rate), '%', '人財一覧のいちばん新しい月度の回答率（回答した対象者 ÷ 対象者）') %}{{ k.response_period }} 対象 {{ k.response_members }} 人中 {{ k.response_answered }} 人{% if sp and sl %} {{ delta(sl.response_rate, sp.response_rate, 'pt') }}{% endif %}{% endcall %}
+  {% call card('bi-chat-square-text', 'tile-blue', '月次アンケートの回答', sl.n if sl else 0, '人', 'いちばん新しい月度に回答した人の数（対象外の人の回答も含む）') %}{% if sl %}{{ sl.label }}{% if sl.member_answered != sl.n %}（うち対象者 {{ sl.member_answered }} 人）{% endif %}{% else %}回答はまだありません{% endif %}{% endcall %}
+  {% call card('bi-plus-circle', 'tile-teal', '今月の新しい業務', pr.new_this_month, '件', '今月、自動化アイテム登録で登録された業務') %}登録された業務の合計 {{ k.task_count }} 件{% endcall %}
+  {% call card('bi-diagram-3', 'tile-purple', '参加している Gr・役割', pr.active_workplaces, '', '回答した人か、登録された業務がある Gr・役割') %}全 {{ pr.workplaces|length }} の Gr・役割のうち{% endcall %}
+</div>
+<div class="row g-3 mb-2">
+  <div class="col-lg-5"><div class="card h-100"><div class="card-body">
+    <h5 class="card-title">アンケートの推移{{ C.tip("月次アンケートの回答率・PCの定型・定期業務あり率・自分で・一緒に取り組みたい率") }}</h5>
+    <div class="chart-box" style="height: 260px"><canvas id="dash-survey"></canvas></div>
+  </div></div></div>
+  <div class="col-lg-7"><div class="card h-100"><div class="card-body">
+    <h5 class="card-title">Gr・役割別の参加状況{{ C.tip("回答した人は、業務を1件以上登録したか、月次アンケートに回答した人（対象外は除く）を、いまのGr・役割（月次アンケートか「自動化アイテム登録」のいちばん新しい回答で選んだGr・役割）で1人1回数えます。自主改善者はそのうち自ら改善に取り組みたい人です。回答率はいちばん新しい月度のもの（人財一覧のGr・役割で数えます）。業務・完了・年間削減工数は、業務を登録したときのGr・役割で数えます。") }}</h5>
+    <div class="table-responsive">
+    <table class="table table-sm align-middle mb-0">
+      <thead><tr><th>Gr・役割</th><th class="text-end">回答した人</th><th class="text-end">回答率</th><th class="text-end">業務</th><th class="text-end">完了</th><th class="text-end">年間削減工数</th><th class="text-end">自主改善者</th></tr></thead>
+      <tbody>
+      {% for w in pr.workplaces %}
+      <tr class="{% if not w.respondents and not w.tasks %}text-muted{% endif %}">
+        <td>{{ w.workplace.name }}</td>
+        <td class="text-end">{{ w.respondents }}</td>
+        <td class="text-end">{% if w.response_rate is not none %}{{ '%.0f'|format(w.response_rate) }}%<div class="small text-muted">{{ w.member_answered }}／{{ w.members }}</div>{% else %}－{% endif %}</td>
+        <td class="text-end">{{ w.tasks }}</td>
+        <td class="text-end">{{ w.completed }}</td>
+        <td class="text-end">{{ '%.0f'|format(w.saved_annual) }} h</td>
+        <td class="text-end">{{ w.self_improvers }}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </div></div></div>
+</div>
+
 <h2 class="section-title">次のアクション</h2>
 <div class="row g-3">
-  <div class="col-lg-5">
+  <div class="col-12">
     <div class="card h-100"><div class="card-body">
       <h5 class="card-title">次のアクション提案{{ C.tip("蓄積された案件と業務情報から、次に調査・改善すべきテーマを提案します。") }}</h5>
       {% if suggestions %}
@@ -10217,33 +10221,6 @@ TEMPLATES = {
       {% endif %}
     </div></div>
   </div>
-  <div class="col-lg-7">
-    <div class="card h-100"><div class="card-body">
-      <div class="d-flex justify-content-between align-items-center">
-        <h5 class="card-title mb-0">最近登録された業務</h5>
-        <a class="small" href="{{ url_for('cases.index', sort='new') }}">すべて見る</a>
-      </div>
-      <div class="table-responsive">
-      <table class="table table-sm mt-2 mb-0">
-        <thead><tr><th>業務名</th><th>Gr・役割</th><th>領域</th><th class="text-end">月間</th><th>希望</th><th>状態</th></tr></thead>
-        <tbody>
-        {% for t in recent %}
-        <tr>
-          <td><a href="{{ url_for('cases.detail', task_id=t.id) }}">{{ t.name }}</a>{% if t.is_demo %} <span class="badge bg-warning-subtle text-warning-emphasis">デモ</span>{% endif %}</td>
-          <td>{{ t.workplace.name if t.workplace else '' }}</td>
-          <td>{{ t.domain.name if t.domain else '' }}</td>
-          <td class="text-end">{{ t.monthly_minutes|hours }} h</td>
-          <td>{{ t.wish or '' }}</td>
-          <td><span class="badge text-bg-{{ C.STATUS_BADGE.get(t.status, 'secondary') }}">{{ t.status }}</span></td>
-        </tr>
-        {% else %}
-        <tr><td colspan="6" class="text-muted">まだ登録がありません</td></tr>
-        {% endfor %}
-        </tbody>
-      </table>
-      </div>
-    </div></div>
-  </div>
 </div>
 {% endblock %}
 
@@ -10252,37 +10229,28 @@ TEMPLATES = {
 <script src="{{ C.CHART_JS }}"></script>
 <script>
 (function () {
-  var data = JSON.parse(document.getElementById("chart-data").textContent);
-  var C = { blue: "#0a84ff", green: "#30d158", orange: "#ff9f0a", purple: "#bf5af2", red: "#ff453a", teal: "#5ac8fa", indigo: "#5e5ce6", yellow: "#ffd60a" };
-  var palette = [C.blue, C.green, C.orange, C.purple, C.red, C.teal, C.indigo, C.yellow];
+  var d = JSON.parse(document.getElementById("chart-data").textContent);
+  var COL = { blue: "#0a84ff", sky: "#64d2ff", green: "#30d158", orange: "#ff9f0a", purple: "#bf5af2", red: "#ff453a", teal: "#00a99d", gray: "#aeaeb2", indigo: "#5e5ce6", yellow: "#ffd60a" };
   chartTheme();
-  var axisX = { grid: { display: false }, border: { display: false } };
-  var axisY = function (extra) { return Object.assign({ beginAtZero: true, grid: { color: "#ececf0" }, border: { display: false, dash: [4, 4] } }, extra || {}); };
-  new Chart(document.getElementById("chart-wish"), {
-    type: "doughnut",
-    data: { labels: data.wish.labels, datasets: [{ data: data.wish.values, backgroundColor: palette, borderWidth: 2, borderColor: "#fff", hoverOffset: 6 }] },
-    options: { responsive: true, maintainAspectRatio: false, cutout: "68%", plugins: { legend: { position: "bottom" } } }
-  });
-  new Chart(document.getElementById("chart-pains"), {
-    type: "bar",
-    data: { labels: data.pains.labels, datasets: [{ label: "件数", data: data.pains.values, backgroundColor: C.red, borderRadius: 6, borderSkipped: false, barPercentage: 0.65 }] },
-    options: { indexAxis: "y", responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } },
-      scales: { x: axisY({ ticks: { precision: 0 } }), y: { grid: { display: false }, border: { display: false } } } }
-  });
-  var mc = document.getElementById("chart-monthly");
-  if (mc && data.monthly && data.monthly.labels.length) {
-    new Chart(mc, {
-      type: "line",
-      data: { labels: data.monthly.labels, datasets: [
-        { label: "PCの定型・定期業務あり", data: data.monthly.has_rate, borderColor: C.red, backgroundColor: C.red, tension: 0.35, pointRadius: 3, borderWidth: 2.5 },
-        { label: "減った", data: data.monthly.decreased_rate, borderColor: C.green, backgroundColor: C.green, tension: 0.35, pointRadius: 3, borderWidth: 2.5 },
-        { label: "自分で・一緒に取り組みたい", data: data.monthly.self_rate, borderColor: C.blue, backgroundColor: C.blue, tension: 0.35, pointRadius: 3, borderWidth: 2.5 }
-      ] },
-      options: { responsive: true, maintainAspectRatio: false,
-        scales: { x: axisX, y: axisY({ max: 100, ticks: { callback: function (v) { return v + "%"; }, maxTicksLimit: 5 } }) },
-        plugins: { legend: { display: false } } }
-    });
-  }
+  var X = { grid: { display: false }, border: { display: false } };
+  var PCT = { suggestedMax: 100, ticks: { callback: function (v) { return v + "%"; } } };
+  function Y(extra) { return Object.assign({ beginAtZero: true, grid: { color: "#ececf0" }, border: { display: false } }, extra || {}); }
+  function opts(extra) { return Object.assign({ responsive: true, maintainAspectRatio: false, plugins: { legend: { position: "bottom" } } }, extra || {}); }
+  function draw(id, cfg) { var el = document.getElementById(id); if (el) new Chart(el, cfg); }
+  function col(rows, key) { return rows.map(function (r) { return r[key] === null || r[key] === undefined ? null : Math.round(r[key] * 10) / 10; }); }
+  function line(label, data, color, axis) { return { type: "line", label: label, data: data, borderColor: color, backgroundColor: color, tension: 0.3, pointRadius: 2.5, borderWidth: 2.5, yAxisID: axis || "y", spanGaps: true }; }
+  function bar(label, data, color, axis) { return { type: "bar", label: label, data: data, backgroundColor: color, borderRadius: 4, borderSkipped: false, barPercentage: 0.6, yAxisID: axis || "y" }; }
+  var tl = d.timeline || [], L = tl.map(function (m) { return m.label.replace("年", "/").replace("月度", ""); });
+  draw("dash-progress", { type: "bar", data: { labels: L, datasets: [bar("登録された業務", col(tl, "new"), COL.sky), bar("完了した案件", col(tl, "done"), COL.green), line("年間削減工数の累計（時間）", col(tl, "saved_annual"), COL.orange, "y1")] },
+    options: opts({ scales: { x: X, y: Y({ ticks: { precision: 0 } }), y1: Y({ position: "right", grid: { display: false } }) } }) });
+  var st = d.stages || [];
+  draw("dash-stages", { type: "bar", data: { labels: st.map(function (x) { return x.name; }), datasets: [bar("件数", st.map(function (x) { return x.n; }), COL.blue)] },
+    options: opts({ indexAxis: "y", plugins: { legend: { display: false } }, scales: { x: Y({ ticks: { precision: 0 } }), y: X } }) });
+  var dc = d.decisions || [], palette = [COL.red, COL.purple, COL.teal, COL.blue, COL.indigo, COL.gray, COL.orange];
+  draw("dash-decisions", { type: "doughnut", data: { labels: dc.map(function (x) { return x.name; }), datasets: [{ data: dc.map(function (x) { return x.n; }), backgroundColor: palette, borderWidth: 2, borderColor: "#fff", hoverOffset: 6 }] },
+    options: opts({ cutout: "64%" }) });
+  draw("dash-survey", { type: "line", data: { labels: L, datasets: [line("回答率", col(tl, "response_rate"), COL.blue), line("PCの定型・定期業務あり", col(tl, "has_rate"), COL.red), line("自分で・一緒に取り組みたい", col(tl, "self_rate"), COL.green)] },
+    options: opts({ scales: { x: X, y: Y(PCT) } }) });
 })();
 </script>
 {% endblock %}
