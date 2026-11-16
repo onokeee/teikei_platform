@@ -1118,11 +1118,11 @@ def normalize_text(value):
 def duplicate_output_groups():
     groups = defaultdict(list)
     for t in Task.query.all():
-        key = normalize_text(t.output)
+        key = normalize_text(canon_info(t.output))
         if len(key) >= 2:
             groups[key].append(t)
     result = [
-        {"output": tasks[0].output, "tasks": tasks, "minutes": sum(x.monthly_minutes or 0 for x in tasks)}
+        {"output": canon_info(tasks[0].output), "tasks": tasks, "minutes": sum(x.monthly_minutes or 0 for x in tasks)}
         for tasks in groups.values()
         if len({x.respondent_id for x in tasks}) >= 2
     ]
@@ -2280,6 +2280,8 @@ def person_source_actor(n):
 def node_label(n):
     icon, mark = node_icon(n)
     head = f"<i class='bi {icon} fi {mark}'></i> " if icon else ""
+    if n.get("same"):
+        head = "<i class='bi bi-exclamation-circle-fill same-mark'></i> " + head
     body = wrap(n["text"] + STATUS_MARKS.get(n.get("cls"), ""), n.get("width") or 14)
     if show_who(n):
         return head + "<b>" + esc(n["who"]) + "</b><br/>" + body
@@ -2484,6 +2486,8 @@ def graph_to_diagram(graph, direction="LR"):
         sub = (n["group"], n.get("group_title") or n["group"]) if n.get("group") else None
         who = None if ntype == "info" else {"actor": n.get("actor") or "", "label": n.get("who") or "", "state": n.get("who_state") or ("ok" if n.get("actor") else "unconfirmed")}
         d.node(n["id"], n.get("text") or "", cls, subgraph=sub, hint=n.get("hint"), medium=n.get("medium") or None, who=who, color=n.get("color"))
+        if n.get("same"):
+            d.nodes[n["id"]]["same"] = True
         if n.get("url"):
             d.click(n["id"], n["url"], "案件詳細を開く")
     types = {i: x["type"] for i, x in d.nodes.items()}
@@ -2778,6 +2782,126 @@ def _task_id_of(node_id):
 def _pending_name(text):
     return re.sub(r"[（(]\d+人[）)]\s*$", "", (text or "").strip()).strip()
 
+MAP_SAME_KEY = "map_same"
+SAME_TIP = "名前の書き方が少し違うだけで、同じものかもしれない箱です。図の下の「同じものかもしれない箱」で、まとめるか別のものかを選べます。"
+_TAIL_BRACKET_RX = re.compile(r"^(.*?)[（(]([^（()）]*)[）)]\s*$")
+
+
+@_per_request
+def _map_same():
+    data = _json_column(Setting.get(MAP_SAME_KEY, ""), {})
+    data = data if isinstance(data, dict) else {}
+    return {"info": data.get("info") if isinstance(data.get("info"), dict) else {},
+            "distinct": [x for x in (data.get("distinct") or []) if isinstance(x, str)]}
+
+def _save_same(data):
+    Setting.set(MAP_SAME_KEY, json.dumps({"info": data["info"], "distinct": data["distinct"]}, ensure_ascii=False))
+    if has_request_context():
+        g.pop("_map_same", None)
+
+def canon_info(name):
+    aliases, value, seen = _map_same()["info"], name, set()
+    while name_key(value) in aliases and name_key(value) not in seen:
+        seen.add(name_key(value))
+        value = aliases[name_key(value)]
+    return value
+
+def name_core(name):
+    text = unicodedata.normalize("NFKC", str(name or "")).strip()
+    m = _TAIL_BRACKET_RX.match(text)
+    if m:
+        outer, inner = m.group(1).strip(), m.group(2).strip()
+        parts = [x for x in re.split(r"[・、,]", inner) if x.strip()]
+        if parts and all(_bare_medium(normalize_text(x)) for x in parts):
+            text = outer
+        elif outer and _bare_medium(normalize_text(outer)):
+            text = inner
+        else:
+            text = outer + inner
+    return normalize_text(text).replace("の", "")
+
+def _subsequence(short, long_):
+    rest = iter(long_)
+    return all(ch in rest for ch in short)
+
+@_per_request
+def _generic_names():
+    vocab = map_vocab()
+    words = set(C.INPUT_SOURCES) | set(C.TOOLS)
+    for group in ("media", "methods"):
+        for r in vocab[group]:
+            words |= {r["label"]} | {w for w in _split_words(r.get("words")) if not w.startswith("~")}
+    return {name_core(w) for w in words if w}
+
+def looks_same(a, b):
+    ca, cb = name_core(a), name_core(b)
+    if not ca or not cb or normalize_text(a) == normalize_text(b) or ca in _generic_names() or cb in _generic_names():
+        return False
+    if ca == cb:
+        return True
+    short, long_ = sorted((ca, cb), key=len)
+    if len(short) >= 3 and short in long_:
+        return True
+    if len(short) >= 4 and len(short) >= 0.6 * len(long_) and _subsequence(short, long_):
+        return True
+    return len(short) >= 4 and len(short) == len(long_) and sorted(short) == sorted(long_)
+
+def same_pair_key(a, b):
+    return "|".join(sorted((name_key(a), name_key(b))))
+
+def _media_differ(x, y):
+    known = [m for m in ((x.get("medium") or "unknown"), (y.get("medium") or "unknown")) if m not in ("unknown", "doc")]
+    return len(known) == 2 and known[0] != known[1]
+
+def same_candidates(graph, tasks):
+    distinct, out, seen = set(_map_same()["distinct"]), [], set()
+
+    def add(kind, a, b, ids=(), **extra):
+        key = same_pair_key(a, b)
+        if key in distinct or key in seen:
+            return
+        seen.add(key)
+        out.append(dict(extra, kind=kind, a=a, b=b, key=key, ids=list(ids)))
+
+    nodes = graph.get("nodes") or []
+    info = [n for n in nodes if n.get("type") == "info" and (n.get("text") or "").strip() and n["text"] not in PLACEHOLDER_TEXTS]
+    for i, x in enumerate(info):
+        for y in info[i + 1:]:
+            if not _media_differ(x, y) and looks_same(x["text"], y["text"]):
+                add("info", x["text"], y["text"], (x["id"], y["id"]))
+    work = [n for n in nodes if n.get("cls") in TASK_CLASSES + ("pending",)]
+    for i, x in enumerate(work):
+        for y in work[i + 1:]:
+            if (x.get("group") or "") != (y.get("group") or "") or (x["cls"] == "pending" and y["cls"] == "pending"):
+                continue
+            pend, task = (x, y) if x["cls"] == "pending" else (y, x) if y["cls"] == "pending" else (None, None)
+            if pend is not None and looks_same(_pending_name(pend["text"]), task["text"]):
+                add("pending", _pending_name(pend["text"]), task["text"], (pend["id"], task["id"]), task_id=_task_id_of(task["id"]))
+            elif pend is None and looks_same(x["text"], y["text"]):
+                add("task", x["text"], y["text"], (x["id"], y["id"]), task_ids=[_task_id_of(x["id"]), _task_id_of(y["id"])])
+    for t in tasks:
+        for field in ("prev_task", "next_task"):
+            for name in task_names(getattr(t, field)):
+                if _match_tasks(name, tasks, exclude=t, limit=1):
+                    continue
+                for o in tasks:
+                    if o is not t and looks_same(name, o.name):
+                        add("link", name, o.name, task_id=o.id, owner=t.name, field=field)
+    marked = {i for c in out for i in c["ids"]}
+    for n in nodes:
+        if n.get("id") in marked:
+            n["same"] = True
+    return out
+
+def same_done():
+    rows = [{"kind": "info", "alias": a, "canon": c} for a, c in _map_same()["info"].items()]
+    names = {t.id: t.name for t in Task.query.all()}
+    for tid, aliases in ((_map_written().get("names") or {}).items()):
+        for a in aliases if isinstance(aliases, list) else []:
+            if str(tid).isdigit() and int(tid) in names:
+                rows.append({"kind": "task", "alias": a, "canon": names[int(tid)]})
+    return rows
+
 def append_text(existing, value):
     existing = (existing or "").strip()
     value = (value or "").strip()
@@ -3071,7 +3195,8 @@ def _task_node(d, t):
     return tid
 
 def _task_output(d, t, tid, dups=None):
-    oid = d.node(f"o{t.id}", t.output, "dupout" if dups and normalize_text(t.output) in dups else "output")
+    output = canon_info(t.output)
+    oid = d.node(f"o{t.id}", output, "dupout" if dups and normalize_text(output) in dups else "output")
     d.edge(tid, oid, "info")
     return oid
 
@@ -3107,7 +3232,7 @@ def mentions_task(text, name):
 def _match_tasks(text, tasks, exclude=None, limit=3):
     hits = []
     for t in tasks:
-        if t is not exclude and mentions_task(text, t.name):
+        if t is not exclude and any(mentions_task(text, n) for n in [t.name] + task_aliases(t.id)):
             hits.append((len(normalize_text(t.name)), t))
     hits.sort(key=lambda x: -x[0])
     return [t for _, t in hits[:limit]]
@@ -3493,17 +3618,18 @@ def task_user_nodes(d, t, frame=None):
 
 def _add_task_info(d, t, tid, outs=None, dups=None, frame=None):
     for s in task_sources(t):
-        prev = None
-        if outs and s["shared"] and medium_of(s["name"], s["hint"]) != "system":
-            prev = next((oid for o, oid in outs if o is not t and same_info(s["name"], o.output)), None)
+        name, prev = canon_info(s["name"]), None
+        if outs and s["shared"] and medium_of(name, s["hint"]) != "system":
+            prev = next((oid for o, oid in outs if o is not t and same_info(name, canon_info(o.output))), None)
         if prev:
             d.info_edge(prev, tid, s["method"], inferred=True)
             continue
-        sid = nid("s", s["name"]) if s["shared"] else nid("s", f"{t.id}:{s['name']}")
-        node = d.node(sid, s["name"], "source", hint=s["hint"])
+        sid = nid("s", name) if s["shared"] else nid("s", f"{t.id}:{name}")
+        node = d.node(sid, name, "source", hint=s["hint"])
         d.info_edge(node, tid, s["method"], note=s.get("info", ""))
     for dst in task_destinations(t):
-        node = d.node(nid("s", dst["name"]), dst["name"], "source")
+        name = canon_info(dst["name"])
+        node = d.node(nid("s", name), name, "source")
         d.info_edge(tid, node, dst["method"], info_node=node)
     target = _task_output(d, t, tid, dups) if (t.output or "").strip() else None
     for u in task_user_nodes(d, t, frame):
@@ -3640,6 +3766,7 @@ def source_rows(tasks):
         for s in task_sources(t):
             if person_source(s["name"], _own_wp(t)):
                 continue
+            s = dict(s, name=canon_info(s["name"]))
             medium = medium_of(s["name"], s["hint"])
             row = by.setdefault(normalize_text(s["name"]), {"name": s["name"], "cls": "system" if medium == "system" else "source", "hint": s["hint"], "tasks": [], "minutes": 0.0})
             if t not in row["tasks"]:
@@ -3876,6 +4003,8 @@ def map_legend_html(d):
             parts.append(f'<span class="lg-item"><i class="lg-line lg-line-{kind}"></i>{label}</span>')
         if any(e["type"] == kind and e.get("inferred") for e in edges):
             parts.append(f'<span class="lg-item"><i class="lg-line lg-line-{kind}-guess"></i>{label}（名前から推定）</span>')
+    if any(n.get("same") for n in nodes):
+        parts.append('<span class="lg-item"><i class="bi bi-exclamation-circle-fill same-mark"></i>同じものかもしれない' + str(tip(SAME_TIP)) + "</span>")
     parts.append("</div>")
     roles = [c for c in CLS_LABELS if any(n["cls"] == c for n in nodes)]
     if roles:
@@ -3908,7 +4037,7 @@ def flow_view(d):
 def editor_config():
     return {
         "vocab": vocab_public(), "cls_labels": CLS_LABELS, "cls_type": CLS_TYPE, "glyphs": _SHAPE_GLYPHS, "status_marks": STATUS_MARKS,
-        "who_classes": list(WHO_CLASSES), "tips": {"lines": MAP_LINE_TIP, "guess": METHOD_GUESS_TIP},
+        "who_classes": list(WHO_CLASSES), "tips": {"lines": MAP_LINE_TIP, "guess": METHOD_GUESS_TIP, "same": SAME_TIP},
         "classify_url": url_for("bizmap.api_classify"),
     }
 
@@ -5244,9 +5373,9 @@ DEMO_TASKS = [
                 _ds("改訂管理台帳に版数と改訂日を入力する", "Excel（改訂管理台帳）", "改訂管理台帳"),
                 _ds("職場のみんなに改訂を知らせる", to="職場内", how="掲示", use="新しい版の手順書で作業するため")]),
     dict(name="日次実績のグラフ更新（掲示用）", who="高橋 美咲", purpose="", output="掲示板の実績グラフ",
-         sources=["日次実績集計表（Excel）"], freq="毎日", dur="15分未満", head=1, wish="まずは相談したい", self=False, prev="日次実績集計表", next="",
+         sources=["日次実績表"], freq="毎日", dur="15分未満", head=1, wish="まずは相談したい", self=False, prev="日次実績集計表", next="",
          pains=["前任者から引き継いだが、誰が見ているか分からない"], unknowns=["誰が見ているか（渡す相手・使いみち）"],
-         steps=[_ds("日次実績集計表から前日の出来高を写す", recv=[("日次実績集計表（Excel）", "前日の出来高", "共有フォルダ")]),
+         steps=[_ds("日次実績表から前日の出来高を写す", recv=[("日次実績表", "前日の出来高", "共有フォルダ")]),
                 _ds("掲示用の実績グラフをExcelで更新して印刷する", output="掲示板の実績グラフ"),
                 _ds("掲示板に貼り出す", how="掲示")]),
     dict(name="検査成績書の作成", who="伊藤 大輔", domain="品質管理", purpose="出荷時に顧客へ品質を証明するため", output="検査成績書（PDF）",
@@ -6733,6 +6862,8 @@ def _merged_graph(kind, workplace_id, domain_id):
     scope = scope_key(workplace_id, domain_id)
     row = _flow_row(kind, scope)
     merged = merge_graph(auto, _graph_data(row))
+    with show_names():
+        merged["same"] = same_candidates(merged, tasks)
     merged["meta"] = {
         "saved_at": row.updated_at.strftime("%Y/%m/%d %H:%M") if row else None,
         "edited": bool(merged.get("edited")),
@@ -6771,7 +6902,41 @@ def index():
         dup_outputs=duplicate_output_groups(),
         dup_inputs=duplicate_input_tasks(),
         flow_rows=flow_rows(),
+        same=merged["same"],
+        same_done=same_done(),
     )
+
+@bp_bizmap.post("/same")
+def same():
+    f = request.form
+    action, kind = f.get("action"), f.get("kind")
+    data = _map_same()
+    data = {"info": dict(data["info"]), "distinct": list(data["distinct"])}
+    a, b = (f.get("a") or "").strip()[:200], (f.get("b") or "").strip()[:200]
+    if action == "merge" and kind == "info" and a and b and name_key(a) != name_key(b):
+        data["info"][name_key(b)] = a
+        data["info"] = {k: v for k, v in data["info"].items() if k != name_key(a)}
+        flash(f"「{b}」を「{a}」にまとめました。", "success")
+    elif action == "merge" and kind == "task" and a:
+        task = db.session.get(Task, f.get("task_id", type=int) or 0)
+        if task is not None:
+            remember_written("names", task.id, a)
+            flash(f"「{a}」を「{task.name}」と同じ業務としてまとめました。", "success")
+    elif action == "distinct" and a and b:
+        key = same_pair_key(a, b)
+        if key not in data["distinct"]:
+            data["distinct"].append(key)
+        flash(f"「{a}」と「{b}」は別のものとして扱います。", "info")
+    elif action == "undo" and kind == "info" and a:
+        data["info"].pop(name_key(a), None)
+        flash(f"「{a}」のまとめを戻しました。", "info")
+    elif action == "undo" and kind == "task" and a:
+        forget_written("names", a)
+        flash(f"「{a}」のまとめを戻しました。", "info")
+    _save_same(data)
+    db.session.commit()
+    args = {k: v for k, v in (("workplace_id", f.get("workplace_id", type=int)), ("domain_id", f.get("domain_id", type=int))) if v}
+    return redirect(url_for("bizmap.index", **args) + "#same")
 
 def _kind_and_scope(payload=None):
     src = request.args if payload is None else payload
@@ -8843,6 +9008,14 @@ TEMPLATES = {
   {% endif %}
 </div></div>
 {%- endmacro %}
+{% macro same_form(action, kind, a='', b='', task_id='', label='', cls='btn-outline-primary') -%}
+<form method="post" action="{{ url_for('bizmap.same') }}" class="d-inline">
+  <input type="hidden" name="action" value="{{ action }}"><input type="hidden" name="kind" value="{{ kind }}">
+  <input type="hidden" name="a" value="{{ a }}"><input type="hidden" name="b" value="{{ b }}"><input type="hidden" name="task_id" value="{{ task_id }}">
+  <input type="hidden" name="workplace_id" value="{{ args.get('workplace_id') or '' }}"><input type="hidden" name="domain_id" value="{{ args.get('domain_id') or '' }}">
+  <button class="btn btn-sm {{ cls }}">{{ label }}</button>
+</form>
+{%- endmacro %}
 {% block content %}
 <h2 class="mb-3">業務体系・業務マップ{{ C.tip("登録された業務から、仕事の流れ（作業 → 作業）と情報の流れ（情報 → 作業 → 情報）を1枚の図に自動生成します。案件が増えるほど製造部の業務全体像が描かれていきます。間違いは「この図を編集する」で手で直せ、直した内容は保存され、新しい業務を取り込んで再生成しても残ります。") }}</h2>
 
@@ -8876,6 +9049,34 @@ TEMPLATES = {
     {{ flow_panel('info', '業務マップ',
        '取り出し元の情報 → 業務 → できるもの → 渡す相手の作業。箱は作業（四角・だれつき）と情報（媒体の形とアイコン）の2種類、線は仕事の流れ（濃い太い線）と情報の流れ（青い細い線）の2種類で、名前から推定したつながりはそれぞれ点線です。聞き取りで答えた名前で描き、同じ名前は1つの箱にまとめます。Gr・役割ごとの枠に業務を置き、点線は名前から推定したつながり（ある業務のできるものを別の業務が使っている、前後の業務）です。灰色の点線の箱は、月次アンケートで挙がったものの、まだ流れを登録していない業務です。保留中の業務は点線の枠に「（保留）」、廃止した業務は薄い色に「（廃止済み）」を付けます。',
        flows.info, '業務が登録されると図が描かれます。') }}
+
+    {% if same or same_done %}
+    <div class="card mt-3" id="same"><div class="card-body">
+      <h5 class="card-title"><i class="bi bi-exclamation-circle-fill same-mark"></i> 同じものかもしれない箱{% if same %} <span class="badge text-bg-warning align-middle">{{ same|length }}</span>{% endif %}{{ C.tip("名前の書き方が少し違うだけで、同じものかもしれない箱です（「の」の有無、（Excel）などの書き添え、前に付いた所属、語が1つ入っただけ、など）。まとめると、その名前にそろえて線がつながります（「まとめたもの」から戻せます）。別のものなら「別のもの」を押すと、次から出しません。") }}</h5>
+      {% if same %}
+      <div class="table-responsive"><table class="table table-sm align-middle mb-0 same-table">
+        <tbody>
+        {% for c in same %}
+        <tr>
+          <td class="small text-nowrap text-muted">{{ {'info': '情報', 'pending': '業務（月次）', 'link': '前後の業務', 'task': '業務'}[c.kind] }}{% if c.kind == 'link' %}{{ C.tip("「" ~ c.owner ~ "」の" ~ ('前' if c.field == 'prev_task' else '後') ~ "の業務に書かれた名前と、登録済みの業務です。まとめると、仕事の流れの線でつながります。") }}{% elif c.kind == 'pending' %}{{ C.tip("月次アンケートで挙がった名前と、登録済みの業務です。まとめると、未登録の業務の箱は出なくなります。") }}{% elif c.kind == 'task' %}{{ C.tip("別々に登録された業務です。同じ業務なら、どちらかの登録を案件詳細で取り消してください。") }}{% endif %}</td>
+          <td>「{{ c.a }}」<span class="text-muted">と</span>「{{ c.b }}」</td>
+          <td class="text-end text-nowrap">
+            {% if c.kind == 'info' %}{{ same_form('merge', 'info', c.a, c.b, label='「' ~ (c.a|truncate(14, True, '…', 0)) ~ '」にまとめる') }} {{ same_form('merge', 'info', c.b, c.a, label='「' ~ (c.b|truncate(14, True, '…', 0)) ~ '」にまとめる') }}
+            {% elif c.kind in ('pending', 'link') %}{{ same_form('merge', 'task', c.a, c.b, c.task_id, label='同じ業務としてまとめる') }}
+            {% else %}{% for tid in c.task_ids %}<a class="btn btn-sm btn-link" href="{{ url_for('cases.detail', task_id=tid) }}">案件{{ loop.index }}を開く</a>{% endfor %}{% endif %}
+            {{ same_form('distinct', c.kind, c.a, c.b, label='別のもの', cls='btn-outline-secondary') }}
+          </td>
+        </tr>
+        {% endfor %}
+        </tbody></table></div>
+      {% endif %}
+      {% if same_done %}
+      <details class="mt-2 small"><summary>まとめたもの（{{ same_done|length }}）</summary>
+        <ul class="list-unstyled mb-0 mt-1">{% for r in same_done %}<li class="mb-1">「{{ r.alias }}」→「{{ r.canon }}」 {{ same_form('undo', r.kind, r.alias, label='戻す', cls='btn-link p-0 align-baseline') }}</li>{% endfor %}</ul>
+      </details>
+      {% endif %}
+    </div></div>
+    {% endif %}
 
     <div class="row g-3 mt-1">
       <div class="col-lg-7">
@@ -11430,6 +11631,7 @@ document.addEventListener("DOMContentLoaded", function () {
       if (of.some(function (e) { return !e.inferred; })) lines += '<span class="lg-item"><i class="lg-line lg-line-' + k[0] + '"></i>' + k[1] + "</span>";
       if (of.some(function (e) { return e.inferred; })) lines += '<span class="lg-item"><i class="lg-line lg-line-' + k[0] + '-guess"></i>' + k[1] + "（名前から推定）</span>";
     });
+    if (G.nodes.some(function (n) { return n.same; })) lines += '<span class="lg-item"><i class="bi bi-exclamation-circle-fill same-mark"></i>同じものかもしれない' + tipHtml(KC.tips.same) + "</span>";
     var html = '<div class="legend-row lg-grammar"><span class="legend-title">箱と線' + tipHtml(KC.tips.lines) + '</span><span class="lg-item">' + glyph("rect") + '作業</span><span class="lg-item">' + glyph("doc") + "情報</span>" + lines + "</div>";
     var roles = Object.keys(KC.cls_labels).filter(function (c) { return G.nodes.some(function (n) { return n.cls === c; }); });
     if (roles.length) html += '<div class="legend-row"><span class="legend-title">色</span>' + roles.map(function (c) { return '<span class="legend-chip lg-' + c + '">' + escHtml(KC.cls_labels[c]) + "</span>"; }).join("") + "</div>";
@@ -11567,6 +11769,12 @@ document.addEventListener("DOMContentLoaded", function () {
     }
     var label = document.createElement("div");
     label.className = "fe-label";
+    if (n.same) {
+      var sameMark = document.createElement("i");
+      sameMark.className = "bi bi-exclamation-circle-fill fe-icon same-mark";
+      sameMark.title = KC.tips.same;
+      label.appendChild(sameMark);
+    }
     if (ic[0]) {
       var icon = document.createElement("i");
       icon.className = "bi " + ic[0] + " fe-icon fi " + ic[1];
@@ -12658,6 +12866,8 @@ body.flow-max-open { overflow: hidden; }
 .fe-edge-label { font-size: 11px; fill: #343a40; paint-order: stroke; stroke: #fff; stroke-width: 3px; pointer-events: none; }
 .fe-edge-label .fe-edge-icon { font-family: "bootstrap-icons"; fill: #5b8def; }
 .fl { color: #5b8def; }
+.same-mark { color: #fd7e14; }
+.same-table td { vertical-align: middle; }
 .mg, .mg .fl { color: #9aa0a6; }
 .fe-edge-label .fe-edge-guess { fill: #9aa0a6; }
 .fe-temp-line { fill: none; stroke: #60a5fa; stroke-width: 2px; stroke-dasharray: 4 4; }

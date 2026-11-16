@@ -852,6 +852,51 @@ def smoke_bizmap_edit():
     check(next(x["words"] for x in saved["media"] if x["key"] == "system") == old_words and kept == (old_words, "unknown") and back == "system",
           f"R4-5: 管理画面で保存した区分の語はそのまま（既定の語を足さない）。既定に戻すとモニタ・画面・端末の語が入る: {kept} / {back}")
 
+    # ---- 同じものかもしれない箱: 見つけて！を付け、まとめる・別のもの・戻す ----
+    ls = app_module.looks_same
+    check(all(ls(x, y) for x, y in (("日次実績表", "日次実績集計表（Excel）"), ("週次生産計画表", "生産管理課の週次生産計画表"), ("月報の作成", "生産実績の月報作成"), ("週報作成", "週報の作成"),
+                                      ("Excel（日次実績集計表）", "日次実績集計表（Excel）"), ("各ラインリーダー", "各ラインのリーダー")))
+          and not any(ls(x, y) for x, y in (("受注一覧（Excel）", "発注一覧（Excel）"), ("不良報告メール", "進捗報告メール"), ("出勤簿の転記", "出勤簿の集計"), ("週報", "月報"),
+                                             ("検査データ（CSV）", "不良データ（CSV）"), ("在庫報告書の作成", "月次保全報告書の作成"), ("日報の集計", "日報の実績をExcelの集計表に転記する"), ("同じ名前", "同じ名前"))),
+          "同じものかもしれない名前: 「の」の有無・（Excel）などの書き添え・前に付いた所属・語が1つ入っただけ・並びが違うだけは同じかも。字が違うもの（受注／発注など）は別")
+    client.post("/admin/demo/load")
+    with app.test_request_context():
+        g0 = app_module._merged_graph("info", None, None)
+        tasks0 = {t.name: t for t in Task.query.all()}
+    cands = {(c["kind"], c["a"], c["b"]) for c in g0["same"]}
+    html0 = client.get("/bizmap/").data.decode("utf-8")
+    check(("info", "日次実績集計表（Excel）", "日次実績表") in cands and any(c[1:] == ("月報の作成", "生産実績の月報作成") for c in cands)
+          and not any("メール" in (c[1], c[2]) for c in cands) and sum(1 for n in g0["nodes"] if n.get("same")) >= 2 and "bi-exclamation-circle-fill same-mark" in html0 and 'id="same"' in html0 and "同じものかもしれない箱" in html0
+          and "「日次実績集計表（Excel）」にまとめる" in html0 and "同じ業務としてまとめる" in html0 and "別のもの" in html0,
+          f"業務マップ: 同じものかもしれない箱に！を付け、図の下に「まとめる」「別のもの」の一覧を出す: {sorted(cands)}")
+    t_graph, t_day0 = tasks0["日次実績のグラフ更新（掲示用）"], tasks0["日報の実績をExcelの集計表に転記する"]
+    r_m = client.post("/bizmap/same", data={"action": "merge", "kind": "info", "a": "日次実績集計表（Excel）", "b": "日次実績表"})
+    with app.test_request_context():
+        g1 = app_module._merged_graph("info", None, None)
+    e1 = {(e["from"], e["to"]) for e in g1["edges"]}
+    check(r_m.status_code == 302 and r_m.headers["Location"].endswith("#same") and (f"o{t_day0.id}", f"t{t_graph.id}") in e1
+          and not any(n["text"] == "日次実績表" for n in g1["nodes"]) and not any("日次実績表" in (c["a"], c["b"]) for c in g1["same"]),
+          "まとめる（情報）: 「日次実績表」を「日次実績集計表（Excel）」にそろえ、日報のできるものから掲示用グラフの業務へ線がつながる。候補から消える")
+    html1 = client.get("/bizmap/").data.decode("utf-8")
+    check("まとめたもの（1）" in html1 and "「日次実績表」→「日次実績集計表（Excel）」" in html1, "まとめたものは一覧に出て、戻せる")
+    client.post("/bizmap/same", data={"action": "undo", "kind": "info", "a": "日次実績表"})
+    r_l = client.post("/bizmap/same", data={"action": "merge", "kind": "task", "a": "月報の作成", "b": "生産実績の月報作成", "task_id": str(tasks0["生産実績の月報作成"].id)})
+    with app.test_request_context():
+        g2 = app_module._merged_graph("info", None, None)
+    w2 = {(e["from"], e["to"]) for e in g2["edges"] if e["type"] == "work"}
+    t_mon, t_week0, t_kpi = tasks0["生産実績の月報作成"], tasks0["週報の作成"], tasks0["生産性指標の報告（部へ）"]
+    check(r_l.status_code == 302 and (f"t{t_mon.id}", f"t{t_kpi.id}") in w2 and (f"t{t_week0.id}", f"t{t_mon.id}") in w2
+          and any(n["text"] == "日次実績表" for n in g2["nodes"]) and not any("月報の作成" in (c["a"], c["b"]) for c in g2["same"]) and any("日次実績表" in (c["a"], c["b"]) for c in g2["same"]),
+          "まとめる（前後の業務）: 「月報の作成」を「生産実績の月報作成」と同じ業務にすると、生産性指標の報告の前の業務として仕事の流れでつながる。戻した情報の候補はまた出る")
+    client.post("/bizmap/same", data={"action": "undo", "kind": "task", "a": "月報の作成"})
+    client.post("/bizmap/same", data={"action": "distinct", "kind": "info", "a": "日次実績集計表（Excel）", "b": "日次実績表"})
+    with app.test_request_context():
+        g3 = app_module._merged_graph("info", None, None)
+    check(not any("日次実績表" in (c["a"], c["b"]) for c in g3["same"]) and any("月報の作成" in (c["a"], c["b"]) for c in g3["same"]) and not any(n.get("same") and n["text"] == "日次実績表" for n in g3["nodes"]),
+          "別のもの: 次から候補にも！にも出さない（戻した前後の業務の候補はまた出る）")
+    fe_same = client.get("/static/flowedit.js").data.decode("utf-8")
+    check("if (n.same) {" in fe_same and "KC.tips.same" in fe_same, "編集画面でも、同じものかもしれない箱に！を付ける")
+
     return fails
 
 def smoke_board():
