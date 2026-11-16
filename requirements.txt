@@ -1,0 +1,7 @@
+Flask==3.1.1
+Flask-SQLAlchemy==3.1.1
+SQLAlchemy==2.0.36
+Jinja2==3.1.4
+MarkupSafe==3.0.2
+waitress==3.0.2
+# ldap3  （LDAP サーバーへ直接照会するとき＝config.py の LDAP_SERVER を使うときだけ入れる）

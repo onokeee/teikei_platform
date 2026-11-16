@@ -34,8 +34,10 @@ ECRS（排除・結合・入替・簡素化）の観点でムリ・ムダ・ム�
 必要なもの: Python 3.9 以上
 
 ```bash
-pip install Flask Flask-SQLAlchemy waitress
+pip install -r requirements.txt
 ```
+
+`requirements.txt` には、動作を確かめた版（Flask・Flask-SQLAlchemy・SQLAlchemy・Jinja2・MarkupSafe・waitress）を書いています。LDAP サーバーへ直接照会するときだけ、`ldap3` も入れます。
 
 ```bash
 flask --app app run --host 0.0.0.0 --port 5000
