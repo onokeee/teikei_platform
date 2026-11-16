@@ -2187,17 +2187,28 @@ def doer_who(text, own_wp="", vocab=None):
         return {"actor": w["actor"] if w["actor"] and w["state"] == "ok" else "team", "label": raw, "state": "ok"}
     return w
 
-def task_doer(t):
+def who_label(workplace="", people=(), extra=0, with_name=True):
+    """作業の箱の「だれ」。1行目に Gr・役割・勤務形態・班、2行目に氏名（ほかにもいれば「ほか N 人」）。
+    people は (氏名, 勤務形態, 班) の並び、extra は people のほかにその作業をする人数。氏名を出さないときは1行で、人数を添える"""
+    people = list(people)
+    patterns = list(dict.fromkeys(p for _n, p, _t in people if p in C.WORK_PATTERNS))
+    teams = list(dict.fromkeys(team for team in (clean_team(p, t) for _n, p, t in people) if team))
+    head = "・".join(x for x in [str(workplace or "").strip(), *patterns, *teams] if x)
+    names = [str(n).strip() for n, _p, _t in people if str(n or "").strip()] if with_name else []
+    others = max(len(people) - 1, 0) + max(extra or 0, 0)
+    if names:
+        return "\n".join(x for x in (head, names[0] + (f" ほか{others}人" if others else "")) if x)
+    return head + (f"（{others + 1}人）" if head and others else "")
+
+def task_doer(t, with_name=True):
     r = t.respondent
     if r is None:
         return _own_wp(t)
     name = (r.name or "").strip()
-    if not name and r.emp_id:
+    if not name and r.emp_id and with_name:
         e = Employee.query.filter(same_emp_id(Employee.emp_id, r.emp_id)).first()
         name = (e.name or "").strip() if e is not None else ""
-    team = clean_team(r.work_pattern, r.shift_team)
-    label = (name or _own_wp(t)) + (f"（{team}）" if team else "")
-    return label + (f" ほか{t.headcount - 1}人" if (t.headcount or 1) > 1 else "")
+    return who_label(_own_wp(t), [(name, r.work_pattern, r.shift_team)], extra=(t.headcount or 1) - 1, with_name=with_name)
 
 NODE_COLORS = {"white": "#ffffff", "red": "#fee2e2", "orange": "#fed7aa", "yellow": "#fef3c7", "green": "#d1fae5", "blue": "#dbeafe", "purple": "#e9d5ff", "pink": "#fce7f3"}
 PERSON_ACTORS = ("external", "dept", "boss", "team")
@@ -2216,7 +2227,9 @@ def node_label(n):
         head = "<i class='bi bi-exclamation-circle-fill same-mark'></i> " + head
     body = wrap(n["text"] + STATUS_MARKS.get(n.get("cls"), ""), n.get("width") or 14)
     if show_who(n):
-        return head + "<b>" + esc(n["who"]) + "</b><br/>" + body
+        width = max(n.get("width") or 14, 16)
+        who = "<br/>".join(wrap(line, width, 2) for line in str(n["who"]).split("\n") if line.strip())
+        return head + "<b>" + who + "</b><br/>" + body
     return head + body
 
 def edge_label(e):
@@ -2776,7 +2789,7 @@ def _rule_same_candidates(graph, tasks, distinct):
                     continue
                 for o in tasks:
                     if o is not t and looks_same(name, o.name):
-                        add("link", name, o.name, task_id=o.id, owner=t.name, field=field)
+                        add("link", name, o.name, task_id=o.id, owner=t.name, owner_id=t.id, field=field)
     return out
 
 def _same_targets(graph, tasks):
@@ -2812,7 +2825,7 @@ def _resolve_same(rec, targets):
         if xs and tx is not None:
             c = {"kind": kind, "a": xs[0]["name"], "b": tx["name"], "task_id": tx["task"].id, "ids": [x["node"]["id"] for x in xs if x["node"]] + [tx["node"]["id"]], "ai": ai}
             if kind == "link":
-                c.update(owner=xs[0]["owner"].name, field=xs[0]["field"])
+                c.update(owner=xs[0]["owner"].name, owner_id=xs[0]["owner"].id, field=xs[0]["field"])
             return c
     elif kind == "task":
         ids = list(rec.get("task_ids") or [])[:2]
@@ -2849,6 +2862,28 @@ def same_candidates(graph, tasks):
         if n.get("id") in marked:
             n["same"] = True
     return out
+
+def same_focus_ids(cands):
+    """図で見るときの中心の箱: 組の箱。前後の業務に書かれた名前の組は、書いた業務と相手の業務"""
+    ids = []
+    for c in cands:
+        ids += c.get("ids") or []
+        if c["kind"] == "link":
+            ids += [f"t{i}" for i in (c.get("task_id"), c.get("owner_id")) if i]
+    return ids
+
+def focus_graph(graph, ids):
+    """指定した箱と、線で直接つながる箱だけの図（同じものかもしれない箱が流れのどこにあるかを見るため）"""
+    ids = {i for i in ids if i}
+    edges = graph.get("edges") or []
+    keep = set(ids)
+    for e in edges:
+        if e.get("from") in ids or e.get("to") in ids:
+            keep |= {e.get("from"), e.get("to")}
+    shown = dict(graph)
+    shown["nodes"] = [n for n in graph.get("nodes") or [] if n.get("id") in keep]
+    shown["edges"] = [e for e in edges if e.get("from") in keep and e.get("to") in keep]
+    return shown
 
 def same_done():
     rows = [{"kind": "info", "alias": a, "canon": c} for a, c in _map_same()["info"].items()]
@@ -3808,8 +3843,9 @@ def pending_task_names(workplace_id=None):
             k = name_key(name)
             if len(k) < 2 or k in registered[m.workplace_id]:
                 continue
-            row = found.setdefault((m.workplace_id, k), {"name": name, "workplace_id": m.workplace_id, "people": set()})
+            row = found.setdefault((m.workplace_id, k), {"name": name, "workplace_id": m.workplace_id, "people": set(), "who": {}})
             row["people"].add(key)
+            row["who"][key] = (m.name or "", m.work_pattern or "", m.shift_team or "")
     return list(found.values())[:MAX_PENDING]
 
 def add_pending_tasks(d, workplace_id=None, tasks=()):
@@ -3821,7 +3857,7 @@ def add_pending_tasks(d, workplace_id=None, tasks=()):
         n = len(p["people"])
         wp = names.get(p["workplace_id"], "Gr・役割未設定")
         node = d.node(nid("u", f"{p['workplace_id']}:{p['name']}"), p["name"] + (f"（{n}人）" if n >= 2 else ""), "pending",
-                      subgraph=_frame(p["workplace_id"], wp), who={"actor": "team", "label": wp, "state": "ok"})
+                      subgraph=_frame(p["workplace_id"], wp), who={"actor": "team", "label": who_label(wp, p["who"].values(), with_name=_SHOW_NAMES.get()), "state": "ok"})
         key = name_key(p["name"])
         for t in tasks:
             if t.workplace_id != p["workplace_id"]:
@@ -4045,12 +4081,12 @@ def _extra_case_links(d, t, steps):
         d.info_edge(deliver, node, how)
         d.edge(last, node, "work", handoff=handoff_of(steps[-1].get("action") or "", r["how"], side="push", method=how))
 
-def build_task_flow(t):
+def build_task_flow(t, names=True):
     own = _own_wp(t)
     steps = t.steps
     cls = task_cls(t)
     if steps:
-        d = build_steps_flow(steps, own, t.purpose or "", me_label=task_doer(t))
+        d = build_steps_flow(steps, own, t.purpose or "", me_label=task_doer(t, with_name=names))
         _extra_case_links(d, t, steps)
         first, last = "st1", f"st{steps[-1]['no']}"
         if cls != "task":
@@ -4059,7 +4095,7 @@ def build_task_flow(t):
     else:
         d = Diagram("LR")
         first = last = f"t{t.id}"
-        d.node(first, t.name, cls, width=16, who={"actor": "team", "label": task_doer(t), "state": "ok"})
+        d.node(first, t.name, cls, width=16, who={"actor": "team", "label": task_doer(t, with_name=names), "state": "ok"})
         _add_task_info(d, t, first)
     others = Task.query.filter(Task.id != t.id).all() if t.id else []
     boxes = []
@@ -6668,7 +6704,14 @@ def index():
     workplace_id = request.args.get("workplace_id", type=int)
     tasks, truncated = _filtered_tasks(domain_id, workplace_id)
     merged = _merged_graph("info", workplace_id, domain_id)
-    flow, legend = _graph_view(merged)
+    shown, focus_label = merged, ""
+    if request.args.get("focus") == "same" and merged["same"]:
+        pair = (request.args.get("pair") or "").strip()
+        picked = [c for c in merged["same"] if c["key"] == pair] if pair else merged["same"]
+        if picked:
+            shown = focus_graph(merged, same_focus_ids(picked))
+            focus_label = f"「{picked[0]['a']}」と「{picked[0]['b']}」につながる流れ" if pair else "同じかもしれない箱につながる流れ"
+    flow, legend = _graph_view(shown)
     rows = domain_analysis()
     return render_template(
         "bizmap/index.html",
@@ -6692,6 +6735,7 @@ def index():
         same_done=same_done(),
         ai_on=ai_enabled(),
         same_ai_at=_map_same_ai()["at"],
+        focus_label=focus_label,
     )
 
 @bp_bizmap.post("/same")
@@ -6723,7 +6767,7 @@ def same():
         flash(f"「{a}」のまとめを戻しました。", "info")
     _save_same(data)
     db.session.commit()
-    args = {k: v for k, v in (("workplace_id", f.get("workplace_id", type=int)), ("domain_id", f.get("domain_id", type=int))) if v}
+    args = {k: v for k, v in (("workplace_id", f.get("workplace_id", type=int)), ("domain_id", f.get("domain_id", type=int)), ("focus", f.get("focus") == "same" and "same")) if v}
     return redirect(url_for("bizmap.index", **args) + "#same")
 
 @bp_bizmap.post("/same/ai")
@@ -6734,7 +6778,7 @@ def same_ai():
     else:
         level, message = "warning", "AI連携が無効です。管理画面の「AI連携」で URL・API キー・モデル名を設定してください。"
     flash(message, level)
-    args = {k: v for k, v in (("workplace_id", workplace_id), ("domain_id", domain_id)) if v}
+    args = {k: v for k, v in (("workplace_id", workplace_id), ("domain_id", domain_id), ("focus", request.form.get("focus") == "same" and "same")) if v}
     return redirect(url_for("bizmap.index", **args) + "#same")
 
 def _kind_and_scope(payload=None):
@@ -7847,7 +7891,7 @@ def index():
 @bp_board.route("/<int:task_id>")
 def task_detail(task_id):
     task = _get_or_404(Task, task_id)
-    task_flow, task_legend = flow_view(build_task_flow(task))
+    task_flow, task_legend = flow_view(build_task_flow(task, names=board_shows_names()))
     return render_template("board/detail.html", task=task, task_flow=task_flow, task_legend=task_legend, show_names=board_shows_names())
 
 def board_shows_names():
@@ -7948,6 +7992,7 @@ TEMPLATES = {
     </tr></tfoot>
   </table>
   </div>
+  <div class="member-hscroll" aria-hidden="true"><div></div></div>
   {% else %}
   <p class="text-muted mb-0">まだ回答した人がいません。月次アンケートか「自動化アイテム登録」に回答すると、ここに載ります。</p>
   {% endif %}
@@ -8136,6 +8181,36 @@ TEMPLATES = {
     });
   });
   applyFilter();
+
+  // 縦のスクロールは画面全体だけ。見出しは画面の上（ヘッダーの下）に残し、横のスクロールバーは画面の下に残す
+  var wrap = table.parentNode, hbar = document.querySelector(".member-hscroll"), appBar = document.querySelector(".app-header");
+  function stickHead() {
+    var top = appBar ? Math.max(0, appBar.getBoundingClientRect().bottom) : 0;
+    var box = wrap.getBoundingClientRect(), foot = table.tFoot ? table.tFoot.offsetHeight : 0;
+    var shift = Math.min(Math.max(top - box.top, 0), Math.max(box.height - table.tHead.offsetHeight - foot, 0));
+    table.style.setProperty("--member-head-shift", shift + "px");
+  }
+  function fitBar() {
+    if (!hbar) return;
+    hbar.firstElementChild.style.width = wrap.scrollWidth + "px";
+    hbar.classList.toggle("d-none", wrap.scrollWidth <= wrap.clientWidth + 1);
+    hbar.scrollLeft = wrap.scrollLeft;
+  }
+  var syncing = false;
+  function follow(from, to) {
+    from.addEventListener("scroll", function () {
+      if (syncing) return;
+      syncing = true;
+      to.scrollLeft = from.scrollLeft;
+      requestAnimationFrame(function () { syncing = false; });
+    }, { passive: true });
+  }
+  if (hbar) { follow(wrap, hbar); follow(hbar, wrap); }
+  function relayout() { fitBar(); stickHead(); }
+  window.addEventListener("scroll", stickHead, { passive: true });
+  window.addEventListener("resize", relayout);
+  if (window.ResizeObserver) new ResizeObserver(relayout).observe(table);
+  relayout();
 })();
 </script>
 {% endblock %}
@@ -8771,16 +8846,21 @@ TEMPLATES = {
 {% from "flow/_macros.html" import zoom_toolbar %}
 {% block title %}業務マップ{% endblock %}
 {% macro flow_panel(key, title, desc, definition, empty_msg) -%}
-<div class="card"><div class="card-body">
+<div class="card" id="map-{{ key }}"><div class="card-body">
   <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
     <div>
       <h5 class="mb-1">{{ title }}{{ C.tip(desc ~ ("\n業務の箱をクリックすると案件詳細を開きます。" if definition else "")) }}
         {% if saved_at[key] %}<span class="badge text-bg-warning align-middle" title="編集画面で直した名前・だれ・媒体・色・線・追加・削除を反映しています（配置は編集画面だけで使います）">手修正あり（{{ saved_at[key] }}）</span>{% endif %}
+        {% if key == 'info' and focus_label %}<span class="badge text-bg-warning align-middle"><i class="bi bi-exclamation-circle-fill"></i> {{ focus_label }}だけ</span>{% endif %}
       </h5>
       <div>{{ kind_legends.get(key, '')|safe }}</div>
     </div>
     <div class="d-flex flex-column align-items-end gap-1">
-      <a class="btn btn-sm btn-primary" href="{{ url_for('bizmap.edit', kind=key, workplace_id=args.get('workplace_id') or None, domain_id=args.get('domain_id') or None) }}">✎ この図を編集する</a>
+      <div class="d-flex flex-wrap justify-content-end gap-1">
+        {% if key == 'info' and focus_label %}<a class="btn btn-sm btn-warning" href="{{ url_for('bizmap.index', workplace_id=args.get('workplace_id') or None, domain_id=args.get('domain_id') or None) }}#map-info">全体を表示</a>
+        {% elif key == 'info' and same %}<a class="btn btn-sm btn-outline-warning" href="{{ url_for('bizmap.index', focus='same', workplace_id=args.get('workplace_id') or None, domain_id=args.get('domain_id') or None) }}#map-info"><i class="bi bi-exclamation-circle-fill same-mark"></i> 同じかもしれない箱の流れだけ</a>{% endif %}
+        <a class="btn btn-sm btn-primary" href="{{ url_for('bizmap.edit', kind=key, workplace_id=args.get('workplace_id') or None, domain_id=args.get('domain_id') or None) }}">✎ この図を編集する</a>
+      </div>
       {% if definition %}
       {{ zoom_toolbar(key) }}
       {% endif %}
@@ -8799,6 +8879,7 @@ TEMPLATES = {
   <input type="hidden" name="action" value="{{ action }}"><input type="hidden" name="kind" value="{{ kind }}">
   <input type="hidden" name="a" value="{{ a }}"><input type="hidden" name="b" value="{{ b }}"><input type="hidden" name="task_id" value="{{ task_id }}">
   <input type="hidden" name="workplace_id" value="{{ args.get('workplace_id') or '' }}"><input type="hidden" name="domain_id" value="{{ args.get('domain_id') or '' }}">
+  <input type="hidden" name="focus" value="{{ 'same' if focus_label else '' }}">
   <button class="btn btn-sm {{ cls }}">{{ label }}</button>
 </form>
 {%- endmacro %}
@@ -8842,6 +8923,7 @@ TEMPLATES = {
         <h5 class="card-title"><i class="bi bi-exclamation-circle-fill same-mark"></i> 同じものかもしれない箱{% if same %} <span class="badge text-bg-warning align-middle">{{ same|length }}</span>{% endif %}{{ C.tip(C.SAME_CARD_TIP if ai_on else C.SAME_RULE_TIP) }}</h5>
         {% if ai_on %}<form method="post" action="{{ url_for('bizmap.same_ai') }}" class="d-inline">
           <input type="hidden" name="workplace_id" value="{{ args.get('workplace_id') or '' }}"><input type="hidden" name="domain_id" value="{{ args.get('domain_id') or '' }}">
+          <input type="hidden" name="focus" value="{{ 'same' if focus_label else '' }}">
           <button class="btn btn-sm btn-outline-primary"{% if same_ai_at %} data-tip="前回: {{ same_ai_at }}"{% endif %}>AIで見直す</button>
         </form>{% endif %}
       </div>
@@ -8853,6 +8935,7 @@ TEMPLATES = {
           <td class="small text-nowrap text-muted">{% if c.ai %}<span class="badge badge-flag me-1">AI</span>{% endif %}{{ {'info': '情報', 'pending': '業務（月次）', 'link': '前後の業務', 'task': '業務'}[c.kind] }}{% if c.kind == 'link' %}{{ C.tip("「" ~ c.owner ~ "」の" ~ ('前' if c.field == 'prev_task' else '後') ~ "の業務に書かれた名前と、登録済みの業務です。まとめると、仕事の流れの線でつながります。") }}{% elif c.kind == 'pending' %}{{ C.tip("月次アンケートで挙がった名前と、登録済みの業務です。まとめると、未登録の業務の箱は出なくなります。") }}{% elif c.kind == 'task' %}{{ C.tip("別々に登録された業務です。同じ業務なら、どちらかの登録を案件詳細で取り消してください。") }}{% endif %}</td>
           <td>「{{ c.a }}」<span class="text-muted">と</span>「{{ c.b }}」{% if c.ai %}{{ C.tip("AI の判断（確からしさ：" ~ c.ai.confidence ~ "）\n" ~ c.ai.reason) }}{% endif %}</td>
           <td class="text-end text-nowrap">
+            <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('bizmap.index', focus='same', pair=c.key, workplace_id=args.get('workplace_id') or None, domain_id=args.get('domain_id') or None) }}#map-info">図で見る</a>
             {% if c.kind == 'info' %}{{ same_form('merge', 'info', c.a, c.b, label='「' ~ (c.a|truncate(14, True, '…', 0)) ~ '」にまとめる') }} {{ same_form('merge', 'info', c.b, c.a, label='「' ~ (c.b|truncate(14, True, '…', 0)) ~ '」にまとめる') }}
             {% elif c.kind in ('pending', 'link') %}{{ same_form('merge', 'task', c.a, c.b, c.task_id, label='同じ業務としてまとめる') }}
             {% else %}{% for tid in c.task_ids %}<a class="btn btn-sm btn-link" href="{{ url_for('cases.detail', task_id=tid) }}">案件{{ loop.index }}を開く</a>{% endfor %}{% endif %}
@@ -12634,7 +12717,7 @@ body.flow-max-open { overflow: hidden; }
 .fe-edge.fe-type-info { stroke: #5b8def; stroke-width: 1.6px; }
 .fe-edge.fe-type-work { stroke: #495057; stroke-width: 2.6px; }
 .fe-edge.fe-inferred { stroke-dasharray: 6 4; }
-.fe-who { font-size: 11px; font-weight: 700; color: #495057; line-height: 1.2; margin-bottom: 2px; }
+.fe-who { font-size: 11px; font-weight: 700; color: #495057; line-height: 1.2; margin-bottom: 2px; white-space: pre-line; }
 .fe-cls-work { --fe-fill: #fff; --fe-stroke: #6c757d; color: #343a40; }
 .fe-type-row { display: flex; align-items: center; }
 .fe-type-row .btn.active { background: #e7f1ff; border-color: #0d6efd; color: #052c65; }
@@ -12716,14 +12799,16 @@ body.flow-max-open { overflow: hidden; }
 .mv-table td:nth-child(4) { min-width: 7rem; }
 .mv-icon { font-size: 1.15rem; width: 1.3rem; text-align: center; }
 .mv-savebar { position: sticky; bottom: 0; z-index: 5; display: flex; gap: 0.5rem; align-items: center; padding: 0.75rem 0; background: linear-gradient(to top, #f5f6f8 70%, rgba(245, 246, 248, 0)); }
-.member-wrap { overflow: auto; max-height: 72vh; }
+.member-wrap { overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
+.member-wrap::-webkit-scrollbar { display: none; }
+.member-hscroll { position: sticky; bottom: 0; z-index: 3; overflow-x: auto; overflow-y: hidden; background: #fff; }
+.member-hscroll > div { height: 1px; }
 .member-table th, .member-table td { white-space: normal; }
 .member-table td:nth-child(1), .member-table td:nth-child(2), .member-table .member-cell, .member-table .member-stat { white-space: nowrap; }
 .member-table .badge { white-space: normal; text-align: left; line-height: 1.25; }
 .member-table .member-old { display: none; }
 .member-table.show-old .member-old { display: table-cell; }
-.member-table thead { position: sticky; top: 0; z-index: 2; }
-.member-table thead th { background: #fff; vertical-align: bottom; }
+.member-table thead th { position: relative; top: var(--member-head-shift, 0px); z-index: 2; background: #fff; vertical-align: bottom; }
 .member-month { font-size: 0.78rem; line-height: 1.15; }
 .member-table .member-off, .member-table.hide-months .member-mcol, .member-table.hide-months tfoot { display: none; }
 .member-cols .dropdown-menu { min-width: 26rem; font-size: 0.85rem; }
