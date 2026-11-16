@@ -1516,64 +1516,6 @@ def _responses_by_period():
 def _hours_month(responses):
     return sum(r.hours_shift * C.shifts_per_month(r.work_pattern) for r in responses)
 
-def monthly_question_trends():
-    periods, by_period = _responses_by_period()
-    trends = []
-    for q in C.MONTHLY_CORE_QUESTIONS:
-        if q["type"] != "choice":
-            continue
-        group = C.MONTHLY_TREND_GROUPS.get(q["key"])
-        to_band = {label: band for band, labels in group.items() for label in labels} if group else None
-        if to_band:
-            counters = [Counter(to_band[r.answer(q["key"])] for r in by_period[p] if r.answer(q["key"]) in to_band) for p in periods]
-        else:
-            counters = [Counter(r.answer(q["key"]) for r in by_period[p] if r.answer(q["key"])) for p in periods]
-        n_list = [sum(c.values()) for c in counters]
-        series = []
-        for opt in (list(group) if group else q["options"]):
-            counts = [c.get(opt, 0) for c in counters]
-            series.append({"option": opt, "percents": [round(c / n * 100) if n else 0 for c, n in zip(counts, n_list)]})
-        note = "30分・1時間・2時間・4時間の区切りにまとめて表示。細かい区分は月度の詳細で見られます" if group else ""
-        trends.append({"q": q, "label": C.MONTHLY_KPI_LABELS.get(q["key"], ""), "note": note, "periods": periods, "labels": [period_label(p) for p in periods], "n": n_list, "series": series})
-    return trends
-
-def _trend_cells(periods, by_period, match):
-    kpi = C.MONTHLY_KPI
-    cells = []
-    for p in periods:
-        sub = [r for r in by_period[p] if match(r)]
-        n = len(sub)
-        cells.append(
-            {
-                "n": n,
-                "has_rate": (len([r for r in sub if r.answer("has") in kpi["has_positive"]]) / n * 100.0) if n else None,
-                "hours_month": _hours_month(sub) if n else None,
-            }
-        )
-    return cells
-
-def _trend_table(name, items, match):
-    periods, by_period = _responses_by_period()
-    rows = []
-    for item in items:
-        cells = _trend_cells(periods, by_period, lambda r: match(r, item))
-        if any(c["n"] for c in cells):
-            rows.append({name: item, "cells": cells})
-    return {"labels": [period_label(p) for p in periods], "rows": rows}
-
-def monthly_workplace_trends():
-    return _trend_table("workplace", Workplace.query.order_by(Workplace.sort, Workplace.id).all(), lambda r, wp: r.workplace_id == wp.id)
-
-def monthly_pattern_trends():
-    items = list(C.WORK_PATTERNS) + [f"{C.SHIFT_PATTERN} {t}" for t in C.SHIFT_TEAMS] + ["未設定"]
-
-    def match(r, item):
-        if item in C.WORK_PATTERNS or item == "未設定":
-            return (r.work_pattern or "未設定") == item
-        team = clean_team(r.work_pattern, r.shift_team)
-        return bool(team) and f"{C.SHIFT_PATTERN} {team}" == item
-
-    return _trend_table("pattern", items, match)
 
 def monthly_question_stats(survey, responses):
     stats = []
@@ -1599,6 +1541,250 @@ def monthly_question_stats(survey, responses):
             items = [(r.name, r.workplace.name if r.workplace else "", r.answer(key)) for r in responses if r.answer(key).strip()]
             stats.append({"q": q, "n": len(items), "items": items})
     return stats
+
+# ----- アンケート結果分析（時系列分析・月別分析） -----
+SURVEY_METRICS = [
+    {"key": "n", "label": "回答者数", "unit": "人", "digits": 0, "better": "up", "tip": "その月度に回答した人の数（対象外の人の回答も含む）"},
+    {"key": "response_rate", "label": "回答率", "unit": "%", "digits": 0, "better": "up", "tip": "回答した対象者 ÷ 対象者。対象者は人財一覧の人のうち、その月末に対象外でない人（対象者になる前の月は数えない）"},
+    {"key": "has_rate", "label": "定型・定期業務あり率", "unit": "%", "digits": 0, "better": "down", "tip": "①で「ある」と答えた人 ÷ ①に答えた人"},
+    {"key": "hours_month", "label": "推計 月間時間", "unit": "h", "digits": 0, "better": "down", "tip": "1シフトあたりの時間（区分の中央値）× 20（1か月の出勤日数の目安）の合計"},
+    {"key": "hours_per_person", "label": "1人あたり 月間時間", "unit": "h", "digits": 1, "better": "down", "tip": "推計 月間時間 ÷ ①で「ある」と答えた人"},
+    {"key": "decreased_rate", "label": "減った率", "unit": "%", "digits": 0, "better": "up", "tip": "先月と比べて「減った」と答えた人 ÷ その設問に答えた人"},
+    {"key": "increased_rate", "label": "増えた率", "unit": "%", "digits": 0, "better": "down", "tip": "先月と比べて「増えた」と答えた人 ÷ その設問に答えた人"},
+    {"key": "wants_rate", "label": "自動化したい率", "unit": "%", "digits": 0, "better": "", "tip": "なくしたい・自動化したい業務が「ある」と答えた人 ÷ その設問に答えた人"},
+    {"key": "ask_rate", "label": "依頼したい率", "unit": "%", "digits": 0, "better": "", "tip": "進め方で「改善チームに依頼したい」と答えた人 ÷ 進め方に答えた人"},
+    {"key": "together_rate", "label": "一緒に取り組みたい率", "unit": "%", "digits": 0, "better": "", "tip": "進め方で「学びながら改善チームと一緒に取り組みたい」と答えた人 ÷ 進め方に答えた人"},
+    {"key": "self_only_rate", "label": "自分で取り組みたい率", "unit": "%", "digits": 0, "better": "", "tip": "進め方で「自分で取り組みたい」と答えた人 ÷ 進め方に答えた人"},
+]
+SURVEY_METRIC = {m["key"]: m for m in SURVEY_METRICS}
+SURVEY_KPI_KEYS = ("n", "response_rate", "has_rate", "hours_month", "hours_per_person", "wants_rate")
+SURVEY_PATTERN_ORDER = list(WORK_PATTERNS) + [f"{SHIFT_PATTERN} {t}" for t in SHIFT_TEAMS] + ["未設定"]
+SURVEY_DIMS = (("wp", "Gr・役割"), ("pattern", "勤務形態・班"))
+SURVEY_RANGES = ((3, "直近3か月"), (6, "直近6か月"), (12, "直近12か月"), (0, "すべて"))
+HOURS_BANDS = ["なし"] + list(MONTHLY_TREND_GROUPS["hours"]) + ["未回答"]
+SURVEY_TASK_ROWS = 40
+
+
+def survey_pattern_groups(pattern, team):
+    """勤務形態・班の区分。交代勤務の人は「交代勤務」と「交代勤務 1班」などの両方に入る"""
+    if pattern not in C.WORK_PATTERNS:
+        return ["未設定"]
+    team = clean_team(pattern, team)
+    return [pattern] + ([f"{C.SHIFT_PATTERN} {team}"] if team else [])
+
+def _survey_groups(dim, r):
+    if dim == "wp":
+        return [r.workplace.name if r.workplace else "未設定"]
+    return survey_pattern_groups(r.work_pattern, r.shift_team)
+
+def _member_groups(dim, row):
+    if dim == "wp":
+        return [row["workplace"] or "未設定"]
+    return survey_pattern_groups(row["work_pattern"], row["shift_team"])
+
+def _survey_group_names(dim, responses=(), member=()):
+    if dim != "wp":
+        return list(C.SURVEY_PATTERN_ORDER)
+    names = [w.name for w in Workplace.query.order_by(Workplace.sort, Workplace.id).all()]
+    extra = sorted({g for r in responses for g in _survey_groups(dim, r)} | {g for row in member for g in _member_groups(dim, row)})
+    return names + [x for x in extra if x not in names and x != "未設定"] + ["未設定"]
+
+def survey_metrics(rs):
+    """回答の集まりの指標（割合は、その設問に答えた人が分母。答えた人がいなければ None）"""
+    kpi = C.MONTHLY_KPI
+
+    def rate(key, positive):
+        answered = [r for r in rs if r.answer(key)]
+        return len([r for r in answered if r.answer(key) in positive]) / len(answered) * 100.0 if answered else None
+
+    has_n = len([r for r in rs if r.answer("has") in kpi["has_positive"]])
+    hours = _hours_month(rs)
+    return {
+        "n": len(rs), "has_rate": rate("has", kpi["has_positive"]), "hours_month": hours if rs else None, "hours_per_person": hours / has_n if has_n else None,
+        "decreased_rate": rate("trend", kpi["trend_decreased"]), "increased_rate": rate("trend", kpi["trend_increased"]),
+        "wants_rate": rate("wants", kpi["wants_positive"]), "ask_rate": rate("stance", kpi["ask_positive"]),
+        "together_rate": rate("stance", kpi["together_positive"]), "self_only_rate": rate("stance", kpi["self_only"]),
+        "reason_count": len([r for r in rs if r.answer("decreased_reason").strip()]), "new_count": len([r for r in rs if r.answer("new_tasks").strip()]),
+        "comment_count": len([r for r in rs if (r.comment or "").strip()]),
+    }
+
+def survey_response_rates(member, periods, dim=None):
+    """対象者・回答した対象者・回答率。dim（wp / pattern）を付けると、その区分ごと。{区分: {月度: {...}}}"""
+    out = defaultdict(dict)
+    for p in periods:
+        for row in member:
+            st = member_status(row, p)
+            if st not in ("yes", "no"):
+                continue
+            for grp in (_member_groups(dim, row) if dim else ["all"]):
+                cell = out[grp].setdefault(p, {"members": 0, "answered": 0})
+                cell["members"] += 1
+                cell["answered"] += 1 if st == "yes" else 0
+    for cells in out.values():
+        for cell in cells.values():
+            cell["rate"] = cell["answered"] / cell["members"] * 100.0 if cell["members"] else None
+    return out
+
+def _with_rate(m, cell):
+    cell = cell or {}
+    m.update(response_rate=cell.get("rate"), members=cell.get("members", 0), member_answered=cell.get("answered", 0))
+    return m
+
+def survey_person_changes(prev_rs, rs):
+    """前の月度と両方に答えた人の、1シフトあたり時間の増減（本人どうしで比べる）"""
+    before = {emp_key(r.emp_id): r for r in prev_rs}
+    out = Counter()
+    for r in rs:
+        b = before.get(emp_key(r.emp_id))
+        if b is not None:
+            out["down" if r.hours_shift < b.hours_shift else "up" if r.hours_shift > b.hours_shift else "same"] += 1
+    return out
+
+def hours_band(r):
+    if r.answer("has") not in C.MONTHLY_KPI["has_positive"]:
+        return "なし" if r.answer("has") else "未回答"
+    return next((band for band, labels in C.MONTHLY_TREND_GROUPS["hours"].items() if r.answer("hours") in labels), "未回答")
+
+def _transition(prev_rs, rs, of, order):
+    before = {emp_key(r.emp_id): r for r in prev_rs}
+    counts = Counter((of(before[emp_key(r.emp_id)]), of(r)) for r in rs if emp_key(r.emp_id) in before)
+    used = [x for x in order if any(x in pair for pair in counts)]
+    return {"labels": used, "rows": [[counts.get((a, b), 0) for b in used] for a in used], "total": sum(counts.values())}
+
+def survey_mentioned_tasks(rs, limit=SURVEY_TASK_ROWS):
+    """回答で挙げられた業務名（行っている・なくしたい）。人数・なくしたい人数・挙げた月数・主な Gr・役割・自動化アイテム登録の有無"""
+    vocab = map_vocab()
+    registered = set()
+    for t in Task.query.all():
+        registered |= {pending_key(v, vocab) for v in [t.name, t.monthly_name] + task_aliases(t.id) if v}
+    found = {}
+    for r in rs:
+        person = emp_key(r.emp_id)
+        for field in ("task_names", "wants_tasks"):
+            for raw in task_names(r.answer(field)):
+                name = mask_person_names(raw, vocab).strip()
+                k = name_key(name)
+                if len(k) < 2:
+                    continue
+                row = found.setdefault(k, {"name": name, "people": set(), "wants": set(), "periods": set(), "wps": Counter()})
+                if person not in row["people"]:
+                    row["wps"][r.workplace.name if r.workplace else "未設定"] += 1
+                row["people"].add(person)
+                row["periods"].add(r.period)
+                if field == "wants_tasks":
+                    row["wants"].add(person)
+    rows = [{"name": x["name"], "people": len(x["people"]), "wants": len(x["wants"]), "months": len(x["periods"]),
+             "wps": "・".join(w for w, _n in x["wps"].most_common(3)), "registered": pending_key(x["name"], vocab) in registered}
+            for x in found.values()]
+    rows.sort(key=lambda x: (-x["people"], -x["wants"], x["name"]))
+    return {"rows": rows[:limit], "total": len(rows), "registered": sum(1 for x in rows if x["registered"])}
+
+def survey_question_trends(periods):
+    """選択式の設問ごとの、月度ごとの選択肢の割合（基本設問と、追加した設問）。時間は30分・1時間・2時間・4時間の区切りにまとめる"""
+    _all, by_period = _responses_by_period()
+    surveys = {x.period: x for x in MonthlySurvey.query.filter(MonthlySurvey.period.in_(list(periods))).all()} if periods else {}
+    questions = OrderedDict((q["key"], q) for q in C.MONTHLY_CORE_QUESTIONS if q["type"] == "choice")
+    for p in periods:
+        for q in (surveys[p].questions if p in surveys else []):
+            if q.get("type") == "choice" and q.get("key") not in C.MONTHLY_CORE_KEYS:
+                old = questions.get(q["key"])
+                options = list(old["options"]) if old else []
+                questions[q["key"]] = dict(q, options=options + [o for o in q.get("options") or [] if o not in options])
+    out = []
+    for key, q in questions.items():
+        group = C.MONTHLY_TREND_GROUPS.get(key)
+        to_band = {label: band for band, labels in group.items() for label in labels} if group else None
+        counters = []
+        for p in periods:
+            values = [r.answer(key) for r in by_period.get(p, []) if r.answer(key)]
+            counters.append(Counter(to_band[v] for v in values if v in to_band) if to_band else Counter(values))
+        n_list = [sum(c.values()) for c in counters]
+        if not any(n_list):
+            continue
+        options = list(group) if group else list(q.get("options") or [])
+        options += [o for c in counters for o in c if o not in options]
+        out.append({
+            "key": key, "q": q, "core": key in C.MONTHLY_CORE_KEYS, "label": C.MONTHLY_KPI_LABELS.get(key, ""),
+            "note": "30分・1時間・2時間・4時間の区切りにまとめて表示。細かい区分は月別分析で見られます" if group else "",
+            "periods": list(periods), "labels": [period_label(p) for p in periods], "n": n_list,
+            "series": [{"option": o, "counts": [c.get(o, 0) for c in counters], "percents": [round(c.get(o, 0) / n * 100) if n else 0 for c, n in zip(counters, n_list)]} for o in options],
+        })
+    return out
+
+def survey_trend_analysis(periods):
+    """時系列分析: 選んだ期間の月度ごとの指標・回答の続き具合・本人の変化・属性別の推移・挙げられた業務・設問ごとの推移"""
+    all_periods, by_period = _responses_by_period()
+    member = member_rows()
+    rates = survey_response_rates(member, periods).get("all", {})
+    first = periods[0] if periods else None
+    seen = {emp_key(r.emp_id) for p in all_periods if first and p < first for r in by_period[p]}
+    months = []
+    for p in periods:
+        rs = by_period.get(p, [])
+        earlier = [x for x in all_periods if x < p]
+        prev = earlier[-1] if earlier else None
+        prs = by_period.get(prev, []) if prev else []
+        keys, pkeys = {emp_key(r.emp_id) for r in rs}, {emp_key(r.emp_id) for r in prs}
+        m = _with_rate(survey_metrics(rs), rates.get(p))
+        changes = survey_person_changes(prs, rs)
+        hours_by = Counter()
+        for r in rs:
+            hours_by[r.work_pattern if r.work_pattern in C.WORK_PATTERNS else "未設定"] += r.hours_shift * C.shifts_per_month(r.work_pattern)
+        m.update(period=p, label=period_label(p), prev_label=period_label(prev) if prev else "", first_time=len(keys - seen), continued=len(keys & pkeys),
+                 stopped=len(pkeys - keys), change_down=changes["down"], change_same=changes["same"], change_up=changes["up"],
+                 hours_by_pattern={k: round(hours_by.get(k, 0.0), 1) for k in list(C.WORK_PATTERNS) + ["未設定"]})
+        seen |= keys
+        months.append(m)
+    responses = [r for p in periods for r in by_period.get(p, [])]
+    matrix = {}
+    for dim, label in C.SURVEY_DIMS:
+        rr = survey_response_rates(member, periods, dim)
+        rows = []
+        for name in _survey_group_names(dim, responses, member):
+            cells = [_with_rate(survey_metrics([r for r in by_period.get(p, []) if name in _survey_groups(dim, r)]), rr.get(name, {}).get(p)) for p in periods]
+            if any(c["n"] or c["members"] for c in cells):
+                rows.append({"name": name, "cells": cells})
+        matrix[dim] = {"label": label, "rows": rows}
+    return {"months": months, "matrix": matrix, "tasks": survey_mentioned_tasks(responses), "questions": survey_question_trends(periods)}
+
+def survey_month_analysis(period, survey=None):
+    """月別分析: その月度の指標（前の月度との差）・属性別・本人の変化・時間の分布・クロス集計の材料・挙げられた業務"""
+    all_periods, by_period = _responses_by_period()
+    rs = by_period.get(period, [])
+    earlier = [x for x in all_periods if x < period]
+    prev = earlier[-1] if earlier else None
+    prs = by_period.get(prev, []) if prev else []
+    member = member_rows()
+    rates = survey_response_rates(member, [x for x in (prev, period) if x]).get("all", {})
+    now = _with_rate(survey_metrics(rs), rates.get(period))
+    before = _with_rate(survey_metrics(prs), rates.get(prev)) if prev else None
+    groups = {}
+    for dim, label in C.SURVEY_DIMS:
+        rr = survey_response_rates(member, [period], dim)
+        rows = []
+        for name in _survey_group_names(dim, rs, member):
+            sub = [r for r in rs if name in _survey_groups(dim, r)]
+            cell = rr.get(name, {}).get(period)
+            if sub or (cell or {}).get("members"):
+                rows.append(dict(_with_rate(survey_metrics(sub), cell), name=name))
+        groups[dim] = {"label": label, "rows": rows}
+    changes = survey_person_changes(prs, rs)
+    hours = Counter(r.answer("hours") for r in rs if r.answer("hours"))
+    questions = [q for q in (survey.questions if survey else []) if q.get("type") == "choice"]
+    cross = {
+        "questions": [{"key": q["key"], "text": q["text"], "options": list(q.get("options") or []), "labels": option_labels(q)} for q in questions],
+        "dims": [{"key": k, "label": v} for k, v in C.SURVEY_DIMS],
+        "records": [{"wp": _survey_groups("wp", r), "pattern": _survey_groups("pattern", r), "a": {q["key"]: r.answer(q["key"]) for q in questions if r.answer(q["key"])}} for r in rs],
+    }
+    return {
+        "period": period, "prev": prev, "prev_label": period_label(prev) if prev else "", "now": now, "before": before, "groups": groups,
+        "changes": {"down": changes["down"], "same": changes["same"], "up": changes["up"], "total": sum(changes.values())},
+        "has_moves": _transition(prs, rs, lambda r: r.answer("has") or "未回答", ["ある", "ない", "未回答"]),
+        "band_moves": _transition(prs, rs, hours_band, C.HOURS_BANDS),
+        "hours": {"labels": [o for o in C.MONTHLY_HOURS_OPTIONS if hours.get(o)], "counts": [hours[o] for o in C.MONTHLY_HOURS_OPTIONS if hours.get(o)]},
+        "cross": cross, "tasks": survey_mentioned_tasks(rs),
+    }
+
 
 # ----- 活動状況（開始 → 要求定義 → 要件定義 → 作成/伴走 → テスト → 確認 → 完了） -----
 def board_data(tasks, done_limit=8):
@@ -7494,38 +7680,38 @@ def api_employee(emp_id):
 # ----- 集計（要ログイン） -----
 @bp_monthly.route("/results")
 def results():
-    rows = monthly_summary()
+    view = request.args.get("view") or ("month" if request.args.get("period") else "trend")
+    view = view if view in ("trend", "month") else "trend"
+    periods, _by_period = _responses_by_period()
     surveys = MonthlySurvey.query.order_by(MonthlySurvey.period.desc()).all()
-    default_period = rows[-1]["period"] if rows else (surveys[0].period if surveys else current_period())
+    base = dict(view=view, periods=periods, period_labels={p: period_label(p) for p in periods}, metrics=C.SURVEY_METRICS)
+    if view == "trend":
+        last = periods[-1] if periods else current_period()
+        to = parse_period(request.args.get("to") or last)
+        start = parse_period(request.args.get("from") or (periods[-12] if len(periods) > 12 else (periods[0] if periods else last)))
+        start, to = min(start, to), max(start, to)
+        chosen = [p for p in periods if start <= p <= to]
+        data = survey_trend_analysis(chosen)
+        chart = {"months": data["months"], "questions": [{"key": t["key"], "labels": t["labels"], "options": [x["option"] for x in t["series"]], "percents": [x["percents"] for x in t["series"]]} for t in data["questions"]],
+                 "matrix": data["matrix"], "metrics": C.SURVEY_METRICS}
+        return render_template("monthly/results.html", **base, start=start, to=to, chosen=chosen, data=data,
+                               ranges=[(label, periods[-n] if n and len(periods) >= n else (periods[0] if periods else start)) for n, label in C.SURVEY_RANGES],
+                               chart_json=json.dumps(chart, ensure_ascii=False).replace("</", "<\\/"))
+    default_period = periods[-1] if periods else (surveys[0].period if surveys else current_period())
     selected = parse_period(request.args.get("period") or default_period)
     survey = MonthlySurvey.query.filter_by(period=selected).first()
     responses = MonthlyResponse.query.filter_by(period=selected).order_by(MonthlyResponse.workplace_id, MonthlyResponse.name).all()
-    stats = [s for s in (monthly_question_stats(survey, responses) if survey else []) if s["q"]["key"] not in C.MONTHLY_CORE_KEYS or s["q"]["type"] != "choice" or s["q"]["key"] == "hours"]
-    summary = next((r for r in rows if r["period"] == selected), None)
-    trends = monthly_question_trends()
-    trends_json = [{"key": t["q"]["key"], "labels": t["labels"], "options": [x["option"] for x in t["series"]], "percents": [x["percents"] for x in t["series"]]} for t in trends]
-    chart = {
-        "labels": [r["label"] for r in rows],
-        "n": [r["n"] for r in rows],
-        **_rounded_series(rows, "hours_month", "has_rate", "decreased_rate", "wants_rate", "ask_rate", "together_rate", "self_only_rate"),
-    }
+    month = survey_month_analysis(selected, survey)
+    month_periods = sorted({x.period for x in surveys} | set(periods), reverse=True)
+    i = month_periods.index(selected) if selected in month_periods else -1
+    chart = {"groups": month["groups"], "hours": month["hours"], "cross": month["cross"], "metrics": C.SURVEY_METRICS}
     return render_template(
-        "monthly/results.html",
-        rows=rows,
-        surveys=surveys,
-        survey=survey,
-        selected=selected,
-        selected_label=period_label(selected),
-        summary=summary,
-        responses=responses,
-        stats=stats,
-        comments=[r for r in responses if (r.comment or "").strip()],
-        trends=trends,
-        trends_json=json.dumps(trends_json, ensure_ascii=False),
-        wp_trends=monthly_workplace_trends(), pattern_trends=monthly_pattern_trends(),
-        chart_json=json.dumps(chart, ensure_ascii=False),
+        "monthly/results.html", **base, month=month, survey=survey, selected=selected, selected_label=period_label(selected),
+        month_periods=month_periods, newer=month_periods[i - 1] if i > 0 else None, older=month_periods[i + 1] if 0 <= i < len(month_periods) - 1 else None,
+        responses=responses, stats=monthly_question_stats(survey, responses) if survey else [],
+        comments=[r for r in responses if (r.comment or "").strip()], qnos=question_numbers(survey.questions) if survey else {},
         choice_keys=[q["key"] for q in (survey.questions if survey else []) if q["type"] == "choice"],
-        qnos=question_numbers(survey.questions) if survey else {},
+        chart_json=json.dumps(chart, ensure_ascii=False).replace("</", "<\\/"),
     )
 
 # ----- 設問の編集（要ログイン） -----
@@ -8594,7 +8780,7 @@ TEMPLATES = {
         <li class="nav-item"><a class="nav-link nav-link-admin {% if request.endpoint == 'main.index' %}active{% endif %}" href="{{ url_for('main.index') }}">ダッシュボード</a></li>
         <li class="nav-item"><a class="nav-link nav-link-admin {% if bp == 'cases' %}active{% endif %}" href="{{ url_for('cases.index') }}">改善案件一覧</a></li>
         <li class="nav-item"><a class="nav-link nav-link-admin {% if bp == 'bizmap' %}active{% endif %}" href="{{ url_for('bizmap.index') }}">業務マップ</a></li>
-        <li class="nav-item"><a class="nav-link nav-link-admin {% if request.endpoint in ('monthly.results', 'monthly.survey_admin') %}active{% endif %}" href="{{ url_for('monthly.results') }}">月次集計</a></li>
+        <li class="nav-item"><a class="nav-link nav-link-admin {% if request.endpoint in ('monthly.results', 'monthly.survey_admin') %}active{% endif %}" href="{{ url_for('monthly.results') }}">アンケート結果分析</a></li>
         <li class="nav-item"><a class="nav-link nav-link-admin {% if request.endpoint == 'admin.employees' %}active{% endif %}" href="{{ url_for('admin.employees') }}">人財一覧</a></li>
         <li class="nav-item"><a class="nav-link nav-link-admin {% if bp == 'export' %}active{% endif %}" href="{{ url_for('export.index') }}">CSV出力</a></li>
         <li class="nav-item"><a class="nav-link nav-link-admin {% if bp == 'admin' and request.endpoint != 'admin.employees' %}active{% endif %}" href="{{ url_for('admin.index') }}">管理</a></li>
@@ -10105,7 +10291,7 @@ TEMPLATES = {
 {% block title %}月次アンケートの設問{% endblock %}
 {% block content %}
 <nav aria-label="breadcrumb"><ol class="breadcrumb small mb-2">
-  <li class="breadcrumb-item"><a href="{{ url_for('monthly.results', period=period) }}">月次集計</a></li>
+  <li class="breadcrumb-item"><a href="{{ url_for('monthly.results', view='month', period=period) }}">アンケート結果分析</a></li>
   <li class="breadcrumb-item active">設問の編集</li>
 </ol></nav>
 <div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">
@@ -10780,127 +10966,256 @@ TEMPLATES = {
 {% endblock %}
 ''',
     'monthly/results.html': r'''{% extends "base.html" %}
-{% block title %}月次アンケート 集計{% endblock %}
-{% macro trend_table(head, trends) -%}
-<div class="card mb-2"><div class="card-body">
-  <div class="table-responsive">
-  <table class="table table-sm trend-table mb-0">
-    <thead><tr><th>{{ head }}</th>{% for l in trends.labels %}<th class="text-end">{{ l|replace('年', '/')|replace('月度', '') }}</th>{% endfor %}</tr></thead>
-    <tbody>
-    {% for row in trends.rows %}
-    <tr>
-      <td>{{ caller(row) }}</td>
-      {% for c in row.cells %}
-      <td class="text-end">{% if c.n %}<div>{{ '%.0f'|format(c.has_rate) }}%</div><div class="cell-sub">{{ '%.0f'|format(c.hours_month) }} h・{{ c.n }}人</div>{% else %}<span class="text-muted">－</span>{% endif %}</td>
-      {% endfor %}
-    </tr>
-    {% else %}
-    <tr><td colspan="{{ 1 + trends.labels|length }}" class="text-muted">回答はまだありません</td></tr>
-    {% endfor %}
-    </tbody>
-  </table>
-  </div>
-</div></div>
+{% block title %}アンケート結果分析{% endblock %}
+{% macro num(v, digits=0) -%}{% if v is none %}－{% else %}{{ ('%.' ~ digits ~ 'f')|format(v) }}{% endif %}{%- endmacro %}
+{% macro val(v, m) -%}{{ num(v, m.digits) }}{% if v is not none and m.unit != '人' %}{{ m.unit }}{% endif %}{%- endmacro %}
+{% macro delta(cur, prev, m) -%}
+{%- if cur is not none and prev is not none -%}
+{%- set d = cur - prev -%}
+{%- set good = (d > 0 and m.better == 'up') or (d < 0 and m.better == 'down') -%}
+{%- set bad = (d < 0 and m.better == 'up') or (d > 0 and m.better == 'down') -%}
+<span class="sa-delta{% if good %} is-good{% elif bad %} is-bad{% endif %}">{{ '▲' if d > 0 else ('▼' if d < 0 else '±') }}{{ ('%.' ~ m.digits ~ 'f')|format(d|abs) }}{{ 'pt' if m.unit == '%' else m.unit }}</span>
+{%- endif -%}
+{%- endmacro %}
+{% macro kpi(m, cur, prev, note) -%}
+<div class="col-6 col-md-4 col-xl-2">
+  <div class="card stat h-100"><div class="card-body">
+    <div class="stat-head"><span class="stat-label">{{ m.label }}{{ C.tip(m.tip) }}</span></div>
+    <div class="stat-value">{{ num(cur, m.digits) }}<span class="stat-unit">{{ m.unit }}</span></div>
+    <div class="stat-sub">{{ delta(cur, prev, m) }}{% if cur is not none and prev is not none %} <span class="text-muted">{{ note }}</span>{% endif %}</div>
+  </div></div>
+</div>
+{%- endmacro %}
+{% macro task_table(t) -%}
+<div class="table-responsive">
+<table class="table table-sm align-middle mb-0">
+  <thead><tr><th>業務名</th><th class="text-end">挙げた人{{ C.tip("行っている業務・なくしたい業務のどちらかに書いた人の数") }}</th><th class="text-end">なくしたい人</th><th class="text-end">挙げた月数</th><th>主な Gr・役割</th><th>自動化アイテム登録{{ C.tip("同じ名前（業務マップでまとめた別名を含む）の業務が、自動化アイテムに登録されているか") }}</th></tr></thead>
+  <tbody>
+  {% for x in t.rows %}
+  <tr><td>{{ x.name }}</td><td class="text-end">{{ x.people }}</td><td class="text-end">{{ x.wants or '－' }}</td><td class="text-end">{{ x.months }}</td><td class="small">{{ x.wps }}</td><td>{% if x.registered %}<span class="badge text-bg-success">登録済み</span>{% else %}<span class="text-muted small">未登録</span>{% endif %}</td></tr>
+  {% else %}
+  <tr><td colspan="6" class="text-muted">挙げられた業務はありません</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{%- endmacro %}
+{% macro moves(t) -%}
+<div class="table-responsive">
+<table class="table table-sm align-middle mb-0 sa-move">
+  <thead><tr><th class="small text-muted">前 ＼ この月</th>{% for x in t.labels %}<th class="text-end">{{ x }}</th>{% endfor %}</tr></thead>
+  <tbody>
+  {% for row in t.rows %}{% set i = loop.index0 %}
+  <tr><th>{{ t.labels[i] }}</th>{% for n in row %}<td class="text-end{% if loop.index0 == i %} is-same{% endif %}">{{ n or '' }}</td>{% endfor %}</tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
 {%- endmacro %}
 {% block content %}
-<div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-1">
+<div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-2">
+  <h2 class="mb-0">アンケート結果分析{{ C.tip("月次アンケートの回答を、時系列分析（期間を選んで推移を見る）と月別分析（1つの月度を詳しく見る）で分析します。") }}</h2>
+  <a class="btn btn-outline-primary btn-sm" href="{{ url_for('monthly.survey_admin', period=selected if view == 'month' else None) }}">設問を編集</a>
+</div>
+<ul class="nav nav-tabs sa-tabs mb-3">
+  <li class="nav-item"><a class="nav-link{% if view == 'trend' %} active{% endif %}" href="{{ url_for('monthly.results', view='trend') }}">時系列分析</a></li>
+  <li class="nav-item"><a class="nav-link{% if view == 'month' %} active{% endif %}" href="{{ url_for('monthly.results', view='month') }}">月別分析</a></li>
+</ul>
+
+{% if view == 'trend' %}
+{% if not periods %}
+<div class="alert alert-light border">回答はまだありません。</div>
+{% else %}
+{% set ms = data.months %}
+<form method="get" class="card mb-3"><div class="card-body py-2 d-flex flex-wrap align-items-end gap-2">
+  <input type="hidden" name="view" value="trend">
   <div>
-    <h2 class="mb-0">月次アンケート 集計{{ C.tip("毎月同じ基本設問で、変化を追います。") }}</h2>
+    <label class="form-label small mb-0" for="sa-from">期間</label>
+    <div class="d-flex align-items-center gap-1">
+      <select id="sa-from" name="from" class="form-select form-select-sm w-auto">{% for p in periods %}<option value="{{ p }}"{% if p == start %} selected{% endif %}>{{ period_labels[p] }}</option>{% endfor %}</select>
+      <span>〜</span>
+      <select name="to" class="form-select form-select-sm w-auto" aria-label="期間の終わり">{% for p in periods %}<option value="{{ p }}"{% if p == to %} selected{% endif %}>{{ period_labels[p] }}</option>{% endfor %}</select>
+    </div>
   </div>
-  <div class="d-flex gap-2 flex-wrap">
-    <a class="btn btn-outline-primary btn-sm" href="{{ url_for('monthly.survey_admin', period=selected) }}">設問を編集</a>
-  </div>
+  <button class="btn btn-sm btn-primary">表示</button>
+  <div class="d-flex flex-wrap gap-1">{% for label, f in ranges %}<a class="btn btn-sm {% if f == start and to == periods[-1] %}btn-secondary{% else %}btn-outline-secondary{% endif %}" href="{{ url_for('monthly.results') }}?view=trend&amp;from={{ f }}&amp;to={{ periods[-1] }}">{{ label }}</a>{% endfor %}</div>
+</div></form>
+
+{% if not ms %}
+<div class="alert alert-light border">この期間の回答はありません。</div>
+{% else %}
+{% set first, last = ms[0], ms[-1] %}
+<div class="row g-3 mb-2">
+  {% for key in C.SURVEY_KPI_KEYS %}{% set m = C.SURVEY_METRIC[key] %}{{ kpi(m, last[key], first[key] if ms|length > 1 else none, first.label ~ 'から') }}{% endfor %}
 </div>
 
-{% if rows %}
-<h2 class="section-title">推移{{ C.tip("基本設問の割合と回答者数") }}</h2>
+<h2 class="section-title">回答の状況{{ C.tip("回答者数・回答率と、回答の続き具合（はじめて回答した人、前の月度にも回答した人、前の月度は回答したがその月度は回答しなかった人）") }}</h2>
 <div class="row g-3 mb-2">
-  <div class="col-lg-7">
-    <div class="card h-100"><div class="card-body">
-      <h5 class="card-title">割合の推移（%）</h5>
-      <div class="chart-box" style="height: 280px"><canvas id="chart-rates"></canvas></div>
-    </div></div>
-  </div>
-  <div class="col-lg-5">
-    <div class="card h-100"><div class="card-body">
-      <h5 class="card-title">回答者数と推計月間時間</h5>
-      <div class="chart-box" style="height: 280px"><canvas id="chart-volume"></canvas></div>
-    </div></div>
-  </div>
-  <div class="col-12">
-    <div class="card"><div class="card-body">
-      <div class="table-responsive">
-      <table class="table table-sm align-middle mb-0">
-        <thead><tr>
-          <th>月度</th><th class="text-end">回答者{{ C.tip("「うち対象者」は回答者に対象外の人が含まれるときだけ出ます。") }}</th><th class="text-end">回答率{{ C.tip("回答率は、その月までに人財一覧に載った人（初めて回答した月から。「対象外」にした人を除く）のうち、その月に回答した人の割合です（下の小さい数字が 回答した対象者／対象者）。") }}</th><th class="text-end">PCの定型・定期業務あり</th><th class="text-end">推計 月間時間{{ C.tip("推計月間時間 ＝ 1シフトあたり時間の換算値 × " ~ C.SHIFTS_PER_MONTH ~ "（1か月の出勤日数の目安）。") }}</th>
-          <th class="text-end">減った{{ C.tip("減った・増えた・自動化したいは ① で「ある」と答えた人のうちの割合です（その設問に答えた人が分母）。") }}</th><th class="text-end">増えた</th><th class="text-end">自動化したい</th><th class="text-end">依頼したい{{ C.tip("依頼したい・一緒に取り組みたい・自分で取り組みたいは「なくしたい業務がある」と答えた人のうちの割合です（その設問に答えた人が分母）。") }}</th><th class="text-end">一緒に取り組みたい</th><th class="text-end">自分で取り組みたい</th><th class="text-end">新規業務</th><th class="text-end">コメント</th>
-        </tr></thead>
-        <tbody>
-        {% for r in rows %}
-        <tr class="{% if r.period == selected %}table-primary{% endif %}">
-          <td><a href="{{ url_for('monthly.results', period=r.period) }}#detail">{{ r.label }}</a></td>
-          <td class="text-end">{{ r.n }}{% if r.member_answered != r.n %}<div class="small text-muted">うち対象者 {{ r.member_answered }}</div>{% endif %}</td>
-          <td class="text-end">{% if r.response_rate is not none %}{{ '%.0f'|format(r.response_rate) }}%<div class="small text-muted">{{ r.member_answered }}／{{ r.members }}</div>{% else %}－{% endif %}</td>
-          <td class="text-end">{{ '%.0f'|format(r.has_rate) }}%</td>
-          <td class="text-end">{{ '%.0f'|format(r.hours_month) }} h</td>
-          <td class="text-end">{{ '%.0f'|format(r.decreased_rate) }}%</td>
-          <td class="text-end">{{ '%.0f'|format(r.increased_rate) }}%</td>
-          <td class="text-end">{{ '%.0f'|format(r.wants_rate) }}%</td>
-          <td class="text-end">{{ '%.0f'|format(r.ask_rate) }}%</td>
-          <td class="text-end">{{ '%.0f'|format(r.together_rate) }}%</td>
-          <td class="text-end">{{ '%.0f'|format(r.self_only_rate) }}%</td>
-          <td class="text-end">{{ r.new_count }}</td>
-          <td class="text-end">{{ r.comment_count }}</td>
-        </tr>
-        {% endfor %}
-        </tbody>
-      </table>
-      </div>
-    </div></div>
-  </div>
+  <div class="col-lg-6"><div class="card h-100"><div class="card-body">
+    <h5 class="card-title">回答者数と回答率</h5>
+    <div class="chart-box" style="height: 260px"><canvas id="sa-resp"></canvas></div>
+  </div></div></div>
+  <div class="col-lg-6"><div class="card h-100"><div class="card-body">
+    <h5 class="card-title">回答の続き具合</h5>
+    <div class="chart-box" style="height: 260px"><canvas id="sa-continuity"></canvas></div>
+  </div></div></div>
 </div>
 
-<h2 class="section-title">設問ごとの推移{{ C.tip("選択肢の割合（%）が月度ごとにどう動いたか") }}</h2>
+<h2 class="section-title">PCの定型・定期業務の量と変化{{ C.tip("推計 月間時間（勤務形態で積み上げ）と1人あたりの時間。右は、前の月度とその月度の両方に答えた人の1シフトあたりの時間を、本人どうしで比べた増減") }}</h2>
 <div class="row g-3 mb-2">
-  {% for t in trends %}
-  <div class="col-lg-6">
-    <div class="card h-100"><div class="card-body">
-      <h5 class="card-title mb-0">{{ t.q.text }}{% if t.note %}{{ C.tip(t.note) }}{% endif %}</h5>
-      <div class="small text-muted mb-2">{{ t.label }}</div>
-      <div class="chart-box" style="height: 200px"><canvas id="chart-q-{{ t.q.key }}"></canvas></div>
-      <div class="table-responsive mt-2">
-      <table class="table table-sm trend-table mb-0">
-        <thead><tr><th></th>{% for l in t.labels %}<th class="text-end">{{ l|replace('年', '/')|replace('月度', '') }}</th>{% endfor %}</tr></thead>
-        <tbody>
-        {% for s in t.series %}
-        <tr><td>{{ s.option }}</td>{% for v in s.percents %}<td class="text-end">{{ v }}%</td>{% endfor %}</tr>
-        {% endfor %}
-        <tr class="text-muted"><td>回答数</td>{% for n in t.n %}<td class="text-end">{{ n }}</td>{% endfor %}</tr>
-        </tbody>
-      </table>
-      </div>
-    </div></div>
+  <div class="col-lg-6"><div class="card h-100"><div class="card-body">
+    <h5 class="card-title">推計 月間時間と1人あたり</h5>
+    <div class="chart-box" style="height: 260px"><canvas id="sa-hours"></canvas></div>
+  </div></div></div>
+  <div class="col-lg-6"><div class="card h-100"><div class="card-body">
+    <h5 class="card-title">本人どうしで比べた時間の増減（人）</h5>
+    <div class="chart-box" style="height: 260px"><canvas id="sa-change"></canvas></div>
+  </div></div></div>
+</div>
+
+<h2 class="section-title">割合の推移{{ C.tip("定型・定期業務あり率、先月比（減った・増えた）、自動化したい率、進め方の割合") }}</h2>
+<div class="card mb-2"><div class="card-body">
+  <div class="chart-box" style="height: 300px"><canvas id="sa-rates"></canvas></div>
+</div></div>
+
+<h2 class="section-title">月度ごとの指標{{ C.tip("見出しの ⓘ に計算のしかた。月度を押すと月別分析を開きます") }}</h2>
+<div class="card mb-2"><div class="card-body"><div class="table-responsive">
+<table class="table table-sm align-middle mb-0 sa-table">
+  <thead><tr><th>月度</th>{% for m in metrics %}<th class="text-end">{{ m.label }}{{ C.tip(m.tip) }}</th>{% endfor %}<th class="text-end">はじめて</th><th class="text-end">続けて</th><th class="text-end">やめた</th><th class="text-end">減った理由</th><th class="text-end">増えた業務</th><th class="text-end">コメント</th></tr></thead>
+  <tbody>
+  {% for r in ms|reverse %}
+  <tr>
+    <td><a href="{{ url_for('monthly.results', view='month', period=r.period) }}">{{ r.label }}</a></td>
+    {% for m in metrics %}<td class="text-end">{{ val(r[m.key], m) }}{% if m.key == 'n' and r.member_answered != r.n %}<div class="small text-muted">うち対象者 {{ r.member_answered }}</div>{% endif %}{% if m.key == 'response_rate' and r.members %}<div class="small text-muted">{{ r.member_answered }}／{{ r.members }}</div>{% endif %}</td>{% endfor %}
+    <td class="text-end">{{ r.first_time }}</td><td class="text-end">{{ r.continued }}</td><td class="text-end">{{ r.stopped }}</td>
+    <td class="text-end">{{ r.reason_count }}</td><td class="text-end">{{ r.new_count }}</td><td class="text-end">{{ r.comment_count }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div></div></div>
+
+<h2 class="section-title">属性別の推移{{ C.tip("Gr・役割、勤務形態・班ごとに、選んだ指標を月度ごとに並べます（色が濃いほど値が大きい）。回答率は人財一覧の Gr・役割・勤務形態・班で、ほかの指標はその月の回答で選んだもので数えます。交代勤務の人は「交代勤務」と班の両方の行に入ります") }}</h2>
+<div class="card mb-2"><div class="card-body">
+  <div class="d-flex flex-wrap gap-2 mb-2">
+    <select class="form-select form-select-sm w-auto" id="sa-matrix-dim" aria-label="区分">{% for k, label in C.SURVEY_DIMS %}<option value="{{ k }}">{{ label }}</option>{% endfor %}</select>
+    <select class="form-select form-select-sm w-auto" id="sa-matrix-metric" aria-label="指標">{% for m in metrics %}<option value="{{ m.key }}"{% if m.key == 'has_rate' %} selected{% endif %}>{{ m.label }}</option>{% endfor %}</select>
   </div>
+  <div class="table-responsive"><table class="table table-sm align-middle mb-0 sa-matrix" id="sa-matrix"></table></div>
+</div></div>
+
+<h2 class="section-title">挙げられた業務{{ C.tip("期間中の回答で、行っている業務・なくしたい業務として挙げられた名前。挙げた人の多い順") }}<span class="section-sub">{{ data.tasks.total }} 件{% if data.tasks.total > data.tasks.rows|length %}（上位 {{ data.tasks.rows|length }} 件）{% endif %}・自動化アイテム登録済み {{ data.tasks.registered }} 件</span></h2>
+<div class="card mb-2"><div class="card-body">{{ task_table(data.tasks) }}</div></div>
+
+<h2 class="section-title">設問ごとの推移{{ C.tip("選択式の設問ごとに、選択肢の割合（%）が月度ごとにどう動いたか。追加した設問も出します") }}</h2>
+<div class="row g-3 mb-2">
+  {% for t in data.questions %}
+  <div class="col-lg-6"><div class="card h-100"><div class="card-body">
+    <h5 class="card-title mb-0">{{ t.q.text }}{% if t.note %}{{ C.tip(t.note) }}{% endif %}</h5>
+    <div class="small text-muted mb-2">{{ t.label or '追加した設問' }}</div>
+    <div class="chart-box" style="height: 200px"><canvas id="chart-q-{{ t.key }}"></canvas></div>
+    <div class="table-responsive mt-2"><table class="table table-sm trend-table mb-0">
+      <thead><tr><th></th>{% for l in t.labels %}<th class="text-end">{{ l|replace('年', '/')|replace('月度', '') }}</th>{% endfor %}</tr></thead>
+      <tbody>
+      {% for x in t.series %}<tr><td>{{ x.option }}</td>{% for v in x.percents %}<td class="text-end">{{ v }}%</td>{% endfor %}</tr>{% endfor %}
+      <tr class="text-muted"><td>回答数</td>{% for n in t.n %}<td class="text-end">{{ n }}</td>{% endfor %}</tr>
+      </tbody>
+    </table></div>
+  </div></div></div>
   {% endfor %}
 </div>
-
-<h2 class="section-title">Gr・役割別の推移{{ C.tip("PCの定型・定期業務あり率と推計月間時間\n上段がPCの定型・定期業務あり率、下段が推計月間時間と回答者数です。") }}</h2>
-{% call(row) trend_table('Gr・役割', wp_trends) %}{{ row.workplace.name }}{% endcall %}
-
-<h2 class="section-title">勤務形態別の推移{{ C.tip("普通勤務と交代勤務の違い\n勤務形態はその月の回答で選んだものです。「未設定」は勤務形態を聞く前の回答です。") }}</h2>
-{% call(row) trend_table('勤務形態', pattern_trends) %}{{ row.pattern }}{% endcall %}
+{% endif %}
 {% endif %}
 
-<h2 class="section-title" id="detail">月度の詳細
-  <form method="get" class="d-inline-flex align-items-center ms-1">
-    <select name="period" class="form-select form-select-sm" onchange="this.form.submit()" style="width: auto">
-      {% for s in surveys %}<option value="{{ s.period }}" {% if s.period == selected %}selected{% endif %}>{{ s.period_label }}</option>{% endfor %}
-      {% if not surveys %}<option value="{{ selected }}">{{ selected_label }}</option>{% endif %}
-    </select>
-  </form>
-  <span class="section-sub">{% if summary %}回答 {{ summary.n }} 人{% if summary.member_answered != summary.n %}（うち対象者 {{ summary.member_answered }} 人）{% endif %}{% if summary.response_rate is not none %}・回答率 {{ '%.0f'|format(summary.response_rate) }}%（{{ summary.member_answered }}／{{ summary.members }} 人）{% endif %}{% else %}回答はまだありません{% endif %}</span>
-</h2>
+{% else %}
+<form method="get" class="d-flex flex-wrap align-items-center gap-2 mb-3">
+  <input type="hidden" name="view" value="month">
+  {% if older %}<a class="btn btn-sm btn-outline-secondary" href="{{ url_for('monthly.results', view='month', period=older) }}">‹ 前の月度</a>{% endif %}
+  <select name="period" class="form-select form-select-sm w-auto" onchange="this.form.submit()" aria-label="月度">{% for p in month_periods %}<option value="{{ p }}"{% if p == selected %} selected{% endif %}>{{ C.period_label(p) }}</option>{% endfor %}{% if selected not in month_periods %}<option value="{{ selected }}" selected>{{ selected_label }}</option>{% endif %}</select>
+  {% if newer %}<a class="btn btn-sm btn-outline-secondary" href="{{ url_for('monthly.results', view='month', period=newer) }}">次の月度 ›</a>{% endif %}
+</form>
+{% set now, before = month.now, month.before %}
+<div class="row g-3 mb-2">
+  {% for m in metrics %}{{ kpi(m, now[m.key], before[m.key] if before else none, month.prev_label ~ 'と比べて') }}{% endfor %}
+</div>
+<p class="small text-muted mb-2">回答 {{ now.n }} 人{% if now.member_answered != now.n %}（うち対象者 {{ now.member_answered }} 人）{% endif %}{% if now.members %}・対象者 {{ now.members }} 人{% endif %}</p>
+
+{% if now.n %}
+<h2 class="section-title">回答の状況{{ C.tip("対象者のうち回答した人の割合（Gr・役割は人財一覧のもの）と、その月の回答で選んだ Gr・役割ごとの推計 月間時間") }}</h2>
+<div class="row g-3 mb-2">
+  <div class="col-lg-6"><div class="card h-100"><div class="card-body">
+    <h5 class="card-title">Gr・役割別の回答率</h5>
+    <div class="chart-box" style="height: {{ 70 + 30 * month.groups.wp.rows|length }}px"><canvas id="sa-m-rate"></canvas></div>
+  </div></div></div>
+  <div class="col-lg-6"><div class="card h-100"><div class="card-body">
+    <h5 class="card-title">Gr・役割別の推計 月間時間</h5>
+    <div class="chart-box" style="height: {{ 70 + 30 * month.groups.wp.rows|length }}px"><canvas id="sa-m-hours"></canvas></div>
+  </div></div></div>
+</div>
+
+<h2 class="section-title">属性別の比較{{ C.tip("Gr・役割、勤務形態・班ごとの指標。対象者と回答率は人財一覧の Gr・役割・勤務形態・班で、ほかはその月の回答で選んだもので数えます。交代勤務の人は「交代勤務」と班の両方の行に入ります") }}</h2>
+{% for dim, label in C.SURVEY_DIMS %}{% set grp = month.groups[dim] %}
+<div class="card mb-2"><div class="card-body">
+  <h5 class="card-title">{{ label }}</h5>
+  <div class="table-responsive"><table class="table table-sm align-middle mb-0 sa-table">
+    <thead><tr><th>{{ label }}</th><th class="text-end">対象者</th>{% for m in metrics %}<th class="text-end">{{ m.label }}{{ C.tip(m.tip) }}</th>{% endfor %}</tr></thead>
+    <tbody>
+    {% for r in grp.rows %}
+    <tr><td>{{ r.name }}</td><td class="text-end">{{ r.members or '－' }}</td>{% for m in metrics %}<td class="text-end">{{ val(r[m.key], m) }}</td>{% endfor %}</tr>
+    {% else %}
+    <tr><td colspan="{{ 2 + metrics|length }}" class="text-muted">回答はありません</td></tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+</div></div>
+{% endfor %}
+
+<h2 class="section-title">前の月度からの変化{{ C.tip("前の月度とこの月度の両方に答えた人を、本人どうしで比べます") }}{% if month.prev %}<span class="section-sub">{{ month.prev_label }} → {{ selected_label }}・両方に答えた人 {{ month.changes.total }} 人</span>{% endif %}</h2>
+{% if month.changes.total %}
+<div class="row g-3 mb-2">
+  <div class="col-lg-4"><div class="card h-100"><div class="card-body">
+    <h5 class="card-title">1シフトあたりの時間</h5>
+    <div class="mq-bars">
+      {% for key, label in (('down', '減った'), ('same', '同じ'), ('up', '増えた')) %}{% set n = month.changes[key] %}
+      <div class="mq-bar-row"><div class="mq-bar-label">{{ label }}</div><div class="mq-bar"><span style="width: {{ (n / month.changes.total * 100)|round|int }}%"></span></div><div class="mq-bar-val">{{ n }}<span class="text-muted"> 人</span></div></div>
+      {% endfor %}
+    </div>
+  </div></div></div>
+  <div class="col-lg-4"><div class="card h-100"><div class="card-body">
+    <h5 class="card-title">定型・定期業務の有無の移り変わり</h5>
+    {{ moves(month.has_moves) }}
+  </div></div></div>
+  <div class="col-lg-4"><div class="card h-100"><div class="card-body">
+    <h5 class="card-title">時間の区分の移り変わり</h5>
+    {{ moves(month.band_moves) }}
+  </div></div></div>
+</div>
+{% else %}
+<p class="text-muted small">前の月度と両方に答えた人はいません。</p>
+{% endif %}
+
+<h2 class="section-title">1シフトあたりの時間の分布{{ C.tip("②で選んだ区分ごとの人数") }}</h2>
+<div class="card mb-2"><div class="card-body"><div class="chart-box" style="height: 240px"><canvas id="sa-m-dist"></canvas></div></div></div>
+
+{% if month.cross.questions %}
+<h2 class="section-title">クロス集計{{ C.tip("縦と横に選んだもので、回答の人数と行ごとの割合を出します。勤務形態・班では、交代勤務の人は「交代勤務」と班の両方の行に入ります") }}</h2>
+<div class="card mb-2"><div class="card-body">
+  <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
+    <label class="small" for="sa-cross-row">縦</label>
+    <select id="sa-cross-row" class="form-select form-select-sm w-auto">{% for k, label in C.SURVEY_DIMS %}<option value="{{ k }}">{{ label }}</option>{% endfor %}{% for q in month.cross.questions %}<option value="q:{{ q.key }}">{{ qnos.get(q.key, '') }} {{ q.text|truncate(28, True, '…') }}</option>{% endfor %}</select>
+    <label class="small" for="sa-cross-col">横</label>
+    <select id="sa-cross-col" class="form-select form-select-sm w-auto">{% for q in month.cross.questions %}<option value="{{ q.key }}">{{ qnos.get(q.key, '') }} {{ q.text|truncate(28, True, '…') }}</option>{% endfor %}</select>
+  </div>
+  <div class="table-responsive"><table class="table table-sm align-middle mb-0 sa-matrix" id="sa-cross"></table></div>
+</div></div>
+{% endif %}
+
+<h2 class="section-title">挙げられた業務{{ C.tip("この月度の回答で、行っている業務・なくしたい業務として挙げられた名前。挙げた人の多い順") }}<span class="section-sub">{{ month.tasks.total }} 件{% if month.tasks.total > month.tasks.rows|length %}（上位 {{ month.tasks.rows|length }} 件）{% endif %}・自動化アイテム登録済み {{ month.tasks.registered }} 件</span></h2>
+<div class="card mb-2"><div class="card-body">{{ task_table(month.tasks) }}</div></div>
+{% endif %}
+
 {% if survey %}
+<h2 class="section-title">設問ごとの結果{{ C.tip("この月度の設問ごとの回答（選択式は人数と割合、記述式は書かれた内容）") }}</h2>
 <div class="row g-3 mb-3">
   {% for s in stats %}
   <div class="col-lg-6">
@@ -10940,6 +11255,7 @@ TEMPLATES = {
   </div>
 </div>
 
+
 <div class="card"><div class="card-body">
   <h5 class="card-title">回答一覧（{{ responses|length }} 件）</h5>
   <div class="table-responsive">
@@ -10962,50 +11278,127 @@ TEMPLATES = {
 {% else %}
 <div class="alert alert-info">この月度の設問セットはまだありません。<a href="{{ url_for('monthly.survey_admin', period=selected) }}">設問を編集</a>で作成すると回答を受け付けられます。</div>
 {% endif %}
+{% endif %}
 {% endblock %}
 {% block scripts %}
-{% if rows %}
-<script id="monthly-chart" type="application/json">{{ chart_json|safe }}</script>
-<script id="monthly-trends" type="application/json">{{ trends_json|safe }}</script>
+<script id="sa-data" type="application/json">{{ chart_json|safe }}</script>
 <script src="{{ C.CHART_JS }}"></script>
 <script>
 (function () {
-  var d = JSON.parse(document.getElementById("monthly-chart").textContent);
-  var trends = JSON.parse(document.getElementById("monthly-trends").textContent);
+  var d = JSON.parse(document.getElementById("sa-data").textContent);
   chartTheme();
-  var line = function (label, data, color) { return { label: label, data: data, borderColor: color, backgroundColor: color, tension: 0.35, pointRadius: 3, borderWidth: 2.5 }; };
-  new Chart(document.getElementById("chart-rates"), {
-    type: "line",
-    data: { labels: d.labels, datasets: [
-      line("PCの定型・定期業務あり", d.has_rate, "#ff453a"), line("減った", d.decreased_rate, "#30d158"), line("自動化したい", d.wants_rate, "#ff9f0a"),
-      line("改善チームに依頼したい", d.ask_rate, "#bf5af2"), line("一緒に取り組みたい", d.together_rate, "#0a84ff"), line("自分で取り組みたい", d.self_only_rate, "#00a99d")
-    ] },
-    options: { responsive: true, maintainAspectRatio: false, scales: { x: { grid: { display: false }, border: { display: false } }, y: { beginAtZero: true, max: 100, grid: { color: "#ececf0" }, border: { display: false }, ticks: { callback: function (v) { return v + "%"; } } } }, plugins: { legend: { position: "bottom" } } }
-  });
-  new Chart(document.getElementById("chart-volume"), {
-    type: "bar",
-    data: { labels: d.labels, datasets: [
-      { label: "回答者数", data: d.n, backgroundColor: "#0a84ff", yAxisID: "y", borderRadius: 6, borderSkipped: false, barPercentage: 0.6 },
-      { label: "推計 月間時間 (h)", data: d.hours_month, backgroundColor: "#ff9f0a", yAxisID: "y1", borderRadius: 6, borderSkipped: false, barPercentage: 0.6 }
-    ] },
-    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: "bottom" } },
-      scales: { x: { grid: { display: false }, border: { display: false } }, y: { beginAtZero: true, position: "left", grid: { color: "#ececf0" }, border: { display: false } }, y1: { beginAtZero: true, position: "right", grid: { display: false }, border: { display: false } } } }
-  });
-  var palette = ["#0a84ff", "#4da3ff", "#8ec3ff", "#b5d6ff", "#d2e5fb", "#e4edf8", "#eef3fa"];
-  trends.forEach(function (q) {
-    var el = document.getElementById("chart-q-" + q.key);
-    if (!el) return;
-    new Chart(el, {
-      type: "bar",
-      data: { labels: q.labels, datasets: q.options.map(function (o, i) { return { label: o, data: q.percents[i], backgroundColor: palette[i % palette.length], stack: "s", borderRadius: 3, borderSkipped: false, barPercentage: 0.55 }; }) },
-      options: { responsive: true, maintainAspectRatio: false,
-        plugins: { legend: { position: "bottom" }, tooltip: { callbacks: { label: function (c) { return c.dataset.label + ": " + c.parsed.y + "%"; } } } },
-        scales: { x: { stacked: true, grid: { display: false }, border: { display: false } }, y: { stacked: true, beginAtZero: true, suggestedMax: 100, ticks: { callback: function (v) { return v + "%"; } }, grid: { color: "#ececf0" }, border: { display: false } } } }
+  var COL = { blue: "#0a84ff", sky: "#64d2ff", green: "#30d158", orange: "#ff9f0a", purple: "#bf5af2", red: "#ff453a", pink: "#ff6482", teal: "#00a99d", gray: "#aeaeb2" };
+  var X = { grid: { display: false }, border: { display: false } };
+  var PCT = { suggestedMax: 100, ticks: { callback: function (v) { return v + "%"; } } };
+  function Y(extra) { return Object.assign({ beginAtZero: true, grid: { color: "#ececf0" }, border: { display: false } }, extra || {}); }
+  function opts(extra) { return Object.assign({ responsive: true, maintainAspectRatio: false, plugins: { legend: { position: "bottom" } } }, extra || {}); }
+  function draw(id, cfg) { var el = document.getElementById(id); if (el) new Chart(el, cfg); }
+  function round(v, n) { if (v === null || v === undefined) return null; var k = Math.pow(10, n || 0); return Math.round(v * k) / k; }
+  function col(rows, key, n) { return rows.map(function (r) { return round(r[key], n); }); }
+  function line(label, data, color, axis) { return { type: "line", label: label, data: data, borderColor: color, backgroundColor: color, tension: 0.3, pointRadius: 3, borderWidth: 2.5, yAxisID: axis || "y", spanGaps: true }; }
+  function bar(label, data, color, stack, axis) { return { type: "bar", label: label, data: data, backgroundColor: color, borderRadius: 4, borderSkipped: false, barPercentage: 0.6, stack: stack, yAxisID: axis || "y" }; }
+  function stacked(extra) { return opts({ scales: Object.assign({ x: Object.assign({ stacked: true }, X), y: Y({ stacked: true }) }, extra || {}) }); }
+  function esc(v) { return String(v).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
+  function short(label) { return label.replace("年", "/").replace("月度", ""); }
+  var METRIC = {};
+  (d.metrics || []).forEach(function (m) { METRIC[m.key] = m; });
+  function fmt(v, m) { return v === null || v === undefined ? "－" : v.toFixed(m.digits) + (m.unit === "人" ? "" : m.unit); }
+  function heat(v, max) { return typeof v === "number" && max > 0 ? "background: rgba(10, 132, 255, " + (0.06 + 0.4 * v / max).toFixed(3) + ")" : ""; }
+
+  // ---- 時系列分析 ----
+  if (d.months) {
+    var ms = d.months, L = ms.map(function (m) { return short(m.label); });
+    draw("sa-resp", { type: "bar", data: { labels: L, datasets: [bar("回答者数", col(ms, "n"), COL.blue), line("回答率（%）", col(ms, "response_rate"), COL.orange, "y1")] },
+      options: opts({ scales: { x: X, y: Y({ ticks: { precision: 0 } }), y1: Y(Object.assign({ position: "right", grid: { display: false } }, PCT)) } }) });
+    draw("sa-continuity", { type: "bar", data: { labels: L, datasets: [bar("はじめて", col(ms, "first_time"), COL.sky, "a"), bar("続けて", col(ms, "continued"), COL.blue, "a"), bar("やめた", col(ms, "stopped"), COL.gray, "b")] },
+      options: stacked() });
+    var pats = Object.keys(ms[0].hours_by_pattern || {}), pc = [COL.blue, COL.purple, COL.gray];
+    draw("sa-hours", { type: "bar", data: { labels: L, datasets: pats.map(function (p, i) { return bar(p + "（h）", ms.map(function (m) { return m.hours_by_pattern[p] || 0; }), pc[i % pc.length], "h"); })
+        .concat([line("1人あたり（h）", col(ms, "hours_per_person", 1), COL.orange, "y1")]) },
+      options: stacked({ y1: Y({ position: "right", grid: { display: false } }) }) });
+    draw("sa-change", { type: "bar", data: { labels: L, datasets: [bar("減った", col(ms, "change_down"), COL.green, "c"), bar("同じ", col(ms, "change_same"), COL.gray, "c"), bar("増えた", col(ms, "change_up"), COL.red, "c")] },
+      options: stacked() });
+    draw("sa-rates", { type: "line", data: { labels: L, datasets: [
+      line("定型・定期業務あり", col(ms, "has_rate"), COL.red), line("減った", col(ms, "decreased_rate"), COL.green), line("増えた", col(ms, "increased_rate"), COL.pink),
+      line("自動化したい", col(ms, "wants_rate"), COL.orange), line("改善チームに依頼したい", col(ms, "ask_rate"), COL.purple),
+      line("一緒に取り組みたい", col(ms, "together_rate"), COL.blue), line("自分で取り組みたい", col(ms, "self_only_rate"), COL.teal)] },
+      options: opts({ scales: { x: X, y: Y(PCT) } }) });
+    var palette = ["#0a84ff", "#4da3ff", "#8ec3ff", "#b5d6ff", "#d2e5fb", "#e4edf8", "#eef3fa"];
+    (d.questions || []).forEach(function (q) {
+      draw("chart-q-" + q.key, { type: "bar", data: { labels: q.labels.map(short), datasets: q.options.map(function (o, i) { return bar(o, q.percents[i], palette[i % palette.length], "s"); }) },
+        options: opts({ plugins: { legend: { position: "bottom" }, tooltip: { callbacks: { label: function (c) { return c.dataset.label + ": " + c.parsed.y + "%"; } } } },
+          scales: { x: Object.assign({ stacked: true }, X), y: Y(Object.assign({ stacked: true }, PCT)) } }) });
     });
-  });
+    var dimSel = document.getElementById("sa-matrix-dim"), metSel = document.getElementById("sa-matrix-metric"), mtable = document.getElementById("sa-matrix");
+    var renderMatrix = function () {
+      var dim = d.matrix[dimSel.value], m = METRIC[metSel.value], max = 0;
+      dim.rows.forEach(function (r) { r.cells.forEach(function (c) { if (typeof c[m.key] === "number" && c[m.key] > max) max = c[m.key]; }); });
+      var head = "<thead><tr><th>" + esc(dim.label) + "</th>" + L.map(function (l) { return '<th class="text-end">' + esc(l) + "</th>"; }).join("") + "</tr></thead>";
+      var body = dim.rows.map(function (r) {
+        return "<tr><td>" + esc(r.name) + "</td>" + r.cells.map(function (c) {
+          var sub = m.key === "response_rate" && c.members ? '<div class="small text-muted">' + c.member_answered + "／" + c.members + "</div>" : "";
+          return '<td class="text-end" style="' + heat(c[m.key], max) + '">' + fmt(c[m.key], m) + sub + "</td>";
+        }).join("") + "</tr>";
+      }).join("");
+      mtable.innerHTML = head + "<tbody>" + (body || '<tr><td class="text-muted">回答はありません</td></tr>') + "</tbody>";
+    };
+    if (dimSel && metSel && mtable) {
+      dimSel.addEventListener("change", renderMatrix);
+      metSel.addEventListener("change", renderMatrix);
+      renderMatrix();
+    }
+  }
+
+  // ---- 月別分析 ----
+  if (d.groups) {
+    var g = d.groups.wp.rows, names = g.map(function (r) { return r.name; });
+    draw("sa-m-rate", { type: "bar", data: { labels: names, datasets: [bar("回答率（%）", col(g, "response_rate"), COL.blue)] },
+      options: opts({ indexAxis: "y", plugins: { legend: { display: false } }, scales: { x: Y(PCT), y: X } }) });
+    draw("sa-m-hours", { type: "bar", data: { labels: names, datasets: [bar("推計 月間時間（h）", col(g, "hours_month"), COL.orange)] },
+      options: opts({ indexAxis: "y", plugins: { legend: { display: false } }, scales: { x: Y(), y: X } }) });
+    draw("sa-m-dist", { type: "bar", data: { labels: d.hours.labels, datasets: [bar("人数", d.hours.counts, COL.blue)] },
+      options: opts({ plugins: { legend: { display: false } }, scales: { x: X, y: Y({ ticks: { precision: 0 } }) } }) });
+    var cx = d.cross, Q = {}, rowSel = document.getElementById("sa-cross-row"), colSel = document.getElementById("sa-cross-col"), ctable = document.getElementById("sa-cross");
+    cx.questions.forEach(function (q) { Q[q.key] = q; });
+    var labelOf = function (q, v) { var i = q.options.indexOf(v); return i >= 0 ? (q.labels[i] || v) : v; };
+    var renderCross = function () {
+      var rk = rowSel.value, q = Q[colSel.value], rq = rk.indexOf("q:") === 0 ? Q[rk.slice(2)] : null;
+      var order = rq ? rq.options.slice() : [], counts = {}, totals = {}, colTotals = {}, grand = 0;
+      cx.records.forEach(function (rec) {
+        var c = rec.a[q.key];
+        if (!c) return;
+        var rows = rq ? (rec.a[rq.key] ? [rec.a[rq.key]] : []) : rec[rk];
+        if (!rows.length) return;
+        rows.forEach(function (rv) {
+          if (order.indexOf(rv) < 0) order.push(rv);
+          counts[rv] = counts[rv] || {};
+          counts[rv][c] = (counts[rv][c] || 0) + 1;
+          totals[rv] = (totals[rv] || 0) + 1;
+        });
+        colTotals[c] = (colTotals[c] || 0) + 1;
+        grand += 1;
+      });
+      var cols = q.options.filter(function (o) { return colTotals[o]; }).concat(Object.keys(colTotals).filter(function (o) { return q.options.indexOf(o) < 0; }));
+      order = order.filter(function (r) { return totals[r]; });
+      var title = rq ? rq.text : (cx.dims.filter(function (x) { return x.key === rk; })[0] || {}).label || "";
+      var head = "<thead><tr><th>" + esc(title) + "</th>" + cols.map(function (c) { return '<th class="text-end">' + esc(labelOf(q, c)) + "</th>"; }).join("") + '<th class="text-end">計</th></tr></thead>';
+      var body = order.map(function (r) {
+        return "<tr><td>" + esc(rq ? labelOf(rq, r) : r) + "</td>" + cols.map(function (c) {
+          var n = (counts[r] || {})[c] || 0, pct = totals[r] ? Math.round(n / totals[r] * 100) : 0;
+          return '<td class="text-end" style="' + (n ? heat(pct, 100) : "") + '">' + n + '<span class="text-muted small"> ・' + pct + "%</span></td>";
+        }).join("") + '<td class="text-end fw-semibold">' + totals[r] + "</td></tr>";
+      }).join("");
+      var foot = "<tfoot><tr><th>計</th>" + cols.map(function (c) { return '<th class="text-end">' + colTotals[c] + '<span class="text-muted small"> ・' + (grand ? Math.round(colTotals[c] / grand * 100) : 0) + "%</span></th>"; }).join("") + '<th class="text-end">' + grand + "</th></tr></tfoot>";
+      ctable.innerHTML = head + "<tbody>" + (body || '<tr><td class="text-muted" colspan="' + (cols.length + 2) + '">回答はありません</td></tr>') + "</tbody>" + foot;
+    };
+    if (rowSel && colSel && ctable && cx.questions.length) {
+      rowSel.addEventListener("change", renderCross);
+      colSel.addEventListener("change", renderCross);
+      renderCross();
+    }
+  }
 })();
 </script>
-{% endif %}
 {% endblock %}
 ''',
     'survey/index.html': r'''{% extends "base.html" %}
@@ -11177,7 +11570,7 @@ STATIC = {
   });
 })();
 
-// グラフ（Chart.js）の見た目の既定。ダッシュボードと月次集計で同じにする
+// グラフ（Chart.js）の見た目の既定。ダッシュボードとアンケート結果分析で同じにする
 window.chartTheme = function () {
   var d = Chart.defaults;
   d.font.family = getComputedStyle(document.body).fontFamily;
@@ -13406,7 +13799,15 @@ summary { transition: color 0.15s ease; }
 }
 
 
-/* ---- 月次集計（推移の表） ---- */
+/* ---- アンケート結果分析 ---- */
+.sa-tabs .nav-link { font-weight: 600; }
+.sa-delta { font-weight: 600; color: var(--ui-text-2); }
+.sa-delta.is-good { color: var(--ui-green-text); }
+.sa-delta.is-bad { color: var(--ui-red-text); }
+.sa-table th, .sa-table td { white-space: nowrap; }
+.sa-matrix th, .sa-matrix td { white-space: nowrap; }
+.sa-matrix td { min-width: 4.2rem; }
+.sa-move td.is-same { background: #f2f2f7; }
 .trend-table th, .trend-table td { white-space: nowrap; font-variant-numeric: tabular-nums; font-size: 0.85rem; }
 .trend-table .cell-sub { font-size: 0.72rem; color: var(--ui-text-3); }
 .section-title form .form-select { font-weight: 500; }
