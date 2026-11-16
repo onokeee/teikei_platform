@@ -335,8 +335,9 @@ def smoke_bizmap_edit():
         nd = flow.nodes
         into = lambda t: [(nd[a]["text"], nd[a]["type"], e["type"], e["inferred"]) for (a, b), e in flow.edges.items() if b == f"t{t.id}"]
         out_of = lambda t: [(nd[b].get("who") or nd[b]["text"], nd[b]["type"], app_module.edge_label(e)) for (a, b), e in flow.edges.items() if a in (f"t{t.id}", f"o{t.id}")]
-        check(("紙の日報", "info", "info", False) in into(t_day) and not any(x[0] == "各ラインの手書き日報" for x in into(t_day)),
-              f"取り出し元は手順で答えた名前（紙の日報）の情報の箱で、同じものは1つ: {into(t_day)}")
+        check([x for x in into(t_day) if x[1] == "info"] == [("各ラインのリーダー", "info", "info", False)]
+              and app_module.edge_label(flow.edges[(next(a for (a, b) in flow.edges if b == f"t{t_day.id}" and nd[a]["type"] == "info"), f"t{t_day.id}")]) == "手書きの日報（前日の生産実績）／手渡し",
+              f"取り出し元は手順で答えた受け取り元（各ラインのリーダー）の箱で、受け取り元の欄の同じものは1つにまとめ、受け取る情報と受け取り方を線に書く: {into(t_day)}")
         check((t_day.output, "info", "info", True) in into(t_week) and not any(x[0] == "Excel（週報）" for x in into(t_week)),
               f"別の業務のできるもの（日次実績集計表）を使うと、点線（推定）の情報の流れで自動につながる: {into(t_week)}")
         check(("生産管理課", "work", "") in out_of(t_asm) and ("生産管理システム", "info", "") in out_of(t_asm) and not any(x[0] == "他部署" for x in out_of(t_asm)),
@@ -349,18 +350,19 @@ def smoke_bizmap_edit():
         check(not labels & {"他のExcel", "紙の帳票", "人から聞く", "その他", "未設定", "次の業務", "前の業務"}, f"区分名や「未設定」を線のラベルにしない: {labels}")
         steps = app_module.build_task_flow(t_day)
         st = {(steps.nodes[a].get("who") if steps.nodes[a]["cls"] == "work" else steps.nodes[a]["text"], steps.nodes[b].get("who") if steps.nodes[b]["cls"] == "work" else steps.nodes[b]["text"], e["type"], app_module.edge_label(e)) for (a, b), e in steps.edges.items()}
-        check(("紙の日報", "① 各ラインから手書きの日報を集める", "info", "") in st and ("紙の日報", "② 日報の数字を日次実績集計表に転記する", "info", "") in st
+        check(("各ラインのリーダー", "① 各ラインから手書きの日報を集める", "info", "手書きの日報（前日の生産実績）／手渡し") in st
               and ("② 日報の数字を日次実績集計表に転記する", "Excel（日次実績集計表）", "info", "") in st and ("④ 朝会用に印刷して課長に渡す", "製造1課 課長", "work", "前が伝えに行く") in st
               and ("印刷した集計表", "製造1課 課長", "info", "") in st and ("① 各ラインから手書きの日報を集める", "② 日報の数字を日次実績集計表に転記する", "work", "") in st,
-              f"手順図: 帳票 → 手順、手順 → 転記先、渡すもの → 相手の作業（情報の流れ）と 渡す手順 → 相手の作業（仕事の流れ・前が伝えに行く）")
+              f"手順図: 受け取り元 → 手順、手順 → 転記先、渡すもの → 相手の作業（情報の流れ）と 渡す手順 → 相手の作業（仕事の流れ・前が伝えに行く）")
         recip = next(n for n in steps.nodes.values() if n["cls"] == "work" and n["who"] == "製造1課 課長")
-        check(recip["text"] == t_day.purpose, "相手の作業の内容は使いみち（相手が1つなら業務の目的）")
+        check(recip["text"] == "朝会で前日の生産状況を確認するため", "相手の作業の内容は、手順で答えた使いみち（なければ、相手が1つなら業務の目的）")
         steps = app_module.build_task_flow(t_asm)
         st = {(steps.nodes[a].get("who") if steps.nodes[a]["cls"] == "work" else steps.nodes[a]["text"], steps.nodes[b].get("who") if steps.nodes[b]["cls"] == "work" else steps.nodes[b]["text"], e["type"]) for (a, b), e in steps.edges.items()}
         check(("② 生産管理システムに品番ごとの実績を入力する", "生産管理システム", "info") in st and ("システム上の実績データ", "生産管理課", "info") in st,
               "手順図: 入力するシステムは手順から情報の流れ、渡す相手の部署は相手の作業")
         rows = app_module.source_rows(tasks)
-        check(any(r["name"] == "紙の日報" for r in rows), "システム・情報源の表も同じ名前で数える")
+        check(any(r["name"] == "生産管理システム" and len(r["tasks"]) == 4 for r in rows) and not any(r["name"] == "各ラインのリーダー" for r in rows),
+              "システム・情報源の表も手順で答えた名前で数える（人・部署は入れない）")
         wb_saved = {"schema": 2, "nodes": [{"id": f"t{t_day.id}", "text": t_day.name, "type": "work", "cls": "task", "source": "auto"},
                                            {"id": "u_x", "text": "出勤簿の転記（2人）", "type": "work", "cls": "pending", "who": "製造1課", "who_state": "ok", "actor": "team", "source": "auto"},
                                            {"id": "p_unknown", "text": "使う人が分からない", "type": "work", "cls": "warn", "source": "auto"},
@@ -371,8 +373,8 @@ def smoke_bizmap_edit():
         wc = app_module.writeback_candidates(wb_saved, {t.id: t for t in tasks})
         got = sorted(op["field"] + ":" + op["value"] for c in wc for op in c["ops"])
         check(got == ["actors:生産管理課", "next_task:出勤簿の転記"], f"書き戻し: 未登録の業務は後の業務（人数は外す）、だれのある箱から業務へは関わる人、分からない箱は出さない: {got}")
-        src_def = next(s_ for s_ in app_module.task_sources(by_name["不良品発生報告のメール配信"]) if "不良報告書" in s_["name"])
-        check(src_def["method"] != "verbal", f"取り出し元の受け取り方は、名前に合う区分から取る（紙の報告書に「口頭」を付けない）: {src_def}")
+        src_def = next((s_ for s_ in app_module.task_sources(by_name["不良品発生報告のメール配信"]) if "検査員" in s_["name"]), {})
+        check(src_def.get("method") == "hand" and "不良報告書" in src_def.get("info", ""), f"取り出し元の受け取り方は、手順で答えた受け取り方から取る（紙の報告書は手渡し。「口頭」を付けない）: {src_def}")
     with app.app_context():
         check(app_module.users_from_names(["課長", "生産管理課", "顧客", "山田さん", "生産管理システム"]) == ["上司", "他部署", "顧客・社外", "職場内"],
               "渡す相手の名前から利用者の区分を決める（AI が使えないときの予備）")
@@ -556,8 +558,19 @@ def smoke_bizmap_edit():
         t_day, t_week, t_asm, t_def = by_name["日報の実績をExcelの集計表に転記する"], by_name["週報の作成"], by_name["組立実績の日次入力（生産管理システム）"], by_name["不良品発生報告のメール配信"]
         wp1 = t_day.workplace_id
         check(app_module._names("オペレーターの故障連絡（口頭・メモ）", dots=True) == ["オペレーターの故障連絡（口頭・メモ）"] and app_module._names("週報・生産管理システム", dots=True) == ["週報", "生産管理システム"]
-              and any(s_["name"] == "オペレーターの故障連絡（口頭・メモ）" for s_ in app_module.task_sources(by_name["設備故障記録の台帳入力"])),
+              and any(s_["name"] == "オペレーターの故障連絡（口頭・メモ）" for s_ in app_module.task_sources(Task(name="かっこの確かめ用", info_from="オペレーターの故障連絡（口頭・メモ）", steps_json="[]"))),
               "かっこの中の「・」では分けない（「オペレーターの故障連絡（口頭・メモ）」は1つの受け取り元）、かっこの外は分ける")
+        demo_tasks = [t for t in by_name.values() if t.is_demo]
+        named_demo = [t.name for t in demo_tasks if t.names_dict]
+        flow_all = app_module.build_info_flow(demo_tasks)
+        with app_module.show_names():
+            names_src = app_module.build_info_flow(demo_tasks).render()
+        info_shown = [flow_all.shown(a, b, e) for (a, b), e in flow_all.edges.items() if e["type"] == "info"]
+        solid = [k for k, e in flow_all.edges.items() if e["type"] == "work" and not e["inferred"]]
+        check(len(named_demo) == 8 and "木村さん" in names_src and "木村さん" not in flow_all.render() and len(solid) == 2
+              and all(x.get("receive") or x.get("to") or not x.get("input") for t in demo_tasks for x in t.steps)
+              and sum(1 for e in info_shown if e.get("method")) >= 0.85 * len(info_shown),
+              f"デモ: 手順は今の聞き取りの形（受け取り元ごとの受け取り方・やる人・渡す相手と使いみち）。同僚の氏名は8件（業務マップと流れ図だけに出る）、書き戻した仕事の流れが2本（実線）、情報の線の多くに方法: {len(named_demo)}件 {len(solid)}本 {sum(1 for e in info_shown if e.get('method'))}/{len(info_shown)}")
         tr = Task(name="相手の確かめ用の業務", respondent_id=t_day.respondent_id, workplace_id=wp1, purpose="朝会で確認するため", output_users_note="検査・品質保証課 課長、製造1課 課長",
                   steps_json=json.dumps([{"no": 1, "action": "集計表を課長に渡す", "output": "集計表", "to": "課長"}], ensure_ascii=False))
         db.session.add(tr)
@@ -592,7 +605,7 @@ def smoke_bizmap_edit():
               "案件の流れ図でも、保留は点線の枠に「（保留）」、廃止済みは薄い色に「（廃止済み）」")
         f_day = app_module.build_task_flow(t_day)
         roles = {n["text"]: n["cls"] for n in f_day.nodes.values() if n["type"] == "info"}
-        check(roles.get("Excel（日次実績集計表）") == "output" and roles.get("紙の日報") == "source", f"案件の流れ図も業務マップと同じ色の決まり（手順が書き込む情報はできるもの）: {roles}")
+        check(roles.get("Excel（日次実績集計表）") == "output" and roles.get("各ラインのリーダー") == "source", f"案件の流れ図も業務マップと同じ色の決まり（手順が書き込む情報はできるもの）: {roles}")
         tn = Task(name="前後の確かめ用の業務", respondent_id=t_day.respondent_id, workplace_id=wp1, prev_task="日報の実績をExcelの集計表に転記する、各ラインの日報記入\n各ラインの日報記入（紙）",
                   next_task="週報の作成、生産実績の月報作成", steps_json=json.dumps([{"no": 1, "action": "数字を確かめる"}], ensure_ascii=False))
         db.session.add(tn)
@@ -691,8 +704,8 @@ def smoke_bizmap_edit():
         before = {f_week.nodes[a]["text"]: e["inferred"] for (a, b), e in f_week.edges.items() if b == "st1" and e["type"] == "work"}
         in_full = {full.nodes[b]["text"] for (a, b), e in full.edges.items() if a == f"t{t_week.id}" and e["type"] == "work"}
         check({t_month.name, "課内会議資料の作成"} <= in_full <= set(after) and after[t_month.name] is True and after["課内会議資料の作成"] is True
-              and before.get(t_day.name) is True and after.get("月報の作成") is False,
-              f"案件の流れ図: ほかの業務が前後の業務にこの業務を書いていれば、業務マップと同じくその業務の箱と点線でつなぐ（自分の前後の業務は実線のまま）: {after} / {before}")
+              and before.get(t_day.name) is False and after.get("月報の作成") is False,
+              f"案件の流れ図: ほかの業務が前後の業務にこの業務を書いていれば、業務マップと同じくその業務の箱と点線でつなぐ（自分の前後の業務と、業務マップで書き戻したつながりは実線）: {after} / {before}")
         f_day, f_mon = app_module.build_task_flow(t_day), app_module.build_task_flow(t_month)
         day_files = [i for i, n in f_day.nodes.items() if n["type"] == "info" and "日次実績集計表" in n["text"]]
         writers = sorted(a for (a, b) in f_day.edges if day_files and b == day_files[0])
