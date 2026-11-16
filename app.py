@@ -7889,6 +7889,13 @@ def index():
         show_names=Setting.get("board_show_names", "1") != "0",
     )
 
+@bp_board.route("/<int:task_id>")
+def task_detail(task_id):
+    task = _get_or_404(Task, task_id)
+    task_flow, task_legend = flow_view(build_task_flow(task))
+    return render_template("board/detail.html", task=task, task_flow=task_flow, task_legend=task_legend,
+                           show_names=Setting.get("board_show_names", "1") != "0")
+
 def highlights(tasks):
     total_minutes = sum(t.monthly_minutes or 0 for t in tasks)
     saved_minutes = sum(t.saved_minutes for t in tasks)
@@ -9077,7 +9084,7 @@ TEMPLATES = {
     {% for t in hl.recent %}
     <div class="card pb-case"><div class="card-body">
       <div class="stat-head"><span class="stat-tile tile-teal"><i class="bi bi-trophy"></i></span><span class="stat-label">改善事例</span></div>
-      <div class="pb-case-name">{{ t.name }}</div>
+      <div class="pb-case-name"><a href="{{ url_for('cases.detail' if current_user else 'board.task_detail', task_id=t.id) }}">{{ t.name }}</a></div>
       <div class="pb-case-meta">{{ t.workplace.name if t.workplace else '' }}{% if show_names and (t.assignee or t.respondent) %} · {{ t.assignee or t.respondent.name }}{% endif %}{% if t.decision and t.decision != '未定' %} · {{ t.decision }}{% endif %}</div>
       <div class="pb-case-num">月 {{ '%.0f'|format(t.monthly_minutes or 0) }} 分 → {% if t.after_minutes is not none %}{{ '%.0f'|format(t.after_minutes) }} 分{% else %}－{% endif %}{% if t.saved_minutes %}<b class="pb-case-save">−{{ '%.0f'|format(t.saved_minutes) }} 分</b>{% endif %}</div>
       {% if t.result_note %}<div class="pb-case-note">{{ t.result_note }}</div>{% endif %}
@@ -9110,7 +9117,7 @@ TEMPLATES = {
   <ul class="pb-waiting">
     {% for t in b.waiting %}
     <li>
-      <span class="text-truncate">{% if current_user %}<a href="{{ url_for('cases.detail', task_id=t.id) }}">{{ t.name }}</a>{% else %}{{ t.name }}{% endif %}</span>
+      <span class="text-truncate"><a href="{{ url_for('cases.detail' if current_user else 'board.task_detail', task_id=t.id) }}">{{ t.name }}</a></span>
       <span class="pb-dim">{{ t.workplace.name if t.workplace else '' }}{% if show_names and t.respondent %} {{ t.respondent.name }}{% endif %}</span>
     </li>
     {% endfor %}
@@ -9144,13 +9151,92 @@ TEMPLATES = {
     {% if show_names and t.respondent %}<div class="pb-name">{{ t.respondent.name }}</div>{% endif %}
   </div>
   <div class="pb-what">
-    <div class="pb-title">{% if current_user %}<a href="{{ url_for('cases.detail', task_id=t.id) }}">{{ t.name }}</a>{% else %}{{ t.name }}{% endif %}{% if t.is_on_hold %}<span class="pb-pill">保留</span>{% endif %}</div>
+    <div class="pb-title"><a href="{{ url_for('cases.detail' if current_user else 'board.task_detail', task_id=t.id) }}">{{ t.name }}</a>{% if t.is_on_hold %}<span class="pb-pill">保留</span>{% endif %}</div>
     {% set note = t.progress_note or (t.result_note if t.status == '完了' else '') %}
     {% if note %}<div class="pb-note">{{ note }}</div>{% endif %}
   </div>
   <div class="pb-progress">{{ stepper(t) }}</div>
 </div>
 {% endmacro %}
+''',
+    'board/detail.html': r'''{% extends "base.html" %}
+{% from "board/_macros.html" import stepper with context %}
+{% block title %}{{ task.name }}{% endblock %}
+{% block content %}
+<nav aria-label="breadcrumb"><ol class="breadcrumb small mb-2">
+  <li class="breadcrumb-item"><a href="{{ url_for('board.index') }}">活動状況</a></li>
+  <li class="breadcrumb-item active">{{ task.name }}</li>
+</ol></nav>
+
+<div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
+  <div>
+    <h2 class="mb-1">{{ task.name }}</h2>
+    <div class="text-muted">
+      {{ task.workplace.name if task.workplace else 'Gr・役割未設定' }}{% if show_names and task.respondent and task.respondent.name %}／{{ task.respondent.name }}{% endif %}
+      ・ 登録 {{ task.created_at|jpdate }}
+      ・ 月間 <strong>{{ task.monthly_minutes|hours }} 時間</strong>（{{ C.FREQUENCY_HINTS.get(task.frequency, task.frequency) if task.frequency == '不定期' else task.frequency }}／{{ task.duration }}／{{ task.headcount or 1 }}人{% if task.shift %}／{{ task.shift }}{% endif %}）
+    </div>
+  </div>
+  <div>
+    <span class="badge fs-6 text-bg-{{ {'受付':'secondary','対応中':'primary','完了':'success','保留':'warning'}.get(task.status, 'secondary') }}">{{ '順番待ち' if task.status == '受付' else task.status }}</span>
+    {% if task.decision and task.decision != '未定' %}<span class="badge fs-6 text-bg-dark">{{ task.decision }}</span>{% endif %}
+  </div>
+</div>
+
+<div class="card mb-3"><div class="card-body">
+  <h5 class="card-title">進み具合</h5>
+  {{ stepper(task) }}
+  {% set note = task.progress_note or (task.result_note if task.status == '完了' else '') %}
+  {% if note %}<p class="mb-0 mt-2">{{ note }}</p>{% endif %}
+</div></div>
+
+{% if task.status == '完了' %}
+<div class="card mb-3"><div class="card-body">
+  <h5 class="card-title">改善の結果</h5>
+  <p class="mb-1">月 {{ '%.0f'|format(task.monthly_minutes or 0) }} 分 → {% if task.after_minutes is not none %}{{ '%.0f'|format(task.after_minutes) }} 分{% else %}－{% endif %}{% if task.saved_minutes %}<b class="ms-2 text-success">−{{ '%.0f'|format(task.saved_minutes) }} 分／月</b>{% endif %}</p>
+  {% if task.result_note %}<p class="mb-0">{{ task.result_note }}</p>{% endif %}
+</div></div>
+{% endif %}
+
+<div class="row g-3">
+  <div class="col-lg-6">
+    <div class="card h-100"><div class="card-body">
+      <h5 class="card-title">業務の内容</h5>
+      <table class="table table-sm mb-0">
+        {% if task.steps %}<tr><th class="w-25">手順</th><td><ol class="mb-0 ps-3">{% for x in task.steps %}<li>{{ x.action }}</li>{% endfor %}</ol></td></tr>{% endif %}
+        <tr><th class="w-25">目的</th><td>{{ task.purpose or '－' }}</td></tr>
+        <tr><th>できるもの</th><td>{{ task.output or '－' }}</td></tr>
+        <tr><th>使う人</th><td>{{ task.output_users_list|join('・') or '－' }}</td></tr>
+        <tr><th>困りごと</th><td>{{ task.pains_list|join('・') or '－' }}</td></tr>
+        <tr><th>改善の希望</th><td>{{ task.wish or '－' }}</td></tr>
+      </table>
+    </div></div>
+  </div>
+  <div class="col-lg-6">
+    <div class="card h-100"><div class="card-body">
+      <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
+        <div>
+          <h5 class="mb-1">この業務の流れ</h5>
+          {{ task_legend|safe }}
+        </div>
+        <div class="btn-group btn-group-sm flow-toolbar" data-target="task" role="group">
+          <button type="button" class="btn btn-outline-secondary" data-zoom="out">－</button>
+          <button type="button" class="btn btn-outline-secondary" data-zoom="reset">100%</button>
+          <button type="button" class="btn btn-outline-secondary" data-zoom="in">＋</button>
+        </div>
+      </div>
+      {% if task_flow %}
+      <div class="flow-canvas"><div class="flow-inner" id="flow-task" data-def="def-task"><span class="text-muted small">描画中…</span></div></div>
+      <script type="text/plain" id="def-task">{{ task_flow|safe }}</script>
+      {% else %}<p class="text-muted small mb-0">まだ流れがありません</p>{% endif %}
+    </div></div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"></script>
+<script src="{{ url_for('static', filename='flows.js') }}"></script>
+{% endblock %}
 ''',
     'board/index.html': r'''{% extends "base.html" %}
 {% block title %}活動状況{% endblock %}

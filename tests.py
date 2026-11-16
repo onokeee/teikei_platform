@@ -918,6 +918,21 @@ def smoke_board():
 
     code, html = page("/board/")
     check(code == 200 and "デモデータを表示中" in html, "掲示板 200・デモデータを表示中の帯")
+    anon = app.test_client()
+    with app.app_context():
+        t_named = Task.query.filter_by(name="残業予定表の提出").first()
+        t_done = Task.query.filter_by(status="完了").first()
+        named_id, done_id, done_note = t_named.id, t_done.id, t_done.result_note or ""
+    b_anon = anon.get("/board/").data.decode("utf-8")
+    r_d = anon.get(f"/board/{named_id}")
+    h_d = r_d.data.decode("utf-8")
+    h_done = anon.get(f"/board/{done_id}").data.decode("utf-8")
+    check(f'href="/board/{named_id}"' in b_anon and 'href="/cases/' not in b_anon and f'href="/cases/{named_id}"' in html,
+          "活動状況: ログインしていない人は業務名から読み取りだけの詳細へ、推進メンバーは案件詳細へ")
+    check(r_d.status_code == 200 and "残業予定表の提出" in h_d and "pb-steps" in h_d and 'id="def-task"' in h_d and "<form" not in h_d and 'method="post"' not in h_d
+          and "木村さん" not in h_d and "吉川さん" not in h_d and "AI分析" not in h_d and "案件管理" not in h_d and "改善の結果" in h_done and done_note[:8] in h_done
+          and anon.get("/board/999999").status_code == 404,
+          "活動状況の詳細: ログインなしで開け、進み具合・業務の内容・流れ図を読み取りだけで出す（入力欄・ボタン・AI分析・案件管理・ほかの人の氏名はない。完了なら改善の結果）")
     code, html = page("/cases/")
     check("デモデータを表示中" in html and html.count('text-warning-emphasis">デモ</span>') == 26, "改善案件の一覧: 帯とデモの印")
     check(">改善案件一覧</a></li>" in html and ">改善案件</a></li>" not in html, "ヘッダーのタブ名は「改善案件一覧」")
