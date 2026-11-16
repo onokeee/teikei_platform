@@ -2653,7 +2653,17 @@ def _pending_name(text):
     return re.sub(r"[（(]\d+人[）)]\s*$", "", (text or "").strip()).strip()
 
 MAP_SAME_KEY = "map_same"
-SAME_TIP = "名前の書き方が少し違うだけで、同じものかもしれない箱です。図の下の「同じものかもしれない箱」で、まとめるか別のものかを選べます。"
+MAP_SAME_AI_KEY = "map_same_ai"
+SAME_TIP = "同じものかもしれない箱です（名前の書き方・登録した人の Gr・役割・情報の流れから）。図の下の「同じものかもしれない箱」で、まとめるか別のものかを選べます。"
+SAME_CARD_TIP = ("書き方が違うだけで、同じものかもしれない箱です。\n"
+                 "「AIで見直す」を押すと、AI が名前の言い換え・表記ゆれ、登録した人の Gr・役割と班、情報の流れ（どの業務から来てどこへ行くか・受け渡しの方法）、業務の中身まで合わせて、人の感覚で組を探します（理由は各行の ⓘ）。"
+                 "名前の文字だけで見つけた組も AI が確かめ、別のものと判断した組は出しません。\n"
+                 "AI で見直す前の箱や AI が使えないときは、名前の違いが「の」の有無・（Excel）などの書き添え・前に付いた所属・語が1つ入っただけ・並びの違いだけの組を出します。\n"
+                 "まとめると、その名前にそろえて線がつながります（「まとめたもの」から戻せます）。別のものなら「別のもの」を押すと、次から出しません。")
+SAME_RULE_TIP = ("名前の書き方が少し違うだけで、同じものかもしれない箱です（「の」の有無、（Excel）などの書き添え、前に付いた所属、語が1つ入っただけ、など）。"
+                 "まとめると、その名前にそろえて線がつながります（「まとめたもの」から戻せます）。別のものなら「別のもの」を押すと、次から出しません。")
+SAME_CONFIDENCE = ("高", "中", "低")
+SAME_AI_LIMITS = (("info", "情報", 300), ("task", "業務", 120), ("pending", "未登録の業務", 60), ("link", "前後の業務に書かれた名前", 60))
 _TAIL_BRACKET_RX = re.compile(r"^(.*?)[（(]([^（()）]*)[）)]\s*$")
 
 
@@ -2667,6 +2677,17 @@ def _save_same(data):
     Setting.set(MAP_SAME_KEY, json.dumps({"info": data["info"], "distinct": data["distinct"]}, ensure_ascii=False))
     if has_request_context():
         g.pop("_map_same", None)
+
+@_per_request
+def _map_same_ai():
+    data = _json_typed(Setting.get(MAP_SAME_AI_KEY, ""), {})
+    pairs = data.get("pairs") if isinstance(data.get("pairs"), dict) else {}
+    return {"at": str(data.get("at") or ""), "pairs": {k: v for k, v in pairs.items() if isinstance(v, dict) and v.get("a") and v.get("b")}}
+
+def _save_same_ai(data):
+    Setting.set(MAP_SAME_AI_KEY, json.dumps({"at": data["at"], "pairs": data["pairs"]}, ensure_ascii=False))
+    if has_request_context():
+        g.pop("_map_same_ai", None)
 
 def canon_info(name):
     aliases, value, seen = _map_same()["info"], name, set()
@@ -2722,8 +2743,8 @@ def _media_differ(x, y):
     known = [m for m in ((x.get("medium") or "unknown"), (y.get("medium") or "unknown")) if m not in ("unknown", "doc")]
     return len(known) == 2 and known[0] != known[1]
 
-def same_candidates(graph, tasks):
-    distinct, out, seen = set(_map_same()["distinct"]), [], set()
+def _rule_same_candidates(graph, tasks, distinct):
+    out, seen = [], set()
 
     def add(kind, a, b, ids=(), **extra):
         key = same_pair_key(a, b)
@@ -2756,8 +2777,75 @@ def same_candidates(graph, tasks):
                 for o in tasks:
                     if o is not t and looks_same(name, o.name):
                         add("link", name, o.name, task_id=o.id, owner=t.name, field=field)
+    return out
+
+def _same_targets(graph, tasks):
+    """同じものかもしれない組の相手になれるもの: 情報の箱・登録済みの業務・未登録の業務（月次）・前後の業務に書かれた名前"""
+    nodes = graph.get("nodes") or []
+    by_id = {t.id: t for t in tasks}
+    info = [{"kind": "info", "name": n["text"], "node": n} for n in nodes
+            if n.get("type") == "info" and (n.get("text") or "").strip() and n["text"] not in PLACEHOLDER_TEXTS]
+    work = [{"kind": "task", "name": n["text"], "node": n, "task": by_id[_task_id_of(n["id"])]} for n in nodes
+            if n.get("cls") in TASK_CLASSES and n["id"].startswith("t") and _task_id_of(n["id"]) in by_id]
+    pending = [{"kind": "pending", "name": _pending_name(n["text"]), "node": n} for n in nodes if n.get("cls") == "pending" and _pending_name(n["text"])]
+    links, seen = [], set()
+    for t in tasks:
+        for field in ("prev_task", "next_task"):
+            for name in task_names(getattr(t, field)):
+                if (name_key(name), t.id, field) in seen or _match_tasks(name, tasks, exclude=t, limit=1):
+                    continue
+                seen.add((name_key(name), t.id, field))
+                links.append({"kind": "link", "name": name, "node": None, "owner": t, "field": field})
+    return {"info": info, "task": work, "pending": pending, "link": links}
+
+def _resolve_same(rec, targets):
+    """控えた AI の判断を、いまの図の箱に当てはめる（箱が消えた・名前が変わった組は出さない）"""
+    kind, ai = rec.get("kind"), {"confidence": rec.get("confidence") or "中", "reason": rec.get("reason") or ""}
+    find = lambda group, name: [x for x in targets[group] if name_key(x["name"]) == name_key(name)]
+    task_of = lambda tid: next((x for x in targets["task"] if x["task"].id == tid), None)
+    if kind == "info":
+        xs, ys = find("info", rec["a"]), find("info", rec["b"])
+        if xs and ys:
+            return {"kind": kind, "a": xs[0]["name"], "b": ys[0]["name"], "ids": [x["node"]["id"] for x in xs + ys], "ai": ai}
+    elif kind in ("pending", "link"):
+        xs, tx = find(kind, rec["a"]), task_of(rec.get("task_id"))
+        if xs and tx is not None:
+            c = {"kind": kind, "a": xs[0]["name"], "b": tx["name"], "task_id": tx["task"].id, "ids": [x["node"]["id"] for x in xs if x["node"]] + [tx["node"]["id"]], "ai": ai}
+            if kind == "link":
+                c.update(owner=xs[0]["owner"].name, field=xs[0]["field"])
+            return c
+    elif kind == "task":
+        ids = list(rec.get("task_ids") or [])[:2]
+        tx, ty = (task_of(ids[0]), task_of(ids[1])) if len(ids) == 2 else (None, None)
+        if tx is not None and ty is not None and tx is not ty:
+            return {"kind": kind, "a": tx["name"], "b": ty["name"], "task_ids": [tx["task"].id, ty["task"].id], "ids": [tx["node"]["id"], ty["node"]["id"]], "ai": ai}
+    return None
+
+def same_candidates(graph, tasks):
+    """AI が同じかもしれないとした組（確からしさの高い順）と、名前の文字だけで見つけた組のうち AI が別のものとしていない組"""
+    distinct, judged = set(_map_same()["distinct"]), _map_same_ai()["pairs"]
+    out, seen = [], set()
+
+    def keep(c):
+        c["key"] = same_pair_key(c["a"], c["b"])
+        if c["key"] in distinct or c["key"] in seen:
+            return
+        seen.add(c["key"])
+        out.append(c)
+
+    if judged:
+        targets = _same_targets(graph, tasks)
+        rank = lambda r: SAME_CONFIDENCE.index(r.get("confidence")) if r.get("confidence") in SAME_CONFIDENCE else 1
+        for rec in sorted((r for r in judged.values() if r.get("same")), key=rank):
+            c = _resolve_same(rec, targets)
+            if c is not None:
+                keep(c)
+    for c in _rule_same_candidates(graph, tasks, distinct):
+        rec = judged.get(c["key"])
+        if rec is None or rec.get("same"):
+            keep(c)
     marked = {i for c in out for i in c["ids"]}
-    for n in nodes:
+    for n in graph.get("nodes") or []:
         if n.get("id") in marked:
             n["same"] = True
     return out
@@ -2770,6 +2858,158 @@ def same_done():
             if str(tid).isdigit() and int(tid) in names:
                 rows.append({"kind": "task", "alias": a, "canon": names[int(tid)]})
     return rows
+
+# ----- 同じものかもしれない箱を AI に見てもらう（名前の言い換え・登録した人の Gr・役割・情報の流れを合わせて、人の感覚で） -----
+SAME_AI_PROMPT = """あなたは製造部の業務マップを整理する担当です。人によって書き方が違うだけで、実は同じもの（同じ帳票・ファイル・システム・情報、または同じ業務）かもしれない箱の組を、人が見たときの感覚で漏れなく探します。
+
+## 判断の手がかり（いくつも合わせて判断する）
+- 名前: 言い換え・略し方・表記ゆれ（漢字とかな、全角と半角、英字の略語、助詞や「の」の有無、（Excel）などの書き添え、Gr・役割名や部署名を前に付けたもの、語の順番）
+- 登録した人の Gr・役割・班: 同じ Gr・役割（とくに同じ班）の人どうしは、同じものを別の書き方で書いていることが多い
+- 情報の流れ: 同じ業務から出て同じ業務に入る、受け渡しの方法が同じ、種類（Excel・紙・システムなど）が同じ
+- 業務なら: できるもの・情報のもと・手順・頻度が似ている
+## 同じとしないもの
+- 名前は似ていても中身が違うもの（日報と月報、受注と発注、入荷と出荷、不良と進捗、集計表と元の記録など）
+- 種類がはっきり違い、同じ情報とも言えないもの
+- メール・Excel のような区分名だけの名前
+- 情報の箱は、名前がまったく同じなら、すでに1つの箱になっています。書き方が違う組を探してください
+## 組にしてよい種類
+- 情報と情報
+- 業務と業務（別々に登録された同じ業務）
+- 未登録の業務（月次アンケートで挙がった名前）と業務
+- 前後の業務に書かれた名前と業務
+## 機械的に見つけた候補
+名前の文字だけで見つけた組です。1組ずつ確かめ、同じかもしれないなら same: true、別のものなら same: false を必ず返してください。
+## 返し方（JSON だけを返す）
+{"pairs": [{"a": "箱の id", "b": "箱の id", "same": true, "confidence": "高", "reason": "判断の理由"}]}
+- same: true は、同じかもしれないと思う組をすべて返す（候補になかった組も）。人が確かめる価値があれば、確信が低くても confidence を「低」にして返す
+- confidence は「高」「中」「低」のどれか
+- reason は60字以内の日本語で、何が同じ・似ているか（Gr・役割、流れ、名前など）を具体的に書く。人名は書かない
+- 「人が別のものとした組」は返さない"""
+
+
+def _same_ai_payload(graph, targets, rule, distinct):
+    """AI に見せる材料。箱には短い id を付け、人名は伏せる。名前の文字だけの候補と、人が別のものとした組も添える"""
+    nodes = {n["id"]: n for n in graph.get("nodes") or []}
+    edges = [e for e in graph.get("edges") or [] if e.get("type") == "info"]
+    mk = lambda v: mask_person_names(str(v or "")).strip()[:120]
+    gr = lambda n: (n or {}).get("group_title") or ""
+    prefix = {"info": "i", "task": "w", "pending": "p", "link": "l"}
+    index, payload, cut = {}, {}, []
+    for group, label, limit in SAME_AI_LIMITS:
+        items = targets[group]
+        if len(items) > limit:
+            cut.append(f"{label} {limit} 件")
+        rows = []
+        for i, x in enumerate(items[:limit], 1):
+            sid = f"{prefix[group]}{i}"
+            index[sid] = x
+            row = {"id": sid, "名前": mk(x["name"])}
+            if group == "info":
+                n, flows = x["node"], []
+                for e in edges:
+                    if e["to"] == n["id"] and e["from"] in nodes:
+                        w, way = nodes[e["from"]], "作る・出す"
+                    elif e["from"] == n["id"] and e["to"] in nodes:
+                        w, way = nodes[e["to"]], "受け取って使う"
+                    else:
+                        continue
+                    flow = {"業務": mk(w.get("text")), "Gr・役割": gr(w), "向き": way, "方法": vocab_label("methods", e["method"]) if e.get("method") else ""}
+                    if (e.get("note") or "").strip():
+                        flow["中身"] = mk(e["note"])
+                    flows.append(flow)
+                row.update({"種類": vocab_label("media", n["medium"]) if n.get("medium") not in (None, "", "unknown") else "",
+                            "Gr・役割": sorted({f["Gr・役割"] for f in flows if f["Gr・役割"]}), "流れ": flows[:8]})
+            elif group == "task":
+                t = x["task"]
+                row.update({"Gr・役割": t.workplace.name if t.workplace else "", "班": (t.respondent.shift_team if t.respondent else "") or "",
+                            "業務領域": t.domain.name if t.domain else "", "できるもの": mk(t.output), "情報のもと": mk(t.inputs_note or "・".join(t.inputs_list)),
+                            "手順": [mk(st.get("action")) for st in t.steps[:5]], "頻度": t.frequency or ""})
+            elif group == "pending":
+                row["Gr・役割"] = gr(x["node"])
+            else:
+                t = x["owner"]
+                row.update({"書いた業務": mk(t.name), "Gr・役割": t.workplace.name if t.workplace else "", "前後": "前の業務" if x["field"] == "prev_task" else "後の業務"})
+            rows.append(row)
+        payload[label] = rows
+    sid_of, by_key = {}, {}
+    for sid, x in index.items():
+        sid_of.setdefault((x["kind"], name_key(x["name"])), sid)
+        by_key.setdefault(name_key(x["name"]), sid)
+        if x["kind"] == "task":
+            sid_of[("task_id", x["task"].id)] = sid
+
+    def pair_ids(c):
+        if c["kind"] == "info":
+            return sid_of.get(("info", name_key(c["a"]))), sid_of.get(("info", name_key(c["b"])))
+        if c["kind"] in ("pending", "link"):
+            return sid_of.get((c["kind"], name_key(c["a"]))), sid_of.get(("task_id", c.get("task_id")))
+        ids = list(c.get("task_ids") or [])
+        return (sid_of.get(("task_id", ids[0])), sid_of.get(("task_id", ids[1]))) if len(ids) == 2 else (None, None)
+
+    payload["機械的に見つけた候補"] = [list(ids) for ids in map(pair_ids, rule) if all(ids)]
+    payload["人が別のものとした組"] = [[by_key[x], by_key[y]] for x, _, y in (k.partition("|") for k in distinct) if x in by_key and y in by_key]
+    return payload, index, cut
+
+def _same_kind(x, y):
+    if not x or not y or x is y:
+        return None
+    return {frozenset({"info"}): "info", frozenset({"task"}): "task", frozenset({"pending", "task"}): "pending",
+            frozenset({"link", "task"}): "link"}.get(frozenset({x["kind"], y["kind"]}))
+
+def _same_ai_pairs(data, index):
+    """AI の答えのうち、ある箱どうしで、組にしてよい種類のものだけを、名前の組で控える形にする"""
+    out = {}
+    for p in (data.get("pairs") if isinstance(data.get("pairs"), list) else [])[:300]:
+        if not isinstance(p, dict):
+            continue
+        x, y = index.get(str(p.get("a") or "").strip()), index.get(str(p.get("b") or "").strip())
+        kind = _same_kind(x, y)
+        if kind is None:
+            continue
+        if kind in ("pending", "link") and x["kind"] == "task":
+            x, y = y, x
+        if kind != "task" and name_key(x["name"]) == name_key(y["name"]):
+            continue
+        conf = str(p.get("confidence") or "").strip()
+        rec = {"kind": kind, "a": x["name"], "b": y["name"], "same": str(p.get("same")).strip().lower() not in ("false", "0", "no"),
+               "confidence": conf if conf in SAME_CONFIDENCE else "中", "reason": mask_person_names(str(p.get("reason") or "").strip())[:120]}
+        if kind in ("pending", "link"):
+            rec["task_id"] = y["task"].id
+        elif kind == "task":
+            rec["task_ids"] = [x["task"].id, y["task"].id]
+        out[same_pair_key(x["name"], y["name"])] = rec
+    return out
+
+def review_same_with_ai(workplace_id, domain_id):
+    """いま見ている範囲の業務マップを AI に見せ、同じものかもしれない組を控え直す。戻り値は (お知らせの種類, 文)"""
+    tasks, _truncated = _filtered_tasks(domain_id, workplace_id)
+    graph = _merged_graph("info", workplace_id, domain_id)
+    distinct = set(_map_same()["distinct"])
+    with show_names():
+        targets = _same_targets(graph, tasks)
+        rule = _rule_same_candidates(graph, tasks, distinct)
+    payload, index, cut = _same_ai_payload(graph, targets, rule, distinct)
+    if len(index) < 2:
+        return "info", "見直す箱がありません。"
+    budget = max(int(conf.get("OPENAI_MAX_OUTPUT_TOKENS", 4000) or 4000), 8000)
+    text = _call_ai(SAME_AI_PROMPT, json.dumps(payload, ensure_ascii=False), max_tokens=budget)
+    data = _extract_json(text)
+    if not isinstance(data, dict):
+        why = "答えを読み取れませんでした" if text else (_LAST_ERROR["text"] or "原因不明")
+        return "danger", f"AI から同じものかもしれない組を受け取れませんでした（{why}）。もう一度押してください。"
+    pairs = _same_ai_pairs(data, index)
+    names = {name_key(x["name"]) for x in index.values()}
+    kept = {k: v for k, v in _map_same_ai()["pairs"].items() if not (name_key(v["a"]) in names and name_key(v["b"]) in names)}
+    kept.update(pairs)
+    _save_same_ai({"at": _ai_stamp(), "pairs": kept})
+    db.session.commit()
+    rejected = sum(1 for c in rule if c["key"] in pairs and not pairs[c["key"]]["same"])
+    message = f"AI で見直しました。同じものかもしれない組は {sum(1 for v in pairs.values() if v['same'])} 件です。"
+    if rejected:
+        message += f"名前の文字だけで見つけた組のうち {rejected} 件は、別のものと判断しました。"
+    if cut:
+        message += "箱が多いため、" + "・".join(cut) + "までを見ました。"
+    return "success", message
 
 def append_text(existing, value):
     existing = (existing or "").strip()
@@ -6450,6 +6690,8 @@ def index():
         flow_rows=flow_rows(),
         same=merged["same"],
         same_done=same_done(),
+        ai_on=ai_enabled(),
+        same_ai_at=_map_same_ai()["at"],
     )
 
 @bp_bizmap.post("/same")
@@ -6482,6 +6724,17 @@ def same():
     _save_same(data)
     db.session.commit()
     args = {k: v for k, v in (("workplace_id", f.get("workplace_id", type=int)), ("domain_id", f.get("domain_id", type=int))) if v}
+    return redirect(url_for("bizmap.index", **args) + "#same")
+
+@bp_bizmap.post("/same/ai")
+def same_ai():
+    workplace_id, domain_id = request.form.get("workplace_id", type=int), request.form.get("domain_id", type=int)
+    if ai_enabled():
+        level, message = review_same_with_ai(workplace_id, domain_id)
+    else:
+        level, message = "warning", "AI連携が無効です。管理画面の「AI連携」で URL・API キー・モデル名を設定してください。"
+    flash(message, level)
+    args = {k: v for k, v in (("workplace_id", workplace_id), ("domain_id", domain_id)) if v}
     return redirect(url_for("bizmap.index", **args) + "#same")
 
 def _kind_and_scope(payload=None):
@@ -8583,16 +8836,22 @@ TEMPLATES = {
        '取り出し元の情報 → 業務 → できるもの → 渡す相手の作業。箱は作業（四角・だれつき）と情報（媒体の形とアイコン）の2種類、線は仕事の流れ（濃い太い線）と情報の流れ（青い細い線）の2種類で、名前から推定したつながりはそれぞれ点線です。聞き取りで答えた名前で描き、同じ名前は1つの箱にまとめます。Gr・役割ごとの枠に業務を置き、点線は名前から推定したつながり（ある業務のできるものを別の業務が使っている、前後の業務）です。灰色の点線の箱は、月次アンケートで挙がったものの、まだ流れを登録していない業務です。保留中の業務は点線の枠に「（保留）」、廃止した業務は薄い色に「（廃止済み）」を付けます。',
        flows.info, '業務が登録されると図が描かれます。') }}
 
-    {% if same or same_done %}
+    {% if same or same_done or ai_on %}
     <div class="card mt-3" id="same"><div class="card-body">
-      <h5 class="card-title"><i class="bi bi-exclamation-circle-fill same-mark"></i> 同じものかもしれない箱{% if same %} <span class="badge text-bg-warning align-middle">{{ same|length }}</span>{% endif %}{{ C.tip("名前の書き方が少し違うだけで、同じものかもしれない箱です（「の」の有無、（Excel）などの書き添え、前に付いた所属、語が1つ入っただけ、など）。まとめると、その名前にそろえて線がつながります（「まとめたもの」から戻せます）。別のものなら「別のもの」を押すと、次から出しません。") }}</h5>
+      <div class="d-flex flex-wrap justify-content-between align-items-start gap-2">
+        <h5 class="card-title"><i class="bi bi-exclamation-circle-fill same-mark"></i> 同じものかもしれない箱{% if same %} <span class="badge text-bg-warning align-middle">{{ same|length }}</span>{% endif %}{{ C.tip(C.SAME_CARD_TIP if ai_on else C.SAME_RULE_TIP) }}</h5>
+        {% if ai_on %}<form method="post" action="{{ url_for('bizmap.same_ai') }}" class="d-inline">
+          <input type="hidden" name="workplace_id" value="{{ args.get('workplace_id') or '' }}"><input type="hidden" name="domain_id" value="{{ args.get('domain_id') or '' }}">
+          <button class="btn btn-sm btn-outline-primary"{% if same_ai_at %} data-tip="前回: {{ same_ai_at }}"{% endif %}>AIで見直す</button>
+        </form>{% endif %}
+      </div>
       {% if same %}
       <div class="table-responsive"><table class="table table-sm align-middle mb-0 same-table">
         <tbody>
         {% for c in same %}
         <tr>
-          <td class="small text-nowrap text-muted">{{ {'info': '情報', 'pending': '業務（月次）', 'link': '前後の業務', 'task': '業務'}[c.kind] }}{% if c.kind == 'link' %}{{ C.tip("「" ~ c.owner ~ "」の" ~ ('前' if c.field == 'prev_task' else '後') ~ "の業務に書かれた名前と、登録済みの業務です。まとめると、仕事の流れの線でつながります。") }}{% elif c.kind == 'pending' %}{{ C.tip("月次アンケートで挙がった名前と、登録済みの業務です。まとめると、未登録の業務の箱は出なくなります。") }}{% elif c.kind == 'task' %}{{ C.tip("別々に登録された業務です。同じ業務なら、どちらかの登録を案件詳細で取り消してください。") }}{% endif %}</td>
-          <td>「{{ c.a }}」<span class="text-muted">と</span>「{{ c.b }}」</td>
+          <td class="small text-nowrap text-muted">{% if c.ai %}<span class="badge badge-flag me-1">AI</span>{% endif %}{{ {'info': '情報', 'pending': '業務（月次）', 'link': '前後の業務', 'task': '業務'}[c.kind] }}{% if c.kind == 'link' %}{{ C.tip("「" ~ c.owner ~ "」の" ~ ('前' if c.field == 'prev_task' else '後') ~ "の業務に書かれた名前と、登録済みの業務です。まとめると、仕事の流れの線でつながります。") }}{% elif c.kind == 'pending' %}{{ C.tip("月次アンケートで挙がった名前と、登録済みの業務です。まとめると、未登録の業務の箱は出なくなります。") }}{% elif c.kind == 'task' %}{{ C.tip("別々に登録された業務です。同じ業務なら、どちらかの登録を案件詳細で取り消してください。") }}{% endif %}</td>
+          <td>「{{ c.a }}」<span class="text-muted">と</span>「{{ c.b }}」{% if c.ai %}{{ C.tip("AI の判断（確からしさ：" ~ c.ai.confidence ~ "）\n" ~ c.ai.reason) }}{% endif %}</td>
           <td class="text-end text-nowrap">
             {% if c.kind == 'info' %}{{ same_form('merge', 'info', c.a, c.b, label='「' ~ (c.a|truncate(14, True, '…', 0)) ~ '」にまとめる') }} {{ same_form('merge', 'info', c.b, c.a, label='「' ~ (c.b|truncate(14, True, '…', 0)) ~ '」にまとめる') }}
             {% elif c.kind in ('pending', 'link') %}{{ same_form('merge', 'task', c.a, c.b, c.task_id, label='同じ業務としてまとめる') }}
@@ -8608,6 +8867,7 @@ TEMPLATES = {
         <ul class="list-unstyled mb-0 mt-1">{% for r in same_done %}<li class="mb-1">「{{ r.alias }}」→「{{ r.canon }}」 {{ same_form('undo', r.kind, r.alias, label='戻す', cls='btn-link p-0 align-baseline') }}</li>{% endfor %}</ul>
       </details>
       {% endif %}
+      {% if not same and not same_done %}<div class="text-muted small">いまはありません</div>{% endif %}
     </div></div>
     {% endif %}
 
