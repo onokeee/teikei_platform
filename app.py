@@ -2,6 +2,7 @@
 import csv
 import hashlib
 import hmac
+import http.client
 import io
 import json
 import logging
@@ -915,8 +916,9 @@ def previous_choice(emp_id):
 def kpis():
     tasks = Task.query.all()
     people = dx_people()
-    m_periods = member_periods()[-1:]
-    latest = member_stats(member_rows(), m_periods)[m_periods[0]] if m_periods else None
+    m_periods = member_periods()[-2:]
+    m_stats = member_stats(member_rows(), m_periods)
+    latest = m_stats[m_periods[-1]] if m_periods else None
 
     total_minutes = sum(t.monthly_minutes or 0 for t in tasks)
     saved_minutes = sum(t.saved_minutes for t in tasks)
@@ -933,7 +935,8 @@ def kpis():
         "task_count": len(tasks),
         "respondent_count": len(people),
         "response_rate": latest["rate"] if latest else None,
-        "response_period": period_label(m_periods[0]) if m_periods else "",
+        "response_prev_rate": m_stats[m_periods[0]]["rate"] if len(m_periods) > 1 else None,
+        "response_period": period_label(m_periods[-1]) if m_periods else "",
         "response_answered": latest["answered"] if latest else 0,
         "response_members": latest["members"] if latest else 0,
         "total_hours": total_minutes / 60.0,
@@ -1626,7 +1629,7 @@ def survey_question_trends(periods, by_period=None):
         if not any(n_list):
             continue
         options = list(group) if group else list(q.get("options") or [])
-        options += [o for c in counters for o in c if o not in options]
+        options = list(dict.fromkeys(options + [o for c in counters for o in c]))
         out.append({
             "key": key, "q": q, "label": C.MONTHLY_KPI_LABELS.get(key, ""),
             "note": "30分・1時間・2時間・4時間の区切りにまとめて表示。細かい区分は月別分析で見られます" if group else "",
@@ -4409,6 +4412,7 @@ CONNECT_HINTS = (
     (("timed out",), "時間内に応答がありませんでした"),
     (("getaddrinfo failed", "Name or service not known"), "URL のホスト名が見つかりません"),
     (("Connection refused",), "接続先が受け付けていません（ポート番号を確かめてください）"),
+    (("unknown url type", "no host given", "nonnumeric port"), "URL の形が正しくありません（https:// から書いてください）"),
 )
 
 
@@ -4419,6 +4423,10 @@ HTTP_HINTS = {401: "APIキーが無効か、権限がありません", 403: "API
 def _connect_error_text(e):
     text = str(e)
     hint = next((h for keys, h in CONNECT_HINTS if any(k in text for k in keys)), "")
+    if not hint and isinstance(e, ValueError) and not isinstance(e, OSError):
+        hint = "URL の形が正しくありません（https:// から書いてください）"
+    elif not hint and isinstance(e, http.client.HTTPException):
+        hint = "接続先が HTTP として応答していません（URL とポート番号を確かめてください）"
     if "CERTIFICATE_VERIFY_FAILED" in text and "mismatch" not in text:
         hint += ("（OS の証明書ストアにも certifi の一覧にもない発行元です。社内の認証局なら、その証明書をサーバーの「信頼されたルート証明機関」に入れてください）"
                  if _AI_SSL.get("certifi") else "（certifi が入っていないため、OS の証明書ストアだけで確かめています。pip install certifi で入れてください）")
@@ -4501,7 +4509,7 @@ def _ai_turn(system, items, max_tokens=None, tools=None):
             status, payload = _ai_post(_ai_request_body(system, plain, max_tokens, with_reasoning=with_reasoning))
             if status == 200 and isinstance(payload, dict) and not payload.get("error"):
                 _NO_TOOLS.add(key)
-    except OSError as e:
+    except (OSError, ValueError, http.client.HTTPException) as e:
         log.warning("ChatGPT API: 接続できません: %s", e)
         _LAST_ERROR["text"] = _connect_error_text(e)
         return None, []
@@ -4614,8 +4622,10 @@ def _call_ai(system, user_input, max_tokens=None, tools=None, handlers=None):
                 continue
             break
         for c in calls:
-            result = guard.before(c) or _dispatch(handlers, c["name"], c["arguments"])
-            guard.after(c, result)
+            result = guard.before(c)
+            if result is None:
+                result = _dispatch(handlers, c["name"], c["arguments"])
+                guard.after(c, result)
             items.append({"type": "function_call_output", "call_id": c["id"], "output": result["llm_content"]})
         if guard.stuck:
             break
@@ -5661,9 +5671,12 @@ def _seed_employees_and_monthly(resp_by_name, wp_by_name, created):
                 continue
             level = max(0, (i % 3) + 2 - p_idx)
             prev_level = max(0, (i % 3) + 2 - (p_idx - 1))
+            grew = bool(p_idx) and prev_level > 0 and (i + p_idx) % 7 == 0
+            if grew:
+                level = prev_level
             has = "ない" if level == 0 else "ある"
             hours = "" if not level else hours_options[min(len(hours_options) - 1, level * 2 + (1 if i % 4 == 0 else 0))]
-            trend = "減った" if p_idx and level < prev_level else "変わらない"
+            trend = "増えた" if grew else "減った" if p_idx and level < prev_level else "変わらない"
             wants = "ある" if level >= 1 and (i + p_idx) % 3 != 0 else "ない"
             stance_idx = max(0, min(2, (i % 3) - (1 if p_idx >= 2 else 0)))
             r = resp_by_emp.get(emp.emp_id)
@@ -5676,7 +5689,7 @@ def _seed_employees_and_monthly(resp_by_name, wp_by_name, created):
                 "wants": wants,
                 "wants_tasks": ((r.tasks[0].name if r and r.tasks else "日報の実績の転記") if wants == "ある" else ""),
                 "stance": C.STANCE_OPTIONS[stance_idx] if wants == "ある" else "",
-                "new_tasks": "",
+                "new_tasks": "新しい報告フォーマットへの転記" if grew else "",
             }
             if has == "ない":
                 answers = {k: ("ない" if k == "has" else "") for k in answers}
@@ -5782,10 +5795,14 @@ def admin_credentials():
         str(conf.get("ADMIN_PASSWORD", "") or DEFAULT_ADMIN_PASSWORD),
     )
 
+def _same_text(a, b):
+    """2つの文字列が同じか（全角文字が入っていても比べられるよう、バイト列にして比べる）"""
+    return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
+
 def authenticate(user_id, password):
     admin_id, admin_password = admin_credentials()
-    ok_id = hmac.compare_digest((user_id or "").strip(), admin_id)
-    ok_pw = hmac.compare_digest(password or "", admin_password)
+    ok_id = _same_text((user_id or "").strip(), admin_id)
+    ok_pw = _same_text(password or "", admin_password)
     if ok_id and ok_pw:
         return {"emp_id": admin_id, "name": "管理者"}
     return None
@@ -5865,6 +5882,7 @@ def index():
         wish_counts=wish_counts,
         have=have.most_common(6),
         learn=learn.most_common(6),
+        learn_kinds=len(learn),
     )
 
 @bp_main.post("/ai/suggest")
@@ -8544,7 +8562,7 @@ TEMPLATES = {
         <div class="col-8"><input type="text" name="name" class="form-control form-control-sm" value="{{ w.name }}" required aria-label="Gr・役割名"></div>
         <div class="col-4 d-flex gap-1 justify-content-end">
           <button class="btn btn-sm btn-outline-primary">保存</button>
-          <button class="btn btn-sm btn-outline-danger" formaction="{{ url_for('admin.delete_workplace', workplace_id=w.id) }}" {% if used %}disabled title="使われているGr・役割は削除できません"{% endif %} onclick="return confirm('「{{ w.name }}」を削除しますか？')">削除</button>
+          <button class="btn btn-sm btn-outline-danger" formaction="{{ url_for('admin.delete_workplace', workplace_id=w.id) }}" {% if used %}disabled title="使われているGr・役割は削除できません"{% endif %} data-confirm="「{{ w.name }}」を削除しますか？">削除</button>
         </div>
         <div class="col-12 small text-muted">{{ used|join('・') if used else '未使用（削除できます）' }}</div>
       </form>
@@ -8564,7 +8582,7 @@ TEMPLATES = {
         <div class="col-5"><input type="text" name="description" class="form-control form-control-sm" value="{{ d.description }}" placeholder="説明"></div>
         <div class="col-2 d-flex gap-1">
           <button class="btn btn-sm btn-outline-primary">保存</button>
-          <button class="btn btn-sm btn-outline-danger" formaction="{{ url_for('admin.delete_domain', domain_id=d.id) }}" {% if d.tasks or d.children %}disabled{% endif %} onclick="return confirm('「{{ d.name }}」を削除しますか？')">削除</button>
+          <button class="btn btn-sm btn-outline-danger" formaction="{{ url_for('admin.delete_domain', domain_id=d.id) }}" {% if d.tasks or d.children %}disabled{% endif %} data-confirm="「{{ d.name }}」を削除しますか？">削除</button>
         </div>
       </form>
       {% endfor %}
@@ -9916,7 +9934,7 @@ TEMPLATES = {
   {% call card('bi-person-workspace', 'tile-indigo', '伴走中の案件', pr.accompanied, '件', '担当区分が「自主改善」で、改善チームが伴走している案件（完了を除く）') %}自主改善を希望した人と一緒に進めています{% endcall %}
   {% call card('bi-award', 'tile-green', '自主改善で完了', pr.self_done, '件', '担当区分が「自主改善」で完了した案件') %}完了した改善のうち {{ num(pr.independent_rate) }}%（改善チームの直接開発によらない割合）{% endcall %}
   {% call card('bi-hand-thumbs-up', 'tile-blue', '自分で・一緒に取り組みたい率', num(sl.self_rate) if sl else '－', '%', '月次アンケートで「自分で取り組みたい」か「学びながら改善チームと一緒に取り組みたい」と答えた人の割合（いちばん新しい月度）') %}{% if sl %}{{ sl.label }}{% if sp %} {{ delta(sl.self_rate, sp.self_rate, 'pt') }}<span class="text-muted"> 前の月度と比べて</span>{% endif %}{% else %}月次アンケートの回答はまだありません{% endif %}{% endcall %}
-  {% call card('bi-mortarboard', 'tile-orange', '学びたい技術', learn|length, '種類', '自動化アイテム登録で、学びたい技術として挙げられたもの') %}{% for skill, n in learn[:3] %}{{ skill }} {{ n }} 人{% if not loop.last %}・{% endif %}{% else %}まだありません{% endfor %}{% endcall %}
+  {% call card('bi-mortarboard', 'tile-orange', '学びたい技術', learn_kinds, '種類', '自動化アイテム登録で、学びたい技術として挙げられたもの') %}{% for skill, n in learn[:3] %}{{ skill }} {{ n }} 人{% if not loop.last %}・{% endif %}{% else %}まだありません{% endfor %}{% endcall %}
 </div>
 <h5 class="sub-title mt-3 mb-2"><span>意欲と技術{{ C.tip("回答した人（対象外を除く）で数えます。月次アンケートの改善の進め方は、直近" ~ C.STANCE_MONTHS ~ "か月の答えで数えます。") }}</span></h5>
 <div class="row g-3 mb-4">
@@ -9927,7 +9945,7 @@ TEMPLATES = {
 
 <h2 class="section-title">活動定着{{ C.tip("アンケートへの参加と、Gr・役割ごとの活動の広がり") }}</h2>
 <div class="row g-3 mb-2">
-  {% call card('bi-envelope-paper', 'tile-pink', '月次アンケート回答率', num(k.response_rate), '%', '人財一覧のいちばん新しい月度の回答率（回答した対象者 ÷ 対象者）') %}{{ k.response_period }} 対象 {{ k.response_members }} 人中 {{ k.response_answered }} 人{% if sp and sl %} {{ delta(sl.response_rate, sp.response_rate, 'pt') }}{% endif %}{% endcall %}
+  {% call card('bi-envelope-paper', 'tile-pink', '月次アンケート回答率', num(k.response_rate), '%', '人財一覧のいちばん新しい月度の回答率（回答した対象者 ÷ 対象者）') %}{{ k.response_period }} 対象 {{ k.response_members }} 人中 {{ k.response_answered }} 人 {{ delta(k.response_rate, k.response_prev_rate, 'pt') }}{% endcall %}
   {% call card('bi-chat-square-text', 'tile-blue', '月次アンケートの回答', sl.n if sl else 0, '人', 'いちばん新しい月度に回答した人の数（対象外の人の回答も含む）') %}{% if sl %}{{ sl.label }}{% if sl.member_answered != sl.n %}（うち対象者 {{ sl.member_answered }} 人）{% endif %}{% else %}回答はまだありません{% endif %}{% endcall %}
   {% call card('bi-plus-circle', 'tile-teal', '今月の新しい業務', pr.new_this_month, '件', '今月、自動化アイテム登録で登録された業務') %}登録された業務の合計 {{ k.task_count }} 件{% endcall %}
   {% call card('bi-diagram-3', 'tile-purple', '参加している Gr・役割', pr.active_workplaces, '', '回答した人か、登録された業務がある Gr・役割') %}全 {{ pr.workplaces|length }} の Gr・役割のうち{% endcall %}
@@ -10995,7 +11013,7 @@ TEMPLATES = {
   function heat(v, max) { return typeof v === "number" && max > 0 ? "background: rgba(10, 132, 255, " + (0.06 + 0.4 * v / max).toFixed(3) + ")" : ""; }
 
   // ---- 時系列分析 ----
-  if (d.months) {
+  if (d.months && d.months.length) {
     var ms = d.months, L = ms.map(function (m) { return short(m.label); });
     draw("sa-resp", { type: "bar", data: { labels: L, datasets: [bar("回答者数", col(ms, "n"), COL.blue), line("回答率（%）", col(ms, "response_rate"), COL.orange, "y1")] },
       options: opts({ scales: { x: X, y: Y({ ticks: { precision: 0 } }), y1: Y(Object.assign({ position: "right", grid: { display: false } }, PCT)) } }) });
@@ -11340,6 +11358,14 @@ document.addEventListener("DOMContentLoaded", function () {
   document.querySelectorAll("form[data-confirm]").forEach(function (form) {
     form.addEventListener("submit", function (e) {
       if (!window.confirm(form.getAttribute("data-confirm"))) {
+        e.preventDefault();
+      }
+    });
+  });
+  // 1つのフォームに送信先の違うボタンがあるとき（保存と削除など）は、ボタンごとに確認する
+  document.querySelectorAll("button[data-confirm]").forEach(function (button) {
+    button.addEventListener("click", function (e) {
+      if (!window.confirm(button.getAttribute("data-confirm"))) {
         e.preventDefault();
       }
     });
@@ -12582,7 +12608,7 @@ document.addEventListener("DOMContentLoaded", function () {
   }
 
   function applyScale(el) {
-    var svg = el.querySelector("svg");
+    var svg = el && el.querySelector("svg");
     if (!svg) return;
     var vb = svg.viewBox && svg.viewBox.baseVal;
     if (!vb || !vb.width) return;
@@ -13661,10 +13687,13 @@ summary { transition: color 0.15s ease; }
   }
   function optionLabel(v) { return (O.frequency_hints && O.frequency_hints[v]) || v; }
   async function api(method, url, body) {
-    var r = await fetch(url, { method: method, headers: { "Content-Type": "application/json", Accept: "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
-    var j = {};
-    try { j = await r.json(); } catch (e) { j = {}; }
-    j._ok = r.ok;
+    var j = {}, ok = false;
+    try {
+      var r = await fetch(url, { method: method, headers: { "Content-Type": "application/json", Accept: "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
+      ok = r.ok;
+      j = await r.json();
+    } catch (e) { j = {}; }
+    j._ok = ok;
     return j;
   }
   function toast(text) {
@@ -14359,6 +14388,7 @@ summary { transition: color 0.15s ease; }
     found = null; idProblem = ""; confirmedId = "";
     empInput.value = "";
     clearSelects();
+    prefillNote.textContent = "";
     personBox.querySelectorAll(".rq-field").forEach(clearError);
     setIdentity("");
     CFG.monthly = null; CFG.emp = ""; CFG.prefill = "";
