@@ -61,8 +61,6 @@ def join_list(values):
 # ---- パートB 検討する業務（1業務ごと） ----
 OUTPUT_USERS = ["自分", "職場内", "上司", "他部署", "顧客・社外", "分からない"]
 INPUT_SOURCES = ["生産管理システム", "品質システム", "設備データ", "紙の帳票", "メール", "他のExcel", "人から聞く", "その他"]
-FREQUENCIES = ["毎日", "週に数回", "毎週", "毎月", "四半期・年次", "不定期"]
-DURATIONS = ["15分未満", "15〜30分", "30分〜1時間", "1〜2時間", "2時間以上"]
 TOOLS = ["Excel", "Access", "メール", "社内システム", "紙", "VBA・マクロ", "RPA", "その他"]
 NATURES = ["転記・コピー", "集計・グラフ作成", "資料作成", "確認・チェック", "データ取得", "メール・配布", "台帳更新", "判断を伴う"]
 PAINS = ["時間がかかる", "ミスが起きやすい", "同じ情報を何度も入力する", "手順が人によって違う", "急ぎで割り込まれる", "何のためか分からない", "特になし"]
@@ -101,10 +99,13 @@ DURATION_MINUTES = {
     "1〜2時間": 90.0,
     "2時間以上": 150.0,
 }
+FREQUENCIES = list(FREQ_COEF)
+DURATIONS = list(DURATION_MINUTES)
 
 # ---- 案件管理 ----
-STATUSES = ["受付", "対応中", "完了", "保留"]
 STATUS_BADGE = {"受付": "secondary", "対応中": "primary", "完了": "success", "保留": "warning"}
+STATUSES = list(STATUS_BADGE)
+PRIORITY_BADGE = {"高": "danger", "中": "warning", "低": "light text-muted"}
 MERMAID_JS = "https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"
 CHART_JS = "https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"
 DECISIONS = ["未定", "廃止", "統合", "簡素化", "自動化", "高度化", "現状維持"]
@@ -245,6 +246,14 @@ def _json_typed(text, default):
     data = _json_column(text, default)
     return data if isinstance(data, type(default)) else default
 
+def _script_json(value):
+    """<script type="application/json"> に埋め込む JSON（途中の「</」でタグが閉じないように逃がす）"""
+    return json.dumps(value, ensure_ascii=False).replace("</", "<\\/")
+
+def _list_field(column):
+    """複数選択を1つの文字列で持つ列を、リストで読むプロパティ"""
+    return property(lambda self: C.split_list(getattr(self, column)))
+
 
 class Workplace(db.Model):
     __tablename__ = "workplaces"
@@ -282,13 +291,8 @@ class Respondent(db.Model):
     workplace = db.relationship("Workplace", back_populates="respondents")
     tasks = db.relationship("Task", back_populates="respondent", cascade="all, delete-orphan")
 
-    @property
-    def skills(self):
-        return C.split_list(self.c2_skills)
-
-    @property
-    def learn(self):
-        return C.split_list(self.c3_learn)
+    skills = _list_field("c2_skills")
+    learn = _list_field("c3_learn")
 
 _SHOW_NAMES = contextvars.ContextVar("show_names", default=False)
 NAME_FIELDS = ("prev_task", "next_task", "actors", "info_from", "output_users_note", "inputs_note")
@@ -404,25 +408,11 @@ class Task(db.Model):
         self.monthly_minutes = round(coef * minutes * max(head, 1), 1)
         return self.monthly_minutes
 
-    @property
-    def output_users_list(self):
-        return C.split_list(self.output_users)
-
-    @property
-    def inputs_list(self):
-        return C.split_list(self.inputs)
-
-    @property
-    def tools_list(self):
-        return C.split_list(self.tools)
-
-    @property
-    def nature_list(self):
-        return C.split_list(self.nature)
-
-    @property
-    def pains_list(self):
-        return C.split_list(self.pains)
+    output_users_list = _list_field("output_users")
+    inputs_list = _list_field("inputs")
+    tools_list = _list_field("tools")
+    nature_list = _list_field("nature")
+    pains_list = _list_field("pains")
 
     @property
     def steps_done_list(self):
@@ -519,7 +509,7 @@ class Task(db.Model):
     def stage_since(self):
         return self.stage_at or self.stage_dates.get(self.stage_key) or self.created_at
 
-    def set_stage(self, key, by="", note=""):
+    def set_stage(self, key, by=""):
         if key not in C.STAGE_INDEX:
             return False
         changed = key != self.stage_key
@@ -527,7 +517,7 @@ class Task(db.Model):
             now = datetime.now()
             self.stage = key
             self.stage_at = now
-            self.stage_logs.append(StageLog(stage=key, at=now, by=by or "", note=note or ""))
+            self.stage_logs.append(StageLog(stage=key, at=now, by=by or ""))
         if key == "done":
             if self.status != "完了":
                 self.completed_at = datetime.now()
@@ -567,8 +557,7 @@ class Task(db.Model):
 
     @property
     def names_dict(self):
-        data = _json_typed(self.names_json, {})
-        return data if isinstance(data, dict) else {}
+        return _json_typed(self.names_json, {})
 
     def set_names(self, steps=None, fields=None):
         data = self.names_dict
@@ -594,9 +583,7 @@ class Task(db.Model):
     def intake(self):
         return [m for m in _json_typed(self.intake_json, []) if isinstance(m, dict)]
 
-    @property
-    def ai_fields_list(self):
-        return C.split_list(self.ai_fields)
+    ai_fields_list = _list_field("ai_fields")
 
     @property
     def ai_extra_dict(self):
@@ -906,7 +893,7 @@ def newest_period(emp_id):
     return max(monthly or "", _period_of(task_at) or "")
 
 def current_place(emp_id, fallback=None):
-    r = Respondent.query.filter(same_emp_id(Respondent.emp_id, emp_id)).order_by(Respondent.id).first()
+    r = _respondent_for(emp_id)
     for x in (r, find_employee(emp_id), fallback):
         if x is not None and x.workplace_id:
             return x.workplace_id, x.work_pattern or "", x.shift_team or ""
@@ -939,7 +926,6 @@ def kpis():
     filled = [t for t in tasks if t.required_filled]
     verified = [t for t in tasks if t.verified]
     self_improvers = [p for p in people if p["positive"]]
-    automated_or_eliminated = [t for t in completed if t.decision in ("廃止", "自動化")]
     candidates = [t for t in tasks if t.is_candidate]
     domain_rows = domain_analysis()
 
@@ -951,13 +937,11 @@ def kpis():
         "response_answered": latest["answered"] if latest else 0,
         "response_members": latest["members"] if latest else 0,
         "total_hours": total_minutes / 60.0,
-        "annual_hours": total_minutes * 12 / 60.0,
         "saved_annual_hours": saved_minutes * 12 / 60.0,
         "reduction_rate": (saved_minutes / total_minutes * 100.0) if total_minutes else 0.0,
         "status_counts": status_counts,
         "completed_count": len(completed),
         "candidate_count": len(candidates),
-        "automated_count": len(automated_or_eliminated),
         "self_improver_count": len(self_improvers),
         "filled_rate": (len(filled) / len(tasks) * 100.0) if tasks else 0.0,
         "verified_rate": (len(verified) / len(tasks) * 100.0) if tasks else 0.0,
@@ -977,39 +961,30 @@ def dashboard_progress():
     completed = [t for t in tasks if t.status == "完了"]
     srows = monthly_summary()
     cur = current_period()
-    starts = [x for x in [_period_of(t.created_at) for t in tasks] + [r["period"] for r in srows] if x]
-    months, p = [], min(starts) if starts else cur
-    while p <= cur:
-        months.append(p)
-        p = shift_period(p, 1)
-    months = months[-C.DASH_MONTHS:]
+    first = min([x for x in [_period_of(t.created_at) for t in tasks] + [r["period"] for r in srows] if x], default=cur)
     by_period = {r["period"]: r for r in srows}
     timeline = []
-    for p in months:
+    for p in [x for x in recent_periods(C.DASH_MONTHS) if x >= first]:
         done = [t for t in completed if t.completed_at and _period_of(t.completed_at) <= p]
         r = by_period.get(p) or {}
         timeline.append({
-            "period": p, "label": period_label(p), "new": len([t for t in tasks if _period_of(t.created_at) == p]),
+            "label": period_label(p), "new": len([t for t in tasks if _period_of(t.created_at) == p]),
             "done": len([t for t in completed if _period_of(t.completed_at) == p]),
             "registered": len([t for t in tasks if (_period_of(t.created_at) or "") <= p]), "completed": len(done),
             "saved_annual": round(sum(t.saved_minutes for t in done) * 12 / 60.0, 1),
-            "response_rate": r.get("response_rate"), "has_rate": r.get("has_rate"), "self_rate": r.get("self_rate"), "hours_month": r.get("hours_month"),
+            "response_rate": r.get("response_rate"), "has_rate": r.get("has_rate"), "self_rate": r.get("self_rate"),
         })
     stages = [{"name": STAGE_NAMES[key], "n": len([t for t in tasks if t.status != "保留" and t.stage_key == key])} for key in STAGE_KEYS]
     stages.append({"name": "保留", "n": len([t for t in tasks if t.status == "保留"])})
     decided = Counter(t.decision for t in tasks if (t.decision or "未定") != "未定")
     done_decisions = Counter(t.decision for t in completed if t.decision in C.DASH_DECISIONS)
     self_done = [t for t in completed if t.assignment == "自主改善"]
-    member = member_rows()
     latest = srows[-1]["period"] if srows else None
-    rates = survey_response_rates(member, [latest], "wp") if latest else {}
+    rates = survey_response_rates(member_rows(), [latest], "wp") if latest else {}
     wp_rows = []
     for w in workplace_stats():
-        mine = [t for t in tasks if t.workplace_id == w["workplace"].id]
-        done_w = [t for t in mine if t.status == "完了"]
-        cell = rates.get(w["workplace"].name, {}).get(latest) if latest else None
-        wp_rows.append(dict(w, response_rate=(cell or {}).get("rate"), members=(cell or {}).get("members", 0), member_answered=(cell or {}).get("answered", 0),
-                            completed=len(done_w), saved_annual=sum(t.saved_minutes for t in done_w) * 12 / 60.0))
+        done_w = [t for t in completed if t.workplace_id == w["workplace"].id]
+        wp_rows.append(_with_rate(dict(w, completed=len(done_w), saved_annual=sum(t.saved_minutes for t in done_w) * 12 / 60.0), rates.get(w["workplace"].name, {}).get(latest)))
     return {
         "timeline": timeline, "stages": stages,
         "decisions": [{"name": d, "n": decided[d]} for d in C.DECISIONS if decided.get(d)],
@@ -1027,7 +1002,7 @@ def dashboard_progress():
 def workplace_stats():
     rows = []
     people = dx_people()
-    for wp in Workplace.query.order_by(Workplace.sort, Workplace.id).all():
+    for wp in _workplaces():
         tasks = Task.query.filter_by(workplace_id=wp.id).all()
         here = [p for p in people if p["workplace_id"] == wp.id]
         rows.append(
@@ -1037,7 +1012,6 @@ def workplace_stats():
                 "ever_answered": any(wp.id in p["workplace_ids"] for p in people),
                 "tasks": len(tasks),
                 "minutes": sum(t.monthly_minutes or 0 for t in tasks),
-                "candidates": len([t for t in tasks if t.is_candidate]),
                 "self_improvers": len([p for p in here if p["positive"]]),
             }
         )
@@ -1051,11 +1025,8 @@ def judge_level(count, fill_rate):
 
 def domain_analysis():
     rows = []
-    domains = Domain.query.filter_by(parent_id=None).order_by(Domain.sort, Domain.id).all()
-    for d in domains:
-        child_ids = [c.id for c in d.children]
-        ids = [d.id] + child_ids
-        tasks = Task.query.filter(Task.domain_id.in_(ids)).all()
+    for d in _domains():
+        tasks = Task.query.filter(Task.domain_id.in_(_domain_ids(d.id))).all()
         count = len(tasks)
         filled = len([t for t in tasks if t.required_filled])
         verified = len([t for t in tasks if t.verified])
@@ -1274,7 +1245,7 @@ def _team_touched(t):
 def _accompanied(t):
     return t.assignment == "自主改善" and (t.stage_index > 0 or _team_touched(t))
 
-def dx_people(workplace_id=None, wish=None, include_excluded=False):
+def dx_people(include_excluded=False):
     names = {emp_key(e.emp_id): e.name for e in Employee.query.all() if e.name}
     places = {w.id: w for w in Workplace.query.all()}
     wish_rank = {opt: i for i, opt in enumerate(C.DX_WISH_OPTIONS)}
@@ -1307,7 +1278,6 @@ def dx_people(workplace_id=None, wish=None, include_excluded=False):
             skills_none=C.SKILL_NONE in raw_skills, learn_none=C.SKILL_NONE in raw_learn,
             task_count=len(tasks), checked_count=len(checked), accompanied_count=len(accompanied), minutes=sum(t.monthly_minutes or 0 for t in tasks),
             target_tasks=[{"task": t, "label": C.BUILD_STAGE_SELF if t in accompanied else "希望"} for t in tasks if t in checked or t.assignment == "自主改善"],
-            latest_period=latest.period if latest else "",
             stance_latest=stance, stance_period=stance_row.period if stance_row else "", stance_label=period_label(stance_row.period) if stance_row else "",
             stance_old=stance_row is not None and stance_row.period < since,
             self_positive_count=sum(1 for m in monthly if m.answer("stance") in C.MONTHLY_KPI["self_positive"]),
@@ -1318,12 +1288,6 @@ def dx_people(workplace_id=None, wish=None, include_excluded=False):
         )
         p["workplace_id"] = p["workplace"].id if p["workplace"] is not None else None
         p["wish_positive"] = p["wish"] in C.SELF_IMPROVE_POSITIVE and not later_ask
-        if workplace_id and p["workplace_id"] != workplace_id:
-            continue
-        if wish == "positive" and not p["positive"]:
-            continue
-        if wish and wish != "positive" and p["wish"] != wish:
-            continue
         rows.append(p)
     rows.sort(key=lambda p: (not p["positive"], wish_rank.get(p["wish"], 9), 9 if p["stance_old"] else stance_rank.get(p["stance_latest"], 9), p["workplace_id"] or 0, p["name"]))
     return rows
@@ -1331,6 +1295,10 @@ def dx_people(workplace_id=None, wish=None, include_excluded=False):
 # ----- 次のアクション提案（ルールベース） -----
 def suggest_actions(limit=10):
     suggestions = []
+
+    def add(kind, title, detail, endpoint=None, **params):
+        suggestions.append({"kind": kind, "title": title, "detail": detail, "url": (endpoint, params)})
+
     tasks = Task.query.all()
     domain_rows = domain_analysis()
 
@@ -1346,86 +1314,44 @@ def suggest_actions(limit=10):
         else:
             title = f"「{row['domain'].name}」領域の業務情報が不足しています（必須項目の充足率 {row['fill_rate']:.0f}%）"
             detail = "担当者へのヒアリングで、目的・アウトプット・利用者などの空欄や「不明」を埋めてください。"
-        suggestions.append({"kind": "調査", "title": title, "detail": detail, "url": ("bizmap.domain", {"domain_id": row["domain"].id})})
+        add("調査", title, detail, "bizmap.domain", domain_id=row["domain"].id)
 
     for t in candidate_tasks(limit=3):
-        suggestions.append(
-            {
-                "kind": "案件",
-                "title": f"月間 {t.monthly_minutes / 60:.1f} 時間の「{t.name}」を優先案件に",
-                "detail": f"改善希望: {t.wish or '－'}／困りごと: {'・'.join(t.pains_list) or '－'}。標準手順（アウトプット確認 → 目的 → ECRS → 自動化）で検討してください。",
-                "url": ("cases.detail", {"task_id": t.id}),
-            }
-        )
+        add("案件", f"月間 {t.monthly_minutes / 60:.1f} 時間の「{t.name}」を優先案件に",
+            f"改善希望: {t.wish or '－'}／困りごと: {'・'.join(t.pains_list) or '－'}。標準手順（アウトプット確認 → 目的 → ECRS → 自動化）で検討してください。", "cases.detail", task_id=t.id)
 
     unknown = [t for t in tasks if t.is_elimination_candidate and t.status != "完了"]
     if unknown:
         names = "、".join(t.name for t in unknown[:3])
-        suggestions.append(
-            {
-                "kind": "ECRS 排除",
-                "title": f"廃止・統合候補の業務が {len(unknown)} 件あります",
-                "detail": f"{names} など。目的・利用者が分からない、何のためか分からない、同じ情報を何度も入力する業務です。アウトプットが本当に使われているかを確かめ、使われていなければ廃止、重なっていれば統合を検討してください。",
-                "url": ("cases.index", {"filter": "elimination"}),
-            }
-        )
+        add("ECRS 排除", f"廃止・統合候補の業務が {len(unknown)} 件あります",
+            f"{names} など。目的・利用者が分からない、何のためか分からない、同じ情報を何度も入力する業務です。アウトプットが本当に使われているかを確かめ、使われていなければ廃止、重なっていれば統合を検討してください。", "cases.index", filter="elimination")
 
     dup_inputs = duplicate_input_tasks()
     total_dup = len({t.id for _, v in dup_inputs for t in v})
     if total_dup:
         top_src = dup_inputs[0][0]
-        suggestions.append(
-            {
-                "kind": "ECRS 結合",
-                "title": f"「同じ情報を何度も入力する」業務が {total_dup} 件あります",
-                "detail": f"入力元「{top_src}」からの入力が最多。発生源で一度だけ入力する仕組みや、入力の共通化を検討してください。",
-                "url": ("bizmap.index", {"_anchor": "tab-dup"}),
-            }
-        )
+        add("ECRS 結合", f"「同じ情報を何度も入力する」業務が {total_dup} 件あります",
+            f"入力元「{top_src}」からの入力が最多。発生源で一度だけ入力する仕組みや、入力の共通化を検討してください。", "bizmap.index", _anchor="tab-dup")
 
     for group in duplicate_output_groups()[:2]:
-        suggestions.append(
-            {
-                "kind": "ECRS 結合",
-                "title": f"同じアウトプット「{group['output']}」を {len(group['tasks'])} 人が作成しています",
-                "detail": f"合計 月間 {group['minutes'] / 60:.1f} 時間。1つにまとめる、または上流で自動生成する統合候補です。",
-                "url": ("bizmap.index", {"_anchor": "tab-dup"}),
-            }
-        )
+        add("ECRS 結合", f"同じアウトプット「{group['output']}」を {len(group['tasks'])} 人が作成しています",
+            f"合計 月間 {group['minutes'] / 60:.1f} 時間。1つにまとめる、または上流で自動生成する統合候補です。", "bizmap.index", _anchor="tab-dup")
 
     for row in domain_rows:
         if row["candidates"] >= 5:
-            suggestions.append(
-                {
-                    "kind": "業務設計",
-                    "title": f"「{row['domain'].name}」領域に改善案件候補が {row['candidates']} 件集中しています",
-                    "detail": "個別の自動化ではなく、業務プロセス全体（To-Be）の再設計を検討してください。",
-                    "url": ("bizmap.domain", {"domain_id": row["domain"].id}),
-                }
-            )
+            add("業務設計", f"「{row['domain'].name}」領域に改善案件候補が {row['candidates']} 件集中しています",
+                "個別の自動化ではなく、業務プロセス全体（To-Be）の再設計を検討してください。", "bizmap.domain", domain_id=row["domain"].id)
 
     _, learn = skills_summary()
     if learn:
         skill, n = learn.most_common(1)[0]
-        suggestions.append(
-            {
-                "kind": "人材育成",
-                "title": f"教育テーマ候補: {skill}（学びたい人 {n} 人）",
-                "detail": "自主改善希望者の業務を題材にした実践型の勉強会を計画してください。",
-                "url": ("admin.employees", {"learn": skill}),
-            }
-        )
+        add("人材育成", f"教育テーマ候補: {skill}（学びたい人 {n} 人）",
+            "自主改善希望者の業務を題材にした実践型の勉強会を計画してください。", "admin.employees", learn=skill)
 
     quiet = [w["workplace"].name for w in workplace_stats() if not w["ever_answered"]]
     if quiet:
-        suggestions.append(
-            {
-                "kind": "回答促進",
-                "title": f"まだ回答のないGr・役割: {'、'.join(quiet)}",
-                "detail": "月次アンケートの回答も自動化アイテムの登録もまだありません。推進メンバーからそのGr・役割の人に声をかけ、回答をお願いしてください。",
-                "url": (None, {}),
-            }
-        )
+        add("回答促進", f"まだ回答のないGr・役割: {'、'.join(quiet)}",
+            "月次アンケートの回答も自動化アイテムの登録もまだありません。推進メンバーからそのGr・役割の人に声をかけ、回答をお願いしてください。")
 
     return suggestions[:limit]
 
@@ -1465,11 +1391,7 @@ def member_periods():
     return sorted(p for p in periods if p and p <= current_period())
 
 def exclusion_spans(emp):
-    try:
-        raw = json.loads(emp.excluded_spans or "[]")
-    except (TypeError, ValueError):
-        raw = []
-    spans = [(x[0], x[1]) for x in raw if isinstance(x, list) and len(x) == 2 and all(isinstance(v, str) for v in x) and x[0] < x[1]] if isinstance(raw, list) else []
+    spans = [(x[0], x[1]) for x in _json_typed(emp.excluded_spans, []) if isinstance(x, list) and len(x) == 2 and all(isinstance(v, str) for v in x) and x[0] < x[1]]
     if emp.active is False:
         spans.append((_period_of(emp.excluded_at) or "", None))
     return spans
@@ -1511,48 +1433,27 @@ def member_stats(rows, periods):
         stats[p] = {"members": members, "answered": answered, "rate": (answered / members * 100.0) if members else None}
     return stats
 
+def answer_rate(rs, key, positive, empty=None):
+    """その設問に答えた人のうち、positive のどれかを選んだ人の割合（%）。答えた人がいなければ empty"""
+    answered = [r for r in rs if r.answer(key)]
+    return len([r for r in answered if r.answer(key) in positive]) / len(answered) * 100.0 if answered else empty
+
 def monthly_summary():
+    """月度ごとの回答のまとめ（ダッシュボードの月次の指標と、アンケートの推移に使う）"""
     periods, by_period = _responses_by_period()
     member = member_stats(member_rows(), periods)
     kpi = C.MONTHLY_KPI
-    rows = []
-    for p in periods:
-        rs = by_period[p]
-        n = len(rs)
-
-        def rate(key, positive):
-            answered = [r for r in rs if r.answer(key)]
-            return (len([r for r in answered if r.answer(key) in positive]) / len(answered) * 100.0) if answered else 0.0
-
-        pattern_counts = Counter((r.work_pattern or "未設定") for r in rs)
-        rows.append(
-            {
-                "period": p,
-                "label": period_label(p),
-                "n": n,
-                "response_rate": member[p]["rate"],
-                "member_answered": member[p]["answered"],
-                "members": member[p]["members"],
-                "has_rate": rate("has", kpi["has_positive"]),
-                "hours_month": _hours_month(rs),
-                "pattern_counts": {k: pattern_counts[k] for k in list(C.WORK_PATTERNS) + ["未設定"] if pattern_counts.get(k)},
-                "decreased_rate": rate("trend", kpi["trend_decreased"]),
-                "increased_rate": rate("trend", kpi["trend_increased"]),
-                "wants_rate": rate("wants", kpi["wants_positive"]),
-                "ask_rate": rate("stance", kpi["ask_positive"]),
-                "self_rate": rate("stance", kpi["self_positive"]),
-                "together_rate": rate("stance", kpi["together_positive"]),
-                "self_only_rate": rate("stance", kpi["self_only"]),
-                "new_count": len([r for r in rs if r.answer("new_tasks").strip()]),
-                "comment_count": len([r for r in rs if (r.comment or "").strip()]),
-            }
-        )
-    return rows
+    return [{"period": p, "label": period_label(p), "n": len(by_period[p]), "response_rate": member[p]["rate"], "member_answered": member[p]["answered"],
+             "has_rate": answer_rate(by_period[p], "has", kpi["has_positive"], 0.0), "hours_month": _hours_month(by_period[p]),
+             "self_rate": answer_rate(by_period[p], "stance", kpi["self_positive"], 0.0)} for p in periods]
 
 def _responses_by_period():
-    responses = MonthlyResponse.query.all()
-    periods = sorted({r.period for r in responses})
-    return periods, {p: [r for r in responses if r.period == p] for p in periods}
+    """回答のある月度（古い順）と、月度ごとの回答"""
+    by_period = defaultdict(list)
+    for r in MonthlyResponse.query.all():
+        by_period[r.period].append(r)
+    periods = sorted(by_period)
+    return periods, {p: by_period[p] for p in periods}
 
 def _hours_month(responses):
     return sum(r.hours_shift * C.shifts_per_month(r.work_pattern) for r in responses)
@@ -1626,60 +1527,45 @@ def _member_groups(dim, row):
 def _survey_group_names(dim, responses=(), member=()):
     if dim != "wp":
         return list(C.SURVEY_PATTERN_ORDER)
-    names = [w.name for w in Workplace.query.order_by(Workplace.sort, Workplace.id).all()]
+    names = [w.name for w in _workplaces()]
     extra = sorted({g for r in responses for g in _survey_groups(dim, r)} | {g for row in member for g in _member_groups(dim, row)})
     return names + [x for x in extra if x not in names and x != "未設定"] + ["未設定"]
 
 def survey_metrics(rs):
     """回答の集まりの指標（割合は、その設問に答えた人が分母。答えた人がいなければ None）"""
     kpi = C.MONTHLY_KPI
-
-    def rate(key, positive):
-        answered = [r for r in rs if r.answer(key)]
-        return len([r for r in answered if r.answer(key) in positive]) / len(answered) * 100.0 if answered else None
-
     has_n = len([r for r in rs if r.answer("has") in kpi["has_positive"]])
     hours = _hours_month(rs)
     return {
-        "n": len(rs), "has_rate": rate("has", kpi["has_positive"]), "hours_month": hours if rs else None, "hours_per_person": hours / has_n if has_n else None,
-        "decreased_rate": rate("trend", kpi["trend_decreased"]), "increased_rate": rate("trend", kpi["trend_increased"]),
-        "wants_rate": rate("wants", kpi["wants_positive"]), "ask_rate": rate("stance", kpi["ask_positive"]),
-        "together_rate": rate("stance", kpi["together_positive"]), "self_only_rate": rate("stance", kpi["self_only"]),
+        "n": len(rs), "has_rate": answer_rate(rs, "has", kpi["has_positive"]), "hours_month": hours if rs else None, "hours_per_person": hours / has_n if has_n else None,
+        "decreased_rate": answer_rate(rs, "trend", kpi["trend_decreased"]), "increased_rate": answer_rate(rs, "trend", kpi["trend_increased"]),
+        "wants_rate": answer_rate(rs, "wants", kpi["wants_positive"]), "ask_rate": answer_rate(rs, "stance", kpi["ask_positive"]),
+        "together_rate": answer_rate(rs, "stance", kpi["together_positive"]), "self_only_rate": answer_rate(rs, "stance", kpi["self_only"]),
         "reason_count": len([r for r in rs if r.answer("decreased_reason").strip()]), "new_count": len([r for r in rs if r.answer("new_tasks").strip()]),
         "comment_count": len([r for r in rs if (r.comment or "").strip()]),
     }
 
-def survey_response_rates(member, periods, dim=None):
-    """対象者・回答した対象者・回答率。dim（wp / pattern）を付けると、その区分ごと。{区分: {月度: {...}}}"""
-    out = defaultdict(dict)
-    for p in periods:
-        for row in member:
-            st = member_status(row, p)
-            if st not in ("yes", "no"):
-                continue
-            for grp in (_member_groups(dim, row) if dim else ["all"]):
-                cell = out[grp].setdefault(p, {"members": 0, "answered": 0})
-                cell["members"] += 1
-                cell["answered"] += 1 if st == "yes" else 0
-    for cells in out.values():
-        for cell in cells.values():
-            cell["rate"] = cell["answered"] / cell["members"] * 100.0 if cell["members"] else None
-    return out
+def survey_response_rates(member, periods, dim):
+    """区分（wp / pattern）ごとの対象者・回答した対象者・回答率（数え方は member_stats と同じ）。{区分: {月度: {...}}}"""
+    groups = defaultdict(list)
+    for row in member:
+        for grp in _member_groups(dim, row):
+            groups[grp].append(row)
+    return {grp: member_stats(rows, periods) for grp, rows in groups.items()}
 
 def _with_rate(m, cell):
     cell = cell or {}
     m.update(response_rate=cell.get("rate"), members=cell.get("members", 0), member_answered=cell.get("answered", 0))
     return m
 
+def _answered_both(prev_rs, rs):
+    """前の月度と両方に答えた人の（前の月度の回答, その月度の回答）"""
+    before = {emp_key(r.emp_id): r for r in prev_rs}
+    return [(before[emp_key(r.emp_id)], r) for r in rs if emp_key(r.emp_id) in before]
+
 def survey_person_changes(prev_rs, rs):
     """前の月度と両方に答えた人の、1シフトあたり時間の増減（本人どうしで比べる）"""
-    before = {emp_key(r.emp_id): r for r in prev_rs}
-    out = Counter()
-    for r in rs:
-        b = before.get(emp_key(r.emp_id))
-        if b is not None:
-            out["down" if r.hours_shift < b.hours_shift else "up" if r.hours_shift > b.hours_shift else "same"] += 1
-    return out
+    return Counter("down" if r.hours_shift < b.hours_shift else "up" if r.hours_shift > b.hours_shift else "same" for b, r in _answered_both(prev_rs, rs))
 
 def hours_band(r):
     if r.answer("has") not in C.MONTHLY_KPI["has_positive"]:
@@ -1687,17 +1573,14 @@ def hours_band(r):
     return next((band for band, labels in C.MONTHLY_TREND_GROUPS["hours"].items() if r.answer("hours") in labels), "未回答")
 
 def _transition(prev_rs, rs, of, order):
-    before = {emp_key(r.emp_id): r for r in prev_rs}
-    counts = Counter((of(before[emp_key(r.emp_id)]), of(r)) for r in rs if emp_key(r.emp_id) in before)
+    counts = Counter((of(b), of(r)) for b, r in _answered_both(prev_rs, rs))
     used = [x for x in order if any(x in pair for pair in counts)]
-    return {"labels": used, "rows": [[counts.get((a, b), 0) for b in used] for a in used], "total": sum(counts.values())}
+    return {"labels": used, "rows": [[counts.get((a, b), 0) for b in used] for a in used]}
 
 def survey_mentioned_tasks(rs, limit=SURVEY_TASK_ROWS):
     """回答で挙げられた業務名（行っている・なくしたい）。人数・なくしたい人数・挙げた月数・主な Gr・役割・自動化アイテム登録の有無"""
     vocab = map_vocab()
-    registered = set()
-    for t in Task.query.all():
-        registered |= {pending_key(v, vocab) for v in [t.name, t.monthly_name] + task_aliases(t.id) if v}
+    registered = {k for t in Task.query.all() for k in task_name_keys(t, vocab)}
     found = {}
     for r in rs:
         person = emp_key(r.emp_id)
@@ -1720,9 +1603,9 @@ def survey_mentioned_tasks(rs, limit=SURVEY_TASK_ROWS):
     rows.sort(key=lambda x: (-x["people"], -x["wants"], x["name"]))
     return {"rows": rows[:limit], "total": len(rows), "registered": sum(1 for x in rows if x["registered"])}
 
-def survey_question_trends(periods):
+def survey_question_trends(periods, by_period=None):
     """選択式の設問ごとの、月度ごとの選択肢の割合（基本設問と、追加した設問）。時間は30分・1時間・2時間・4時間の区切りにまとめる"""
-    _all, by_period = _responses_by_period()
+    by_period = _responses_by_period()[1] if by_period is None else by_period
     surveys = {x.period: x for x in MonthlySurvey.query.filter(MonthlySurvey.period.in_(list(periods))).all()} if periods else {}
     questions = OrderedDict((q["key"], q) for q in C.MONTHLY_CORE_QUESTIONS if q["type"] == "choice")
     for p in periods:
@@ -1745,70 +1628,65 @@ def survey_question_trends(periods):
         options = list(group) if group else list(q.get("options") or [])
         options += [o for c in counters for o in c if o not in options]
         out.append({
-            "key": key, "q": q, "core": key in C.MONTHLY_CORE_KEYS, "label": C.MONTHLY_KPI_LABELS.get(key, ""),
+            "key": key, "q": q, "label": C.MONTHLY_KPI_LABELS.get(key, ""),
             "note": "30分・1時間・2時間・4時間の区切りにまとめて表示。細かい区分は月別分析で見られます" if group else "",
             "periods": list(periods), "labels": [period_label(p) for p in periods], "n": n_list,
-            "series": [{"option": o, "counts": [c.get(o, 0) for c in counters], "percents": [round(c.get(o, 0) / n * 100) if n else 0 for c, n in zip(counters, n_list)]} for o in options],
+            "series": [{"option": o, "percents": [round(c.get(o, 0) / n * 100) if n else 0 for c, n in zip(counters, n_list)]} for o in options],
         })
     return out
 
-def survey_trend_analysis(periods):
+def _prev_period(all_periods, by_period, period):
+    """その月度より前で、回答のあるいちばん新しい月度と、その回答"""
+    prev = max((x for x in all_periods if x < period), default=None)
+    return prev, (by_period.get(prev, []) if prev else [])
+
+def _group_rows(dim, member, periods, by_period):
+    """区分（Gr・役割／勤務形態・班）ごとの、月度ごとの指標。回答も対象者もない区分は出さない"""
+    rr = survey_response_rates(member, periods, dim)
+    responses = [r for p in periods for r in by_period.get(p, [])]
+    rows = []
+    for name in _survey_group_names(dim, responses, member):
+        cells = [_with_rate(survey_metrics([r for r in by_period.get(p, []) if name in _survey_groups(dim, r)]), rr.get(name, {}).get(p)) for p in periods]
+        if any(c["n"] or c["members"] for c in cells):
+            rows.append({"name": name, "cells": cells})
+    return rows
+
+def survey_trend_analysis(periods, loaded=None):
     """時系列分析: 選んだ期間の月度ごとの指標・回答の続き具合・本人の変化・属性別の推移・挙げられた業務・設問ごとの推移"""
-    all_periods, by_period = _responses_by_period()
+    all_periods, by_period = loaded or _responses_by_period()
     member = member_rows()
-    rates = survey_response_rates(member, periods).get("all", {})
+    rates = member_stats(member, periods)
     first = periods[0] if periods else None
     seen = {emp_key(r.emp_id) for p in all_periods if first and p < first for r in by_period[p]}
     months = []
     for p in periods:
         rs = by_period.get(p, [])
-        earlier = [x for x in all_periods if x < p]
-        prev = earlier[-1] if earlier else None
-        prs = by_period.get(prev, []) if prev else []
+        prs = _prev_period(all_periods, by_period, p)[1]
         keys, pkeys = {emp_key(r.emp_id) for r in rs}, {emp_key(r.emp_id) for r in prs}
         m = _with_rate(survey_metrics(rs), rates.get(p))
         changes = survey_person_changes(prs, rs)
         hours_by = Counter()
         for r in rs:
             hours_by[r.work_pattern if r.work_pattern in C.WORK_PATTERNS else "未設定"] += r.hours_shift * C.shifts_per_month(r.work_pattern)
-        m.update(period=p, label=period_label(p), prev_label=period_label(prev) if prev else "", first_time=len(keys - seen), continued=len(keys & pkeys),
+        m.update(period=p, label=period_label(p), first_time=len(keys - seen), continued=len(keys & pkeys),
                  stopped=len(pkeys - keys), change_down=changes["down"], change_same=changes["same"], change_up=changes["up"],
                  hours_by_pattern={k: round(hours_by.get(k, 0.0), 1) for k in list(C.WORK_PATTERNS) + ["未設定"]})
         seen |= keys
         months.append(m)
-    responses = [r for p in periods for r in by_period.get(p, [])]
-    matrix = {}
-    for dim, label in C.SURVEY_DIMS:
-        rr = survey_response_rates(member, periods, dim)
-        rows = []
-        for name in _survey_group_names(dim, responses, member):
-            cells = [_with_rate(survey_metrics([r for r in by_period.get(p, []) if name in _survey_groups(dim, r)]), rr.get(name, {}).get(p)) for p in periods]
-            if any(c["n"] or c["members"] for c in cells):
-                rows.append({"name": name, "cells": cells})
-        matrix[dim] = {"label": label, "rows": rows}
-    return {"months": months, "matrix": matrix, "tasks": survey_mentioned_tasks(responses), "questions": survey_question_trends(periods)}
+    matrix = {dim: {"label": label, "rows": _group_rows(dim, member, periods, by_period)} for dim, label in C.SURVEY_DIMS}
+    return {"months": months, "matrix": matrix, "tasks": survey_mentioned_tasks([r for p in periods for r in by_period.get(p, [])]),
+            "questions": survey_question_trends(periods, by_period)}
 
-def survey_month_analysis(period, survey=None):
+def survey_month_analysis(period, survey=None, loaded=None):
     """月別分析: その月度の指標（前の月度との差）・属性別・本人の変化・時間の分布・クロス集計の材料・挙げられた業務"""
-    all_periods, by_period = _responses_by_period()
+    all_periods, by_period = loaded or _responses_by_period()
     rs = by_period.get(period, [])
-    earlier = [x for x in all_periods if x < period]
-    prev = earlier[-1] if earlier else None
-    prs = by_period.get(prev, []) if prev else []
+    prev, prs = _prev_period(all_periods, by_period, period)
     member = member_rows()
-    rates = survey_response_rates(member, [x for x in (prev, period) if x]).get("all", {})
+    rates = member_stats(member, [x for x in (prev, period) if x])
     now = _with_rate(survey_metrics(rs), rates.get(period))
     before = _with_rate(survey_metrics(prs), rates.get(prev)) if prev else None
-    groups = {}
-    for dim, label in C.SURVEY_DIMS:
-        rr = survey_response_rates(member, [period], dim)
-        rows = []
-        for name in _survey_group_names(dim, rs, member):
-            sub = [r for r in rs if name in _survey_groups(dim, r)]
-            cell = rr.get(name, {}).get(period)
-            if sub or (cell or {}).get("members"):
-                rows.append(dict(_with_rate(survey_metrics(sub), cell), name=name))
-        groups[dim] = {"label": label, "rows": rows}
+    groups = {dim: {"label": label, "rows": [dict(x["cells"][0], name=x["name"]) for x in _group_rows(dim, member, [period], by_period)]} for dim, label in C.SURVEY_DIMS}
     changes = survey_person_changes(prs, rs)
     hours = Counter(r.answer("hours") for r in rs if r.answer("hours"))
     questions = [q for q in (survey.questions if survey else []) if q.get("type") == "choice"]
@@ -1818,7 +1696,7 @@ def survey_month_analysis(period, survey=None):
         "records": [{"wp": _survey_groups("wp", r), "pattern": _survey_groups("pattern", r), "a": {q["key"]: r.answer(q["key"]) for q in questions if r.answer(q["key"])}} for r in rs],
     }
     return {
-        "period": period, "prev": prev, "prev_label": period_label(prev) if prev else "", "now": now, "before": before, "groups": groups,
+        "prev": prev, "prev_label": period_label(prev) if prev else "", "now": now, "before": before, "groups": groups,
         "changes": {"down": changes["down"], "same": changes["same"], "up": changes["up"], "total": sum(changes.values())},
         "has_moves": _transition(prs, rs, lambda r: r.answer("has") or "未回答", ["ある", "ない", "未回答"]),
         "band_moves": _transition(prs, rs, hours_band, C.HOURS_BANDS),
@@ -2030,8 +1908,8 @@ def map_vocab():
         _VOCAB_CACHE.update(raw=raw, value=_compile_vocab(_clean_vocab(data)))
     return _VOCAB_CACHE["value"]
 
-def vocab_public(vocab=None):
-    vocab = vocab or map_vocab()
+def vocab_public():
+    vocab = map_vocab()
     out = {"handoff": {k: {"label": v["label"], "words": v["words"]} for k, v in vocab["handoff"].items()}, "_seq": vocab.get("_seq", 0)}
     for group in VOCAB_GROUPS:
         out[group] = [dict({k: v for k, v in r.items() if not k.startswith("_")}, builtin=r["key"] in BUILTIN_VOCAB_KEYS[group]) for r in vocab[group]]
@@ -2280,8 +2158,8 @@ def who_of(name, own_wp="", vocab=None):
         return {"actor": key, "label": raw, "state": "ok"}
     return {"actor": "", "label": raw, "state": "unconfirmed"}
 
-def actor_user(actor, vocab=None):
-    row = vocab_row("actors", actor, vocab) if actor else None
+def actor_user(actor):
+    row = vocab_row("actors", actor) if actor else None
     return row.get("user", "") if row else ""
 
 
@@ -2407,11 +2285,15 @@ def show_who(n):
     who = (n.get("who") or "").strip()
     return n.get("type") == "work" and n.get("cls") in WHO_CLASSES and n.get("who_state") in ("ok", "unknown") and who and normalize_text(who) != normalize_text(n.get("text"))
 
-def doer_who(text, own_wp="", vocab=None):
+def _named_who(w, label):
+    """氏名をそのまま出すときのだれ（区分が決まっていなければ職場内）"""
+    return {"actor": w["actor"] if w["actor"] and w["state"] == "ok" else "team", "label": label, "state": "ok"}
+
+def doer_who(text, own_wp=""):
     raw = str(text or "").strip()[:30]
-    w = who_of(raw, own_wp, vocab)
-    if raw and (mask_person_names(raw, vocab) != raw or (w["state"] == "unconfirmed" and _TEAM_RX.search(vnorm(raw)))):
-        return {"actor": w["actor"] if w["actor"] and w["state"] == "ok" else "team", "label": raw, "state": "ok"}
+    w = who_of(raw, own_wp)
+    if raw and (mask_person_names(raw) != raw or (w["state"] == "unconfirmed" and _TEAM_RX.search(vnorm(raw)))):
+        return _named_who(w, raw)
     return w
 
 def who_label(workplace="", people=(), extra=0, with_name=True):
@@ -2650,8 +2532,8 @@ def _node_type(n):
 def _cls_for(cls, ntype):
     return cls if CLS_TYPE.get(cls) == ntype else ("source" if ntype == "info" else "work")
 
-def graph_to_diagram(graph, direction="LR"):
-    d = Diagram(direction)
+def graph_to_diagram(graph):
+    d = Diagram("LR")
     for n in graph.get("nodes", []):
         ntype = _node_type(n)
         cls = _cls_for(n.get("cls"), ntype)
@@ -2883,7 +2765,7 @@ def _num(v):
     except (TypeError, ValueError):
         return None
 
-# ----- 手修正の業務データへの書き戻し -----
+# ----- 同じものかもしれない箱（名前の書き方が少し違うだけの箱を見つけ、まとめる・別のものとして控える） -----
 def _task_id_of(node_id):
     if not node_id or len(node_id) < 2 or node_id[0] not in ("t", "o") or not node_id[1:].isdigit():
         return None
@@ -2960,7 +2842,7 @@ def _generic_names():
     words = set(C.INPUT_SOURCES) | set(C.TOOLS)
     for group in ("media", "methods"):
         for r in vocab[group]:
-            words |= {r["label"]} | {w for w in _split_words(r.get("words")) if not w.startswith("~")}
+            words |= {r["label"], *_plain_words(r)}
     return {name_core(w) for w in words if w}
 
 def looks_same(a, b):
@@ -2983,6 +2865,18 @@ def _media_differ(x, y):
     known = [m for m in ((x.get("medium") or "unknown"), (y.get("medium") or "unknown")) if m not in ("unknown", "doc")]
     return len(known) == 2 and known[0] != known[1]
 
+def _same_info_node(n):
+    """同じものかもしれない組の相手になれる情報の箱（名前があり、仮の名前でない）"""
+    return n.get("type") == "info" and (n.get("text") or "").strip() and n["text"] not in PLACEHOLDER_TEXTS
+
+def _unmatched_links(tasks):
+    """前後の業務の欄に書かれた名前のうち、登録済みの業務に当たらないもの（業務, 欄, 名前）"""
+    for t in tasks:
+        for field in ("prev_task", "next_task"):
+            for name in task_names(getattr(t, field)):
+                if not _match_tasks(name, tasks, exclude=t, limit=1):
+                    yield t, field, name
+
 def _rule_same_candidates(graph, tasks, distinct):
     out, seen = [], set()
 
@@ -2994,7 +2888,7 @@ def _rule_same_candidates(graph, tasks, distinct):
         out.append(dict(extra, kind=kind, a=a, b=b, key=key, ids=list(ids)))
 
     nodes = graph.get("nodes") or []
-    info = [n for n in nodes if n.get("type") == "info" and (n.get("text") or "").strip() and n["text"] not in PLACEHOLDER_TEXTS]
+    info = [n for n in nodes if _same_info_node(n)]
     for i, x in enumerate(info):
         for y in info[i + 1:]:
             if not _media_differ(x, y) and looks_same(x["text"], y["text"]):
@@ -3009,33 +2903,25 @@ def _rule_same_candidates(graph, tasks, distinct):
                 add("pending", _pending_name(pend["text"]), task["text"], (pend["id"], task["id"]), task_id=_task_id_of(task["id"]))
             elif pend is None and looks_same(x["text"], y["text"]):
                 add("task", x["text"], y["text"], (x["id"], y["id"]), task_ids=[_task_id_of(x["id"]), _task_id_of(y["id"])])
-    for t in tasks:
-        for field in ("prev_task", "next_task"):
-            for name in task_names(getattr(t, field)):
-                if _match_tasks(name, tasks, exclude=t, limit=1):
-                    continue
-                for o in tasks:
-                    if o is not t and looks_same(name, o.name):
-                        add("link", name, o.name, task_id=o.id, owner=t.name, owner_id=t.id, field=field)
+    for t, field, name in _unmatched_links(tasks):
+        for o in tasks:
+            if o is not t and looks_same(name, o.name):
+                add("link", name, o.name, task_id=o.id, owner=t.name, owner_id=t.id, field=field)
     return out
 
 def _same_targets(graph, tasks):
     """同じものかもしれない組の相手になれるもの: 情報の箱・登録済みの業務・未登録の業務（月次）・前後の業務に書かれた名前"""
     nodes = graph.get("nodes") or []
     by_id = {t.id: t for t in tasks}
-    info = [{"kind": "info", "name": n["text"], "node": n} for n in nodes
-            if n.get("type") == "info" and (n.get("text") or "").strip() and n["text"] not in PLACEHOLDER_TEXTS]
+    info = [{"kind": "info", "name": n["text"], "node": n} for n in nodes if _same_info_node(n)]
     work = [{"kind": "task", "name": n["text"], "node": n, "task": by_id[_task_id_of(n["id"])]} for n in nodes
             if n.get("cls") in TASK_CLASSES and n["id"].startswith("t") and _task_id_of(n["id"]) in by_id]
     pending = [{"kind": "pending", "name": _pending_name(n["text"]), "node": n} for n in nodes if n.get("cls") == "pending" and _pending_name(n["text"])]
     links, seen = [], set()
-    for t in tasks:
-        for field in ("prev_task", "next_task"):
-            for name in task_names(getattr(t, field)):
-                if (name_key(name), t.id, field) in seen or _match_tasks(name, tasks, exclude=t, limit=1):
-                    continue
-                seen.add((name_key(name), t.id, field))
-                links.append({"kind": "link", "name": name, "node": None, "owner": t, "field": field})
+    for t, field, name in _unmatched_links(tasks):
+        if (name_key(name), t.id, field) not in seen:
+            seen.add((name_key(name), t.id, field))
+            links.append({"kind": "link", "name": name, "node": None, "owner": t, "field": field})
     return {"info": info, "task": work, "pending": pending, "link": links}
 
 def _resolve_same(rec, targets):
@@ -3244,8 +3130,8 @@ def _same_ai_pairs(data, index):
 
 def review_same_with_ai(workplace_id, domain_id):
     """いま見ている範囲の業務マップを AI に見せ、同じものかもしれない組を控え直す。戻り値は (お知らせの種類, 文)"""
-    tasks, _truncated = _filtered_tasks(domain_id, workplace_id)
-    graph = _merged_graph("info", workplace_id, domain_id)
+    scoped = _filtered_tasks(domain_id, workplace_id)
+    tasks, graph = scoped[0], _merged_graph("info", workplace_id, domain_id, scoped)
     distinct = set(_map_same()["distinct"])
     with show_names():
         targets = _same_targets(graph, tasks)
@@ -3273,6 +3159,7 @@ def review_same_with_ai(workplace_id, domain_id):
         message += "箱が多いため、" + "・".join(cut) + "までを見ました。"
     return "success", message
 
+# ----- 手修正の業務データへの書き戻し -----
 def append_text(existing, value):
     existing = (existing or "").strip()
     value = (value or "").strip()
@@ -3588,6 +3475,10 @@ def name_key(name):
 def pending_key(name, vocab=None):
     return name_key(mask_person_names(name, vocab))
 
+def task_name_keys(t, vocab=None):
+    """登録済みの業務を名前で探すときの鍵（業務名・月次の業務名・業務マップでまとめた別名）"""
+    return {pending_key(v, vocab) for v in [t.name, t.monthly_name] + task_aliases(t.id) if v}
+
 def _mentions(part, name):
     np_, nn = normalize_text(part), normalize_text(name)
     return len(np_) >= 2 and len(nn) >= 3 and (nn in np_ or (len(np_) >= 4 and np_ in nn))
@@ -3811,7 +3702,7 @@ def task_sources(t):
     steps = t.steps
     if not steps or all(s["shared"] for s in items):
         return items
-    tied = {id(s): method for s, _into, method in _tie_case_sources(build_steps_flow(steps, _own_wp(t), t.purpose or ""), steps, items) if not s["shared"]}
+    tied = {id(s): method for s, method in _tie_case_sources(build_steps_flow(steps, _own_wp(t), t.purpose or ""), steps, items) if not s["shared"]}
     return [s if s["shared"] else dict(s, method=tied[id(s)]) for s in items if s["shared"] or id(s) in tied]
 
 def task_destinations(t):
@@ -3872,7 +3763,7 @@ def recipient_who(name, own_wp="", vocab=None):
     if actor and actor != w["actor"]:
         w = {"actor": actor, "label": w["label"] or base, "state": "unknown" if actor == "unknown" else "ok"}
     if _SHOW_NAMES.get() and base and mask_person_names(base, vocab) != base:
-        w = {"actor": w["actor"] if w["actor"] and w["state"] == "ok" else "team", "label": base, "state": "ok"}
+        w = _named_who(w, base)
     return w
 
 def dept_in_text(text, own_wp="", actor="dept"):
@@ -4054,13 +3945,13 @@ MAX_PENDING = 40
 def pending_task_names(workplace_id=None):
     vocab = map_vocab()
     since = shift_period(current_period(), 1 - PENDING_MONTHS)
-    excluded = {norm_emp_id(e.emp_id).lower() for e in Employee.query.filter(Employee.active.is_(False)).all()}
+    excluded = {emp_key(e.emp_id) for e in Employee.query.filter(Employee.active.is_(False)).all()}
     latest = {}
     for m in MonthlyResponse.query.filter(MonthlyResponse.period >= since).order_by(MonthlyResponse.period, MonthlyResponse.id).all():
-        latest[norm_emp_id(m.emp_id).lower()] = m
+        latest[emp_key(m.emp_id)] = m
     registered = defaultdict(set)
     for t in Task.query.all():
-        registered[t.workplace_id] |= {pending_key(v, vocab) for v in [t.name, t.monthly_name] + task_aliases(t.id) if v}
+        registered[t.workplace_id] |= task_name_keys(t, vocab)
     found = OrderedDict()
     for key, m in latest.items():
         if key in excluded or (workplace_id and m.workplace_id != workplace_id):
@@ -4070,8 +3961,7 @@ def pending_task_names(workplace_id=None):
             k = name_key(name)
             if len(k) < 2 or k in registered[m.workplace_id]:
                 continue
-            row = found.setdefault((m.workplace_id, k), {"name": name, "workplace_id": m.workplace_id, "people": set(), "who": {}})
-            row["people"].add(key)
+            row = found.setdefault((m.workplace_id, k), {"name": name, "workplace_id": m.workplace_id, "who": {}})
             row["who"][key] = (m.name or "", m.work_pattern or "", m.shift_team or "")
     return list(found.values())[:MAX_PENDING]
 
@@ -4081,7 +3971,7 @@ def add_pending_tasks(d, workplace_id=None, tasks=()):
     links = {t.id: ({pending_key(v, vocab) for v in task_names(t.next_task)}, {pending_key(v, vocab) for v in task_names(t.prev_task)}) for t in tasks} if pending else {}
     written = written_links() if pending else set()
     for p in pending:
-        n = len(p["people"])
+        n = len(p["who"])
         wp = names.get(p["workplace_id"], "Gr・役割未設定")
         node = d.node(nid("u", f"{p['workplace_id']}:{p['name']}"), p["name"] + (f"（{n}人）" if n >= 2 else ""), "pending",
                       subgraph=_frame(p["workplace_id"], wp), who={"actor": "team", "label": who_label(wp, p["who"].values(), with_name=_SHOW_NAMES.get()), "state": "ok"})
@@ -4168,8 +4058,8 @@ def build_steps_flow(steps, own_wp="", purpose="", me_label=""):
     def same_box(v, outputs=False):
         return next((nd for text, nd in seen if same_info_box(v, text) or (outputs and d.nodes[nd]["cls"] == "output" and same_thing(v, text))), None) if v else None
 
-    def info(name, hint=None, key=None, cls="source"):
-        node = d.node(key or nid("s", name), name, cls, hint=hint)
+    def info(name, hint=None, key=None):
+        node = d.node(key or nid("s", name), name, "source", hint=hint)
         if all(nd != node for _, nd in seen):
             seen.append((name, node))
         return node
@@ -4254,7 +4144,7 @@ def build_steps_flow(steps, own_wp="", purpose="", me_label=""):
                         d.edge(deliver, sid, "info")
                     deliver = deliver or latest or _output_box(d, f"o{x['no']}", sid)
                 d.info_edge(deliver, target, meth)
-                d.edge(sid, target, "work", handoff=handoff_of(action, how, side="push", method=meth))
+                d.edge(sid, target, "work", handoff=handoff_of(action, how, side="push"))
         prev = sid
     return d
 
@@ -4286,7 +4176,7 @@ def _tie_case_sources(d, steps, sources):
             continue
         node = d.node(nid("s", s_["name"]), s_["name"], "source", hint=s_["hint"])
         d.info_edge(node, into, method)
-        tied.append((s_, into, method))
+        tied.append((s_, method))
     return tied
 
 def _extra_case_links(d, t, steps):
@@ -4306,7 +4196,7 @@ def _extra_case_links(d, t, steps):
             deliver = _output_box(d, f"o{t.id}", last, t.output or "")
         how = method_of(r["how"])
         d.info_edge(deliver, node, how)
-        d.edge(last, node, "work", handoff=handoff_of(steps[-1].get("action") or "", r["how"], side="push", method=how))
+        d.edge(last, node, "work", handoff=handoff_of(steps[-1].get("action") or "", r["how"], side="push"))
 
 def build_task_flow(t, names=True):
     own = _own_wp(t)
@@ -4425,6 +4315,7 @@ def tip(text):
 
 # ===== AI連携（社内 Azure OpenAI の ChatGPT API を Responses API で呼ぶ。なければルールベース） =====
 AI_SETTING_LABELS = (("openai_api_url", "URL"), ("openai_api_key", "API キー"), ("openai_model", "モデル名"))
+AI_OFF_MSG = "AI連携が無効です。管理画面の「AI連携」で URL・API キー・モデル名を設定してください。"
 
 
 def _ai_setting(key):
@@ -4471,7 +4362,7 @@ def _tools_flat(tool_defs):
     ]
 
 
-def _ai_request_body(system, items, max_tokens=None, with_reasoning=True, tools=None, tool_choice="auto"):
+def _ai_request_body(system, items, max_tokens=None, with_reasoning=True, tools=None):
     body = {
         "model": _model(),
         "store": False,
@@ -4481,7 +4372,7 @@ def _ai_request_body(system, items, max_tokens=None, with_reasoning=True, tools=
     }
     if tools:
         body["tools"] = _tools_flat(tools)
-        body["tool_choice"] = tool_choice
+        body["tool_choice"] = "auto"
     effort = str(conf.get("OPENAI_REASONING_EFFORT", "low") or "").strip()
     if effort and with_reasoning:
         body["reasoning"] = {"effort": effort}
@@ -4519,6 +4410,10 @@ CONNECT_HINTS = (
     (("getaddrinfo failed", "Name or service not known"), "URL のホスト名が見つかりません"),
     (("Connection refused",), "接続先が受け付けていません（ポート番号を確かめてください）"),
 )
+
+
+HTTP_HINTS = {401: "APIキーが無効か、権限がありません", 403: "APIキーが無効か、権限がありません",
+              404: "URL が違います（管理画面の URL が Responses API のものか確認）", 429: "利用量の上限（レート制限）に達しました"}
 
 
 def _connect_error_text(e):
@@ -4588,18 +4483,18 @@ def _extract_json(text, brackets="{}"):
         return None
 
 
-def _ai_turn(system, items, max_tokens=None, tools=None, tool_choice="auto"):
+def _ai_turn(system, items, max_tokens=None, tools=None):
     key = (_api_url(), _model())
     if tools and key in _NO_TOOLS:
         tools = None
     with_reasoning = True
-    body = _ai_request_body(system, items, max_tokens, tools=tools, tool_choice=tool_choice)
+    body = _ai_request_body(system, items, max_tokens, tools=tools)
     try:
         status, payload = _ai_post(body)
         if status == 400 and "reasoning" in body and "reasoning" in str(payload):
             log.warning("ChatGPT API: reasoning が拒否されたため外して再試行します")
             with_reasoning = False
-            status, payload = _ai_post(_ai_request_body(system, items, max_tokens, with_reasoning=False, tools=tools, tool_choice=tool_choice))
+            status, payload = _ai_post(_ai_request_body(system, items, max_tokens, with_reasoning=False, tools=tools))
         if status == 400 and tools:
             log.warning("ChatGPT API: 道具（tools）つきの呼び出しが拒否されたため、道具なしで再試行します")
             plain = [i for i in items if not (isinstance(i, dict) and i.get("type") in ("function_call", "function_call_output"))] if isinstance(items, list) else items
@@ -4614,16 +4509,7 @@ def _ai_turn(system, items, max_tokens=None, tools=None, tool_choice="auto"):
     if not isinstance(payload, dict):
         snippet = re.sub(r"\s+", " ", str(payload or ""))[:160]
         log.warning("ChatGPT API: HTTP %s %s", status, snippet)
-        if status in (401, 403):
-            _LAST_ERROR["text"] = f"HTTP {status}: APIキーが無効か、権限がありません"
-        elif status == 404:
-            _LAST_ERROR["text"] = "HTTP 404: URL が違います（管理画面の URL が Responses API のものか確認）"
-        elif status == 429:
-            _LAST_ERROR["text"] = "HTTP 429: 利用量の上限（レート制限）に達しました"
-        elif status == 200:
-            _LAST_ERROR["text"] = "応答が JSON ではありません（管理画面の URL を確認）"
-        else:
-            _LAST_ERROR["text"] = f"HTTP {status}: {snippet}"
+        _LAST_ERROR["text"] = "応答が JSON ではありません（管理画面の URL を確認）" if status == 200 else f"HTTP {status}: {HTTP_HINTS.get(status) or snippet}"
         return None, []
     if payload.get("error"):
         err = payload["error"]
@@ -4643,25 +4529,28 @@ def _ai_turn(system, items, max_tokens=None, tools=None, tool_choice="auto"):
     return content, calls
 
 
-def _tool_result(ok, content):
-    return {"ok": ok, "llm_content": json.dumps(content, ensure_ascii=False, default=str)}
+def _tool_result(content):
+    return {"ok": True, "llm_content": json.dumps(content, ensure_ascii=False, default=str)}
+
+def _tool_error(message):
+    return {"ok": False, "error": message, "llm_content": json.dumps({"error": message}, ensure_ascii=False, default=str)}
 
 
 def _dispatch(handlers, name, arguments):
     fn = (handlers or {}).get(name)
     if fn is None:
-        return _tool_result(False, {"error": f"未知の道具: {name}"})
+        return _tool_error(f"未知の道具: {name}")
     try:
         args = json.loads(arguments or "{}")
     except ValueError:
-        return _tool_result(False, {"error": "道具の引数の JSON を読めませんでした"})
+        return _tool_error("道具の引数の JSON を読めませんでした")
     if not isinstance(args, dict):
         args = {}
     try:
-        return _tool_result(True, fn(args))
+        return _tool_result(fn(args))
     except Exception as e:
         log.warning("道具 %s の実行に失敗: %s", name, e)
-        return _tool_result(False, {"error": f"道具の実行に失敗しました: {e}"})
+        return _tool_error(f"道具の実行に失敗しました: {e}")
 
 
 class _ToolGuard:
@@ -4684,37 +4573,33 @@ class _ToolGuard:
         k = self.key(call)
         if k in self.failed:
             self.repeats += 1
-            return _tool_result(False, {"error": "同じ呼び出しです。前回の失敗: " + self.failed[k] + "。引数を変えるか、別の道具を使うか、ここまでの結果で答えてください"})
+            return _tool_error("同じ呼び出しです。前回の失敗: " + self.failed[k] + "。引数を変えるか、別の道具を使うか、ここまでの結果で答えてください")
         if k in self.done:
             self.repeats += 1
-            return _tool_result(False, {"error": "同じ呼び出しです。結果はもう出ています。ここまでの結果で答えてください"})
+            return _tool_error("同じ呼び出しです。結果はもう出ています。ここまでの結果で答えてください")
         return None
 
     def after(self, call, result):
         k = self.key(call)
-        if result.get("ok"):
+        if result["ok"]:
             self.done.add(k)
         else:
-            try:
-                reason = json.loads(result.get("llm_content") or "{}").get("error") or "失敗"
-            except (ValueError, AttributeError):
-                reason = "失敗"
-            self.failed[k] = str(reason)[:200]
+            self.failed[k] = result["error"][:200]
 
     @property
     def stuck(self):
         return self.repeats >= self.LIMIT
 
 
-def _call_ai(system, user_input, max_tokens=None, tools=None, handlers=None, tool_choice="auto"):
+def _call_ai(system, user_input, max_tokens=None, tools=None, handlers=None):
     if not tools:
         text, _ = _ai_turn(system, user_input, max_tokens)
         return text
     items = list(user_input) if isinstance(user_input, list) else [{"role": "user", "content": str(user_input)}]
     guard = _ToolGuard()
     retried_empty = False
-    for round_no in range(C.AI_TOOL_ROUNDS):
-        text, calls = _ai_turn(system, items, max_tokens, tools=tools, tool_choice=tool_choice if round_no == 0 else "auto")
+    for _ in range(C.AI_TOOL_ROUNDS):
+        text, calls = _ai_turn(system, items, max_tokens, tools=tools)
         if text is None and not calls:
             return None
         if text:
@@ -5027,16 +4912,11 @@ def _similar_tasks(query, exclude_id=None, limit=10):
     return [t for _, t in scored[:limit]]
 
 
-def _search_similar_tasks(args, exclude_id=None, owner_id=None):
+def _search_similar_tasks(args, owner_id, exclude_id=None):
     q = str(args.get("query") or "").strip()
     if not q:
         raise ValueError("query を指定してください")
-    rows = []
-    for t in _similar_tasks(q, exclude_id=exclude_id)[:C.AI_TOOL_ROWS]:
-        row = _task_brief(t)
-        if owner_id is not None:
-            row["本人の業務"] = t.respondent_id == owner_id
-        rows.append(row)
+    rows = [{**_task_brief(t), "本人の業務": t.respondent_id == owner_id} for t in _similar_tasks(q, exclude_id=exclude_id)]
     return {"query": q, "found": len(rows), "業務": rows,
             "note": "「本人の業務」が true で同じ業務名なら二重登録。false（別の人）が同じできるものを作っていれば統合候補として伝える（名前は出さない）。"}
 
@@ -5129,7 +5009,7 @@ def finalize_handlers(task):
 
     return {"search_similar_tasks": lambda args: _search_similar_tasks(args, exclude_id=task.id, owner_id=task.respondent_id), "duplicate_outputs": duplicate_outputs}
 
-# ----- 業務（案件）の分析 -----
+# ----- 登録済みの業務を再分析に渡す形（AI に見せる内容・聞き取りの state） -----
 def task_payload(task):
     return {
         "業務名": task.name,
@@ -5305,7 +5185,7 @@ def suggest_actions_ai(context):
         )
     return result[:6]
 
-# ===== 初期データ・デモデータ・既存データの移行 =====
+# ===== 初期データ・デモデータ =====
 DEFAULT_WORKPLACES = ["製造1課", "製造2課", "組立課", "検査・品質保証課", "生産管理課", "設備保全課"]
 
 DEFAULT_DOMAINS = [
@@ -5347,7 +5227,6 @@ def seed_masters():
         db.session.commit()
 
 
-
 def _core_copy(q):
     item = dict(q, options=list(q.get("options", [])))
     if q.get("depends"):
@@ -5358,12 +5237,10 @@ def _core_in_order(qs):
     core_order = [q["key"] for q in C.MONTHLY_CORE_QUESTIONS]
     slots = [i for i, q in enumerate(qs) if q.get("key") in core_order]
     core_sorted = sorted((qs[i] for i in slots), key=lambda q: core_order.index(q["key"]))
-    if [qs[i]["key"] for i in slots] == [q["key"] for q in core_sorted]:
-        return qs, False
     qs = list(qs)
     for i, q in zip(slots, core_sorted):
         qs[i] = q
-    return qs, True
+    return qs
 
 
 # ----- デモデータ -----
@@ -5378,9 +5255,13 @@ DEMO_RESPONDENTS = [
     ("中村 翔太", "製造2課", ["Excel関数", "ピボットテーブル"], ["Power BI"]),
 ]
 
-def _ds(action, system="", output="", who="", recv=(), to="", how="", use="", inp=""):
-    return {"action": action, "who": who, "receive": [{"from": f, "what": w, "how": h} for f, w, h in recv], "system": system, "input": inp,
+def _ds(action, system="", output="", who="", recv=(), to="", how="", use=""):
+    return {"action": action, "who": who, "receive": [{"from": f, "what": w, "how": h} for f, w, h in recv], "system": system,
             "output": output, "to": to, "how": how, "use": use}
+
+def _demo_shift(i):
+    """デモの人の勤務形態と班（奇数番目は交代勤務で、班を順に割り当てる）"""
+    return ("交代勤務", C.SHIFT_TEAMS[(i // 2) % len(C.SHIFT_TEAMS)]) if i % 2 else ("普通勤務", "")
 
 DEMO_TASKS = [
     dict(name="日報の実績をExcelの集計表に転記する", who="田中 一郎", domain="製造実行・管理", purpose="日次の生産実績を職場の朝会で確認するため", output="日次実績集計表（Excel）",
@@ -5685,7 +5566,7 @@ def seed_demo():
         if r is None:
             r = Respondent(
                 emp_id=emp_id,
-                name=name, workplace=workplace, is_demo=True, work_pattern=("交代勤務" if i % 2 else "普通勤務"), shift_team=(C.SHIFT_TEAMS[(i // 2) % len(C.SHIFT_TEAMS)] if i % 2 else ""),
+                name=name, workplace=workplace, is_demo=True, work_pattern=_demo_shift(i)[0], shift_team=_demo_shift(i)[1],
                 c2_skills=C.join_list(skills), c3_learn=C.join_list(learn),
                 created_at=base + timedelta(days=i),
             )
@@ -5712,15 +5593,12 @@ def seed_demo():
         for k, v in DEMO_PROGRESS.get(row["name"], {}).items():
             setattr(t, k, v)
         _seed_stage_history(t, datetime.now())
-        db.session.add(t)
         made.append((t, state, raw))
     db.session.flush()
 
     for t, state, raw in made:
         _finalize_task(t, state, t.intake, use_ai=False)
-        t.set_names(steps=raw["steps"] if raw["steps"] != state["steps"] else [],
-                    fields=dict({"inputs_note": "、".join(raw["sources"]), "output_users_note": "、".join(raw["recipients"])},
-                                **{k: v for k, v in DEMO_FLOWS.get(t.name, {}).items() if k in NAME_FIELDS}))
+        _set_raw_names(t, state, raw, **{k: v for k, v in DEMO_FLOWS.get(t.name, {}).items() if k in NAME_FIELDS})
         if t.name in DEMO_AI_EXTRA:
             t.ai_extra = json.dumps(dict(t.ai_extra_dict, **DEMO_AI_EXTRA[t.name], ai_plan_demo=True), ensure_ascii=False)
     by_name = {t.name: t for t, _state, _raw in made}
@@ -5749,8 +5627,7 @@ def recent_periods(n=4):
 
 def _seed_employees_and_monthly(resp_by_name, wp_by_name, created):
     rows = [(r.emp_id, name, r.workplace, r.work_pattern or "", r.shift_team or "") for name, r in resp_by_name.items()]
-    rows += [(emp_id, name, wp_by_name.get(wp), "交代勤務" if j % 2 else "普通勤務", C.SHIFT_TEAMS[(j // 2) % len(C.SHIFT_TEAMS)] if j % 2 else "")
-             for j, (emp_id, name, wp) in enumerate(DEMO_EXTRA_EMPLOYEES)]
+    rows += [(emp_id, name, wp_by_name.get(wp), *_demo_shift(j)) for j, (emp_id, name, wp) in enumerate(DEMO_EXTRA_EMPLOYEES)]
     employees = []
     for emp_id, name, workplace, pattern, team in rows:
         emp = find_employee(emp_id)
@@ -5767,7 +5644,6 @@ def _seed_employees_and_monthly(resp_by_name, wp_by_name, created):
     periods = recent_periods(4)
     last = len(periods) - 1
     hours_options = list(C.MONTHLY_HOURS_OPTIONS)
-    stance_options = [C.STANCE_SELF, C.STANCE_TOGETHER, C.STANCE_ASK]
     surveys = {}
     for period in periods:
         survey = MonthlySurvey.query.filter_by(period=period).first()
@@ -5787,14 +5663,7 @@ def _seed_employees_and_monthly(resp_by_name, wp_by_name, created):
             prev_level = max(0, (i % 3) + 2 - (p_idx - 1))
             has = "ない" if level == 0 else "ある"
             hours = "" if not level else hours_options[min(len(hours_options) - 1, level * 2 + (1 if i % 4 == 0 else 0))]
-            if p_idx == 0 or level == prev_level:
-                trend = "変わらない"
-            elif level < prev_level:
-                trend = "減った"
-            elif (i + p_idx) % 7 == 0:
-                trend = "増えた"
-            else:
-                trend = "変わらない"
+            trend = "減った" if p_idx and level < prev_level else "変わらない"
             wants = "ある" if level >= 1 and (i + p_idx) % 3 != 0 else "ない"
             stance_idx = max(0, min(2, (i % 3) - (1 if p_idx >= 2 else 0)))
             r = resp_by_emp.get(emp.emp_id)
@@ -5806,8 +5675,8 @@ def _seed_employees_and_monthly(resp_by_name, wp_by_name, created):
                 "decreased_reason": "日報の転記を自動化した" if trend == "減った" else "",
                 "wants": wants,
                 "wants_tasks": ((r.tasks[0].name if r and r.tasks else "日報の実績の転記") if wants == "ある" else ""),
-                "stance": stance_options[stance_idx] if wants == "ある" else "",
-                "new_tasks": "新しい報告フォーマットへの転記" if (trend == "増えた" or (trend == "変わらない" and p_idx == last and i % 5 == 0)) else "",
+                "stance": C.STANCE_OPTIONS[stance_idx] if wants == "ある" else "",
+                "new_tasks": "",
             }
             if has == "ない":
                 answers = {k: ("ない" if k == "has" else "") for k in answers}
@@ -5973,11 +5842,8 @@ bp_main = Blueprint("main", __name__)
 
 def _resolve_urls(suggestions):
     for s in suggestions:
-        endpoint, params = s.get("url", (None, {}))
-        try:
-            s["href"] = url_for(endpoint, **params) if endpoint else None
-        except Exception:
-            s["href"] = None
+        endpoint, params = s["url"]
+        s["href"] = url_for(endpoint, **params) if endpoint else None
     return suggestions
 
 
@@ -5987,13 +5853,13 @@ def index():
         return redirect(url_for("board.index"))
     k = kpis()
     progress = dashboard_progress()
-    _summary, wish_counts, have, learn, _stances = people_summary(dx_people())
+    wish_counts, have, learn = people_summary(dx_people())
     charts = {"timeline": progress["timeline"], "stages": progress["stages"], "decisions": progress["decisions"]}
     return render_template(
         "index.html",
         k=k,
         pr=progress,
-        charts_json=json.dumps(charts, ensure_ascii=False).replace("</", "<\\/"),
+        charts_json=_script_json(charts),
         suggestions=_resolve_urls(suggest_actions()),
         ai_suggestions=_json_column(Setting.get("ai_suggestions"), []),
         wish_counts=wish_counts,
@@ -6004,7 +5870,7 @@ def index():
 @bp_main.post("/ai/suggest")
 def ai_suggest():
     if not ai_enabled():
-        flash("AI連携が無効です。管理画面の「AI連携」で URL・API キー・モデル名を設定してください。", "warning")
+        flash(AI_OFF_MSG, "warning")
         return redirect(url_for("main.index"))
     k = kpis()
     have, learn = skills_summary()
@@ -6067,20 +5933,6 @@ def _domains():
 def _workplaces():
     return Workplace.query.order_by(Workplace.sort, Workplace.id).all()
 
-class _JsonForm(dict):
-    def get(self, key, default=None, type=None):
-        value = dict.get(self, key, default)
-        if isinstance(value, list):
-            value = value[0] if value else default
-        if value is None:
-            return default
-        if type is not None:
-            try:
-                return type(value)
-            except (TypeError, ValueError):
-                return default
-        return value if isinstance(value, str) else str(value)
-
 def _int_or(value, default):
     try:
         return int(value)
@@ -6090,11 +5942,7 @@ def _int_or(value, default):
 SKILL_OPTIONS_KEY = "skill_options"
 
 def skill_options():
-    try:
-        raw = Setting.get(SKILL_OPTIONS_KEY, "")
-        data = json.loads(raw) if raw else None
-    except Exception:
-        data = None
+    data = _json_column(Setting.get(SKILL_OPTIONS_KEY, ""), None)
     items = [str(v).strip() for v in data] if isinstance(data, list) else list(C.SKILLS)
     seen, out = set(), []
     for v in items:
@@ -6223,6 +6071,7 @@ def _options():
         "workplaces": [{"id": w.id, "name": w.name} for w in _workplaces()],
         "person": C.PERSON_FIELDS,
         "prefill_note": C.PREFILL_NOTE,
+        "emp_not_found": C.EMP_NOT_FOUND,
         "frequencies": C.FREQUENCIES,
         "durations": C.DURATIONS,
         "wishes": C.WISHES,
@@ -6260,15 +6109,15 @@ def start():
 # ----- API: 基本情報 -----
 @bp_survey.post("/api/respondent")
 def api_respondent():
-    f = _JsonForm(request.get_json(silent=True) or {})
-    workplace_id = f.get("workplace_id", type=int)
-    work_pattern = (f.get("work_pattern") or "").strip()
-    emp_id, name, errors = _check_emp_id(f.get("emp_id"), "入力してください")
+    data = request.get_json(silent=True) or {}
+    workplace_id = _int_or(data.get("workplace_id"), None)
+    work_pattern = str(data.get("work_pattern") or "").strip()
+    emp_id, name, errors = _check_emp_id(data.get("emp_id"), "入力してください")
     if not workplace_id:
         errors["workplace_id"] = "選択してください"
     elif db.session.get(Workplace, workplace_id) is None:
         errors["workplace_id"] = "Gr・役割を選んでください"
-    shift_team = clean_team(work_pattern, f.get("shift_team"))
+    shift_team = clean_team(work_pattern, data.get("shift_team"))
     if work_pattern not in C.WORK_PATTERNS:
         errors["work_pattern"] = "選択してください"
     elif work_pattern == C.SHIFT_PATTERN and not shift_team:
@@ -6493,6 +6342,11 @@ def unmark_estimate(task, key):
         task.ai_extra = json.dumps(extra, ensure_ascii=False)
 
 
+def _set_raw_names(task, state, raw, **fields):
+    """氏名を置き換える前の手順・受け取り元・渡す相手を控える（業務マップと案件詳細の流れ図で氏名を出すため）"""
+    task.set_names(steps=raw["steps"] if raw["steps"] != state["steps"] else [],
+                   fields=dict({"inputs_note": "、".join(raw["sources"]), "output_users_note": "、".join(raw["recipients"])}, **fields))
+
 def _finalize_task(task, state, messages, refresh=False, use_ai=True):
     task.compute_minutes()
     domains = _domains()
@@ -6572,10 +6426,7 @@ def _finalize_task(task, state, messages, refresh=False, use_ai=True):
             ai_plan_at=_ai_stamp(),
         )
         extra.pop("ai_plan_demo", None)
-        try:
-            guess = int(data.get("headcount") or 1)
-        except (TypeError, ValueError):
-            guess = 1
+        guess = _int_or(data.get("headcount") or 1, 1)
         if guess > 1:
             extra["headcount_guess"] = guess
         else:
@@ -6636,10 +6487,8 @@ def api_task_create():
         task.assignment = "自主改善"
     db.session.add(task)
     db.session.flush()
-    task.compute_minutes()
     _finalize_task(task, state, messages)
-    task.set_names(steps=raw_state["steps"] if raw_state["steps"] != state["steps"] else [],
-                   fields={"inputs_note": "、".join(raw_state["sources"]), "output_users_note": "、".join(raw_state["recipients"])})
+    _set_raw_names(task, state, raw_state)
     if find_employee(r.emp_id) is None:
         register_member(r.emp_id, r.name, r.workplace_id, r.work_pattern)
     db.session.commit()
@@ -6935,8 +6784,8 @@ def _graph_data(row):
     except ValueError:
         return None
 
-def _merged_graph(kind, workplace_id, domain_id):
-    tasks, truncated = _filtered_tasks(domain_id, workplace_id)
+def _merged_graph(kind, workplace_id, domain_id, scoped=None):
+    tasks, truncated = scoped or _filtered_tasks(domain_id, workplace_id)
     with show_names():
         auto = _build(tasks, workplace_id, domain_id).to_graph()
     scope = scope_key(workplace_id, domain_id)
@@ -6960,8 +6809,8 @@ def _graph_view(merged):
 def index():
     domain_id = request.args.get("domain_id", type=int)
     workplace_id = request.args.get("workplace_id", type=int)
-    tasks, truncated = _filtered_tasks(domain_id, workplace_id)
-    merged = _merged_graph("info", workplace_id, domain_id)
+    tasks, truncated = scoped = _filtered_tasks(domain_id, workplace_id)
+    merged = _merged_graph("info", workplace_id, domain_id, scoped)
     shown, focus_label = merged, ""
     if request.args.get("focus") == "same" and merged["same"]:
         pair = (request.args.get("pair") or "").strip()
@@ -6991,10 +6840,14 @@ def index():
         flow_rows=flow_rows(),
         same=merged["same"],
         same_done=same_done(),
-        ai_on=ai_enabled(),
         same_ai_at=_map_same_ai()["at"],
         focus_label=focus_label,
     )
+
+def _back_to_same(f):
+    """「同じものかもしれない箱」の欄へ戻る（絞り込みと、！の箱の流れだけの表示を引き継ぐ）"""
+    args = {k: v for k, v in (("workplace_id", f.get("workplace_id", type=int)), ("domain_id", f.get("domain_id", type=int)), ("focus", f.get("focus") == "same" and "same")) if v}
+    return redirect(url_for("bizmap.index", **args) + "#same")
 
 @bp_bizmap.post("/same")
 def same():
@@ -7025,8 +6878,7 @@ def same():
         flash(f"「{a}」のまとめを戻しました。", "info")
     _save_same(data)
     db.session.commit()
-    args = {k: v for k, v in (("workplace_id", f.get("workplace_id", type=int)), ("domain_id", f.get("domain_id", type=int)), ("focus", f.get("focus") == "same" and "same")) if v}
-    return redirect(url_for("bizmap.index", **args) + "#same")
+    return _back_to_same(f)
 
 @bp_bizmap.post("/same/ai")
 def same_ai():
@@ -7034,10 +6886,9 @@ def same_ai():
     if ai_enabled():
         level, message = review_same_with_ai(workplace_id, domain_id)
     else:
-        level, message = "warning", "AI連携が無効です。管理画面の「AI連携」で URL・API キー・モデル名を設定してください。"
+        level, message = "warning", AI_OFF_MSG
     flash(message, level)
-    args = {k: v for k, v in (("workplace_id", workplace_id), ("domain_id", domain_id), ("focus", request.form.get("focus") == "same" and "same")) if v}
-    return redirect(url_for("bizmap.index", **args) + "#same")
+    return _back_to_same(request.form)
 
 def _kind_and_scope(payload=None):
     src = request.args if payload is None else payload
@@ -7058,7 +6909,7 @@ def edit():
         workplace_id=workplace_id,
         domain_id=domain_id,
         scope_label=_scope_label(workplace_id, domain_id),
-        kinds_json=json.dumps(editor_config(), ensure_ascii=False).replace("</", "<\\/"),
+        kinds_json=_script_json(editor_config()),
     )
 
 # ----- グラフ API（エディタ用） -----
@@ -7150,25 +7001,13 @@ def domain(domain_id):
         info_legend=info_legend,
     )
 
-# ===== 画面: 人財一覧の集計 =====
+# ===== ダッシュボード: 意欲・技術の集計 =====
 def people_summary(everyone):
     have, learn = skills_summary(everyone)
-    latest_period = max((p["latest_period"] for p in everyone if p["latest_period"]), default="")
-    in_latest = [p["monthly"][0] for p in everyone if latest_period and p["latest_period"] == latest_period]
-    summary = {
-        "total": len(everyone),
-        "positive": len([p for p in everyone if p["positive"]]),
-        "self_now": len([m for m in in_latest if m.answer("stance") in C.MONTHLY_KPI["self_positive"]]),
-        "period_label": period_label(latest_period) if latest_period else "月次の回答はまだありません",
-        "learners": len([p for p in everyone if p["learn"]]),
-    }
-    positive_counts = Counter((p["work_pattern"] or "未設定") for p in everyone if p["positive"])
-    summary["positive_by_pattern"] = {k: positive_counts[k] for k in list(C.WORK_PATTERNS) + ["未設定"] if positive_counts.get(k)}
     latest_stances = Counter(p["stance_latest"] for p in everyone if p["stance_latest"] and not p["stance_old"])
-    stance_options = next((q["options"] for q in C.MONTHLY_CORE_QUESTIONS if q["key"] == "stance"), [])
     wish_counts = [("登録: " + opt, len([p for p in everyone if p["wish"] == opt])) for opt in C.DX_WISH_OPTIONS]
-    wish_counts += [("月次の進め方: " + opt, latest_stances.get(opt, 0)) for opt in stance_options]
-    return summary, wish_counts, have, learn, stance_options
+    wish_counts += [("月次の進め方: " + opt, latest_stances.get(opt, 0)) for opt in C.STANCE_OPTIONS]
+    return wish_counts, have, learn
 
 # ===== 画面: 管理 =====
 bp_admin = Blueprint("admin", __name__, url_prefix="/admin")
@@ -7411,7 +7250,7 @@ def employees():
     by_key = {p["key"][1]: p for p in dx_all if p["key"][0] == "id"}
     for r in rows:
         r["dx"] = by_key.get(emp_key(r["emp"].emp_id))
-    stance_options = next((q["options"] for q in C.MONTHLY_CORE_QUESTIONS if q["key"] == "stance"), [])
+    stance_options = C.STANCE_OPTIONS
     months = lambda key: [(x, period_label(x)) for x in sorted({r["dx"][key] for r in rows if r["dx"] and r["dx"][key]}, reverse=True)]
     names = [w.name for w in _workplaces()]
     used = {r["workplace"] for r in rows if r["workplace"]}
@@ -7474,7 +7313,7 @@ def delete_employee(employee_id):
 @bp_admin.route("/map-vocab")
 def map_vocab_page():
     return render_template(
-        "admin/map_vocab.html", vocab_json=json.dumps(vocab_public(), ensure_ascii=False).replace("</", "<\\/"),
+        "admin/map_vocab.html", vocab_json=_script_json(vocab_public()),
         choices_json=json.dumps({"icons": ICON_CHOICES, "shapes": SHAPE_CHOICES, "directions": DIRECTION_CHOICES, "kinds": METHOD_KIND_CHOICES, "users": USER_CHOICES}, ensure_ascii=False),
     )
 
@@ -7552,14 +7391,8 @@ def public_period(value):
 
 def shift_period(period, months):
     y, m = (int(x) for x in period.split("-"))
-    m += months
-    while m <= 0:
-        m += 12
-        y -= 1
-    while m > 12:
-        m -= 12
-        y += 1
-    return f"{y:04d}-{m:02d}"
+    y, m = divmod(y * 12 + m - 1 + months, 12)
+    return f"{y:04d}-{m + 1:02d}"
 
 def default_questions():
     return [_core_copy(q) for q in C.MONTHLY_CORE_QUESTIONS]
@@ -7754,36 +7587,35 @@ def api_employee(emp_id):
 def results():
     view = request.args.get("view") or ("month" if request.args.get("period") else "trend")
     view = view if view in ("trend", "month") else "trend"
-    periods, _by_period = _responses_by_period()
-    surveys = MonthlySurvey.query.order_by(MonthlySurvey.period.desc()).all()
-    base = dict(view=view, periods=periods, period_labels={p: period_label(p) for p in periods}, metrics=C.SURVEY_METRICS)
+    loaded = _responses_by_period()
+    periods = loaded[0]
+    base = dict(view=view, periods=periods, metrics=C.SURVEY_METRICS)
     if view == "trend":
         last = periods[-1] if periods else current_period()
         to = parse_period(request.args.get("to") or last)
         start = parse_period(request.args.get("from") or (periods[-12] if len(periods) > 12 else (periods[0] if periods else last)))
         start, to = min(start, to), max(start, to)
-        chosen = [p for p in periods if start <= p <= to]
-        data = survey_trend_analysis(chosen)
+        data = survey_trend_analysis([p for p in periods if start <= p <= to], loaded)
         chart = {"months": data["months"], "questions": [{"key": t["key"], "labels": t["labels"], "options": [x["option"] for x in t["series"]], "percents": [x["percents"] for x in t["series"]]} for t in data["questions"]],
                  "matrix": data["matrix"], "metrics": C.SURVEY_METRICS}
-        return render_template("monthly/results.html", **base, start=start, to=to, chosen=chosen, data=data,
+        return render_template("monthly/results.html", **base, start=start, to=to, data=data,
                                ranges=[(label, periods[-n] if n and len(periods) >= n else (periods[0] if periods else start)) for n, label in C.SURVEY_RANGES],
-                               chart_json=json.dumps(chart, ensure_ascii=False).replace("</", "<\\/"))
+                               chart_json=_script_json(chart))
+    surveys = MonthlySurvey.query.order_by(MonthlySurvey.period.desc()).all()
     default_period = periods[-1] if periods else (surveys[0].period if surveys else current_period())
     selected = parse_period(request.args.get("period") or default_period)
     survey = MonthlySurvey.query.filter_by(period=selected).first()
     responses = MonthlyResponse.query.filter_by(period=selected).order_by(MonthlyResponse.workplace_id, MonthlyResponse.name).all()
-    month = survey_month_analysis(selected, survey)
+    month = survey_month_analysis(selected, survey, loaded)
     month_periods = sorted({x.period for x in surveys} | set(periods), reverse=True)
     i = month_periods.index(selected) if selected in month_periods else -1
-    chart = {"groups": month["groups"], "hours": month["hours"], "cross": month["cross"], "metrics": C.SURVEY_METRICS}
     return render_template(
         "monthly/results.html", **base, month=month, survey=survey, selected=selected, selected_label=period_label(selected),
         month_periods=month_periods, newer=month_periods[i - 1] if i > 0 else None, older=month_periods[i + 1] if 0 <= i < len(month_periods) - 1 else None,
         responses=responses, stats=monthly_question_stats(survey, responses) if survey else [],
         comments=[r for r in responses if (r.comment or "").strip()], qnos=question_numbers(survey.questions) if survey else {},
         choice_keys=[q["key"] for q in (survey.questions if survey else []) if q["type"] == "choice"],
-        chart_json=json.dumps(chart, ensure_ascii=False).replace("</", "<\\/"),
+        chart_json=_script_json({"groups": month["groups"], "hours": month["hours"], "cross": month["cross"]}),
     )
 
 # ----- 設問の編集（要ログイン） -----
@@ -7885,7 +7717,7 @@ def _clean_questions(items):
     missing = [q["text"] for q in C.MONTHLY_CORE_QUESTIONS if q["key"] not in seen]
     if missing:
         return None, "基本設問は外せません: " + "、".join(missing)
-    cleaned, _ = _core_in_order(cleaned)
+    cleaned = _core_in_order(cleaned)
     return cleaned, None
 
 @bp_monthly.post("/admin/save")
@@ -8075,7 +7907,7 @@ def export_questions():
 
 
 def export_workplaces():
-    return ["ID", "Gr・役割", "並び順"], [[w.id, w.name, w.sort] for w in Workplace.query.order_by(Workplace.sort, Workplace.id).all()]
+    return ["ID", "Gr・役割", "並び順"], [[w.id, w.name, w.sort] for w in _workplaces()]
 
 
 def export_domains():
@@ -8245,7 +8077,7 @@ TEMPLATES = {
     {% endfor %}
     </tbody>
     <tfoot><tr>
-      <th colspan="{{ C.MEMBER_COLUMNS|length }}" class="text-end">回答 ／ 対象（回答率）{{ C.tip("この行の「回答 ／ 対象」は、その月に回答した対象者の数と対象者の数で、月次集計・ダッシュボードの回答率と同じ数え方です（絞り込んだときは、表示している人だけで数えます）。月末時点で「対象外」にチェックしている人は、その月の分母にも分子にも入りません（今月は今のチェックで数えます）。チェックを外すと外した月から分母に戻り、それより前の月は月末時点の状態のまま残ります。対象外の人は回答できません。削除できるのは、まだ回答も自動化アイテムの登録もない人だけです。") }}<span class="d-block fw-normal text-muted" id="member-stat-note"></span></th>
+      <th colspan="{{ C.MEMBER_COLUMNS|length }}" class="text-end">回答 ／ 対象（回答率）{{ C.tip("この行の「回答 ／ 対象」は、その月に回答した対象者の数と対象者の数で、アンケート結果分析・ダッシュボードの回答率と同じ数え方です（絞り込んだときは、表示している人だけで数えます）。月末時点で「対象外」にチェックしている人は、その月の分母にも分子にも入りません（今月は今のチェックで数えます）。チェックを外すと外した月から分母に戻り、それより前の月は月末時点の状態のまま残ります。対象外の人は回答できません。削除できるのは、まだ回答も自動化アイテムの登録もない人だけです。") }}<span class="d-block fw-normal text-muted" id="member-stat-note"></span></th>
       {% for p in periods %}{% set st = stats[p] %}<td class="text-center member-stat member-mcol{% if loop.index0 < old_n %} member-old{% endif %}" data-period="{{ p }}" data-m="{{ loop.index0 }}">{{ st.answered }}／{{ st.members }}{% if st.rate is not none %}<br>{{ '%.0f'|format(st.rate) }}%{% endif %}</td>{% endfor %}
     </tr></tfoot>
   </table>
@@ -8412,8 +8244,7 @@ TEMPLATES = {
       var tr = box.closest("tr");
       box.disabled = true;
       try {
-        var r = await fetch(box.dataset.url, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify({ excluded: box.checked }) });
-        var j = await r.json();
+        var j = await sendJson(box.dataset.url, { excluded: box.checked });
         if (!j.success) throw new Error("failed");
         tr.classList.toggle("is-excluded", box.checked);
         tr.dataset.excluded = box.checked ? "1" : "0";
@@ -8526,7 +8357,7 @@ TEMPLATES = {
   var msg = document.getElementById("mv-msg");
   var dirty = false;
   function touch() { dirty = true; msg.className = "small text-muted"; msg.textContent = "未保存の変更があります"; }
-  function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; }
+  var el = uiEl;
   function select(map, value, onChange) {
     var s = el("select", "form-select form-select-sm");
     Object.keys(map).forEach(function (k) { var o = el("option", null, map[k]); o.value = k; if (k === (value || "")) o.selected = true; s.appendChild(o); });
@@ -8609,16 +8440,12 @@ TEMPLATES = {
       if (inputs[0]) inputs[0].focus();
     });
   });
-  async function post(url, body) {
-    var r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify(body) });
-    return r.json();
-  }
   document.getElementById("mv-try-btn").addEventListener("click", async function () {
     var t = document.getElementById("mv-try").value.trim();
     var out = document.getElementById("mv-try-out");
     out.innerHTML = "";
     if (!t) return;
-    var j = await post("{{ url_for('admin.map_vocab_try') }}", { vocab: V, text: t });
+    var j = await sendJson("{{ url_for('admin.map_vocab_try') }}", { vocab: V, text: t });
     [["情報の箱なら 媒体", j.medium], ["作業の箱なら だれ", j.who], ["線なら 方法", j.method], ["手順の欄なら", j.role], ["引き継ぎ方", j.handoff]].forEach(function (p) {
       out.appendChild(el("dt", "col-sm-4 fw-normal text-muted", p[0]));
       out.appendChild(el("dd", "col-sm-8 mb-1", p[1]));
@@ -8627,7 +8454,7 @@ TEMPLATES = {
   document.getElementById("mv-try").addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); document.getElementById("mv-try-btn").click(); } });
   document.getElementById("mv-save").addEventListener("click", async function () {
     try {
-      var j = await post("{{ url_for('admin.map_vocab_save') }}", { vocab: V });
+      var j = await sendJson("{{ url_for('admin.map_vocab_save') }}", { vocab: V });
       if (!j.success) throw new Error("failed");
       V = j.vocab; dirty = false; renderAll();
       msg.className = "small text-success"; msg.textContent = "保存しました";
@@ -8636,7 +8463,7 @@ TEMPLATES = {
   document.getElementById("mv-reset").addEventListener("click", async function () {
     if (!confirm("区分と判定の語を既定に戻しますか？（追加した区分も消えます）")) return;
     try {
-      var j = await post("{{ url_for('admin.map_vocab_save') }}", { reset: true });
+      var j = await sendJson("{{ url_for('admin.map_vocab_save') }}", { reset: true });
       V = j.vocab; dirty = false; renderAll();
       msg.className = "small text-success"; msg.textContent = "既定に戻しました";
     } catch (e) { msg.className = "small text-danger"; msg.textContent = "戻せませんでした"; }
@@ -9175,11 +9002,11 @@ TEMPLATES = {
        '取り出し元の情報 → 業務 → できるもの → 渡す相手の作業。箱は作業（四角・だれつき）と情報（媒体の形とアイコン）の2種類、線は仕事の流れ（濃い太い線）と情報の流れ（青い細い線）の2種類で、名前から推定したつながりはそれぞれ点線です。聞き取りで答えた名前で描き、同じ名前は1つの箱にまとめます。Gr・役割ごとの枠に業務を置き、点線は名前から推定したつながり（ある業務のできるものを別の業務が使っている、前後の業務）です。灰色の点線の箱は、月次アンケートで挙がったものの、まだ流れを登録していない業務です。保留中の業務は点線の枠に「（保留）」、廃止した業務は薄い色に「（廃止済み）」を付けます。',
        flows.info, '業務が登録されると図が描かれます。') }}
 
-    {% if same or same_done or ai_on %}
+    {% if same or same_done or ai_enabled %}
     <div class="card mt-3" id="same"><div class="card-body">
       <div class="d-flex flex-wrap justify-content-between align-items-start gap-2">
-        <h5 class="card-title"><i class="bi bi-exclamation-circle-fill same-mark"></i> 同じものかもしれない箱{% if same %} <span class="badge text-bg-warning align-middle">{{ same|length }}</span>{% endif %}{{ C.tip(C.SAME_CARD_TIP if ai_on else C.SAME_RULE_TIP) }}</h5>
-        {% if ai_on %}<form method="post" action="{{ url_for('bizmap.same_ai') }}" class="d-inline">
+        <h5 class="card-title"><i class="bi bi-exclamation-circle-fill same-mark"></i> 同じものかもしれない箱{% if same %} <span class="badge text-bg-warning align-middle">{{ same|length }}</span>{% endif %}{{ C.tip(C.SAME_CARD_TIP if ai_enabled else C.SAME_RULE_TIP) }}</h5>
+        {% if ai_enabled %}<form method="post" action="{{ url_for('bizmap.same_ai') }}" class="d-inline">
           <input type="hidden" name="workplace_id" value="{{ args.get('workplace_id') or '' }}"><input type="hidden" name="domain_id" value="{{ args.get('domain_id') or '' }}">
           <input type="hidden" name="focus" value="{{ 'same' if focus_label else '' }}">
           <button class="btn btn-sm btn-outline-primary"{% if same_ai_at %} data-tip="前回: {{ same_ai_at }}"{% endif %}>AIで見直す</button>
@@ -9651,7 +9478,7 @@ TEMPLATES = {
       <div class="d-flex justify-content-between align-items-center">
         <h5 class="card-title mb-0">AI分析{{ C.tip("AIの推定は参考情報です。担当者確認（右側）を経て正式な情報になります。") }}
           {% if task.ai_source == 'openai' %}<span class="badge text-bg-primary">ChatGPT API</span>{% elif task.ai_source %}<span class="badge text-bg-secondary">ルールベース</span>{% endif %}
-          {% if task.ai_priority %}<span class="badge text-bg-{{ {'高':'danger','中':'warning','低':'light text-muted'}.get(task.ai_priority, 'light') }}">優先度 {{ task.ai_priority }}</span>{% endif %}
+          {% if task.ai_priority %}<span class="badge text-bg-{{ C.PRIORITY_BADGE.get(task.ai_priority, 'light') }}">優先度 {{ task.ai_priority }}</span>{% endif %}
         </h5>
         <form method="post" action="{{ url_for('cases.reanalyze', task_id=task.id) }}">
           <button class="btn btn-sm btn-outline-primary">{% if ai_enabled %}AIで再分析{% else %}再分析（ルール）{% endif %}</button>
@@ -9769,6 +9596,8 @@ TEMPLATES = {
       </div>
 
       {% set missing = task.missing_required %}
+      {% macro checks(name, pre, options, selected) %}<input type="hidden" name="{{ name }}" value="">
+          {% for v in options %}<div class="form-check form-check-inline small mb-0"><input class="form-check-input" type="checkbox" name="{{ name }}" value="{{ v }}" id="f-{{ pre }}-{{ loop.index }}" {% if v in selected %}checked{% endif %}><label class="form-check-label" for="f-{{ pre }}-{{ loop.index }}">{{ v }}</label></div>{% endfor %}{% endmacro %}
       {% macro need(label) %}{% if label in task.unknown_required %} <span class="badge text-bg-warning">不明</span>{% elif label in missing %} <span class="badge text-bg-warning">未入力</span>{% endif %}{% endmacro %}
       <label class="form-label small mb-1 mt-2" id="case-info"><strong>業務情報</strong></label>{{ C.tip("直すと推定の印が外れます。必須項目が空なら「未入力」が付きます。\n頻度・1回の時間・担当人数を変えると、保存したときに月間時間を計算し直します。") }}
       <div class="row g-2 mb-2">
@@ -9794,14 +9623,12 @@ TEMPLATES = {
         </div>
         <div class="col-12" id="f-output_users">
           <div class="form-label small mb-0">利用者{{ need('利用者') }}</div>
-          <input type="hidden" name="output_users" value="">
-          {% for u in C.OUTPUT_USERS %}<div class="form-check form-check-inline small mb-0"><input class="form-check-input" type="checkbox" name="output_users" value="{{ u }}" id="f-ou-{{ loop.index }}" {% if u in task.output_users_list %}checked{% endif %}><label class="form-check-label" for="f-ou-{{ loop.index }}">{{ u }}</label></div>{% endfor %}
+          {{ checks('output_users', 'ou', C.OUTPUT_USERS, task.output_users_list) }}
           <input type="text" name="output_users_note" class="form-control form-control-sm mt-1" value="{{ task.output_users_note or '' }}" maxlength="500" placeholder="渡す相手のGr・役割・部署・役職・氏名（「、」区切り。氏名は業務マップと流れ図だけに出ます）" aria-label="利用者の補足">
         </div>
         <div class="col-12" id="f-inputs">
           <div class="form-label small mb-0">入力元（情報のもと）{{ need('入力元') }}</div>
-          <input type="hidden" name="inputs" value="">
-          {% for s in C.INPUT_SOURCES %}<div class="form-check form-check-inline small mb-0"><input class="form-check-input" type="checkbox" name="inputs" value="{{ s }}" id="f-in-{{ loop.index }}" {% if s in task.inputs_list %}checked{% endif %}><label class="form-check-label" for="f-in-{{ loop.index }}">{{ s }}</label></div>{% endfor %}
+          {{ checks('inputs', 'in', C.INPUT_SOURCES, task.inputs_list) }}
           <input type="text" name="inputs_note" class="form-control form-control-sm mt-1" value="{{ task.inputs_note or '' }}" maxlength="500" placeholder="具体的なシステム名・ファイル名・帳票名（「、」区切り）" aria-label="入力元の補足">
         </div>
         <div class="col-6">
@@ -9836,18 +9663,15 @@ TEMPLATES = {
         </div>
         <div class="col-12" id="f-tools">
           <div class="form-label small mb-0">使用ツール</div>
-          <input type="hidden" name="tools" value="">
-          {% for v in C.TOOLS %}<div class="form-check form-check-inline small mb-0"><input class="form-check-input" type="checkbox" name="tools" value="{{ v }}" id="f-tl-{{ loop.index }}" {% if v in task.tools_list %}checked{% endif %}><label class="form-check-label" for="f-tl-{{ loop.index }}">{{ v }}</label></div>{% endfor %}
+          {{ checks('tools', 'tl', C.TOOLS, task.tools_list) }}
         </div>
         <div class="col-12" id="f-nature">
           <div class="form-label small mb-0">作業の性質</div>
-          <input type="hidden" name="nature" value="">
-          {% for v in C.NATURES %}<div class="form-check form-check-inline small mb-0"><input class="form-check-input" type="checkbox" name="nature" value="{{ v }}" id="f-na-{{ loop.index }}" {% if v in task.nature_list %}checked{% endif %}><label class="form-check-label" for="f-na-{{ loop.index }}">{{ v }}</label></div>{% endfor %}
+          {{ checks('nature', 'na', C.NATURES, task.nature_list) }}
         </div>
         <div class="col-12" id="f-pains">
           <div class="form-label small mb-0">困りごと</div>
-          <input type="hidden" name="pains" value="">
-          {% for v in C.PAINS %}<div class="form-check form-check-inline small mb-0"><input class="form-check-input" type="checkbox" name="pains" value="{{ v }}" id="f-pa-{{ loop.index }}" {% if v in task.pains_list %}checked{% endif %}><label class="form-check-label" for="f-pa-{{ loop.index }}">{{ v }}</label></div>{% endfor %}
+          {{ checks('pains', 'pa', C.PAINS, task.pains_list) }}
           <input type="text" name="pains_note" class="form-control form-control-sm mt-1" value="{{ task.pains_note or '' }}" maxlength="500" placeholder="本人の言葉（補足）" aria-label="困りごとの補足">
         </div>
       </div>
@@ -9932,6 +9756,16 @@ TEMPLATES = {
     'cases/index.html': r'''{% extends "base.html" %}
 {% from "board/_macros.html" import stepper with context %}
 {% block title %}改善案件一覧{% endblock %}
+{% macro opt(name, value, text) -%}<option value="{{ value }}" {% if args.get(name) == value|string %}selected{% endif %}>{{ text }}</option>{%- endmacro %}
+{% macro pick(label, name) -%}
+<div class="col-6 col-md-4 col-xl">
+      <label class="form-label small mb-0">{{ label }}</label>
+      <select name="{{ name }}" class="form-select form-select-sm">
+        <option value="">すべて</option>
+        {{ caller() }}
+      </select>
+    </div>
+{%- endmacro %}
 {% block content %}
 <div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
   <h2 class="mb-0">改善案件一覧{{ C.tip("登録された業務はすべて改善案件です。まだ手を付けていない（受付の）業務のうち、希望が「なくしたい・減らしたい」か、困りごとのある業務を「案件候補」として数えます。") }}</h2>
@@ -9942,51 +9776,12 @@ TEMPLATES = {
 
 <form method="get" class="card mb-3"><div class="card-body py-2">
   <div class="row g-2 align-items-end">
-    <div class="col-6 col-md-4 col-xl">
-      <label class="form-label small mb-0">ステータス</label>
-      <select name="status" class="form-select form-select-sm">
-        <option value="">すべて</option>
-        {% for s in C.STATUSES %}<option value="{{ s }}" {% if args.get('status') == s %}selected{% endif %}>{{ s }}</option>{% endfor %}
-      </select>
-    </div>
-    <div class="col-6 col-md-4 col-xl">
-      <label class="form-label small mb-0">進捗の段階</label>
-      <select name="stage" class="form-select form-select-sm">
-        <option value="">すべて</option>
-        {% for key, name, desc, steps in C.STAGES %}<option value="{{ key }}" {% if args.get('stage') == key %}selected{% endif %}>{{ loop.index }}. {{ '作成／伴走' if key == 'build' else name }}</option>{% endfor %}
-      </select>
-    </div>
-    <div class="col-6 col-md-4 col-xl">
-      <label class="form-label small mb-0">Gr・役割</label>
-      <select name="workplace_id" class="form-select form-select-sm">
-        <option value="">すべて</option>
-        {% for w in workplaces %}<option value="{{ w.id }}" {% if args.get('workplace_id')|string == w.id|string %}selected{% endif %}>{{ w.name }}</option>{% endfor %}
-      </select>
-    </div>
-    <div class="col-6 col-md-4 col-xl">
-      <label class="form-label small mb-0">業務領域</label>
-      <select name="domain_id" class="form-select form-select-sm">
-        <option value="">すべて</option>
-        {% for d in domains %}<option value="{{ d.id }}" {% if args.get('domain_id')|string == d.id|string %}selected{% endif %}>{{ d.name }}</option>{% endfor %}
-      </select>
-    </div>
-    <div class="col-6 col-md-4 col-xl">
-      <label class="form-label small mb-0">改善の希望</label>
-      <select name="wish" class="form-select form-select-sm">
-        <option value="">すべて</option>
-        {% for w in C.WISHES %}<option value="{{ w }}" {% if args.get('wish') == w %}selected{% endif %}>{{ w }}</option>{% endfor %}
-      </select>
-    </div>
-    <div class="col-6 col-md-4 col-xl">
-      <label class="form-label small mb-0">絞り込み</label>
-      <select name="filter" class="form-select form-select-sm">
-        <option value="">すべて</option>
-        <option value="candidates" {% if args.get('filter') == 'candidates' %}selected{% endif %}>案件候補（受付で、なくしたい・減らしたい・困りごとあり）</option>
-        <option value="elimination" {% if args.get('filter') == 'elimination' %}selected{% endif %}>廃止・統合候補（完了を除く）</option>
-        <option value="self" {% if args.get('filter') == 'self' %}selected{% endif %}>自主改善希望</option>
-        <option value="unverified" {% if args.get('filter') == 'unverified' %}selected{% endif %}>担当者未確認</option>
-      </select>
-    </div>
+    {% call pick('ステータス', 'status') %}{% for s in C.STATUSES %}{{ opt('status', s, s) }}{% endfor %}{% endcall %}
+    {% call pick('進捗の段階', 'stage') %}{% for key, name, desc, steps in C.STAGES %}{{ opt('stage', key, loop.index ~ '. ' ~ ('作成／伴走' if key == 'build' else name)) }}{% endfor %}{% endcall %}
+    {% call pick('Gr・役割', 'workplace_id') %}{% for w in workplaces %}{{ opt('workplace_id', w.id, w.name) }}{% endfor %}{% endcall %}
+    {% call pick('業務領域', 'domain_id') %}{% for d in domains %}{{ opt('domain_id', d.id, d.name) }}{% endfor %}{% endcall %}
+    {% call pick('改善の希望', 'wish') %}{% for w in C.WISHES %}{{ opt('wish', w, w) }}{% endfor %}{% endcall %}
+    {% call pick('絞り込み', 'filter') %}{% for value, text in (('candidates', '案件候補（受付で、なくしたい・減らしたい・困りごとあり）'), ('elimination', '廃止・統合候補（完了を除く）'), ('self', '自主改善希望'), ('unverified', '担当者未確認')) %}{{ opt('filter', value, text) }}{% endfor %}{% endcall %}
     <div class="col-6 col-md-4 col-xl">
       <label class="form-label small mb-0">キーワード</label>
       <input type="text" name="q" class="form-control form-control-sm" value="{{ args.get('q', '') }}">
@@ -10021,7 +9816,7 @@ TEMPLATES = {
     <td class="small" style="min-width: 150px"><div class="fw-semibold">{{ t.stage_index + 1 }}. {{ t.stage_name }}</div>{{ stepper(t, small=True) }}</td>
     <td class="small">{{ t.steps_done_list|length }}/5</td>
     <td>{% if t.verified %}<span class="badge text-bg-success">済</span>{% else %}<span class="badge text-bg-light text-muted">未</span>{% endif %}</td>
-    <td class="small">{% if t.ai_priority %}<span class="badge text-bg-{{ {'高':'danger','中':'warning','低':'light text-muted'}.get(t.ai_priority, 'light') }}">{{ t.ai_priority }}</span>{% endif %}
+    <td class="small">{% if t.ai_priority %}<span class="badge text-bg-{{ C.PRIORITY_BADGE.get(t.ai_priority, 'light') }}">{{ t.ai_priority }}</span>{% endif %}
       {% for f in t.ai_flags_list[:2] %}<span class="badge badge-flag">{{ f }}</span>{% endfor %}</td>
   </tr>
   {% else %}
@@ -10032,27 +9827,14 @@ TEMPLATES = {
 </div>
 {% endblock %}
 ''',
-    'errors/404.html': r'''{% extends "base.html" %}
-{% block title %}ページが見つかりません{% endblock %}
+    'errors/error.html': r'''{% extends "base.html" %}
+{% block title %}{{ heading }}{% endblock %}
 {% block content %}
 <div class="login-wrap">
   <div class="card login-card"><div class="card-body text-center">
-    <div class="login-mark"><i class="bi bi-signpost-split"></i></div>
-    <h1 class="login-title">ページが見つかりません</h1>
-    <p class="login-sub">URLが変わったか、削除された可能性があります。</p>
-    <a class="btn btn-primary" href="{{ url_for('main.index') }}">トップへ</a>
-  </div></div>
-</div>
-{% endblock %}
-''',
-    'errors/500.html': r'''{% extends "base.html" %}
-{% block title %}エラーが発生しました{% endblock %}
-{% block content %}
-<div class="login-wrap">
-  <div class="card login-card"><div class="card-body text-center">
-    <div class="login-mark"><i class="bi bi-exclamation-triangle"></i></div>
-    <h1 class="login-title">エラーが発生しました</h1>
-    <p class="login-sub">しばらくしてからもう一度お試しください。続くときは推進メンバーに知らせてください。</p>
+    <div class="login-mark"><i class="bi {{ icon }}"></i></div>
+    <h1 class="login-title">{{ heading }}</h1>
+    <p class="login-sub">{{ detail }}</p>
     <a class="btn btn-primary" href="{{ url_for('main.index') }}">トップへ</a>
   </div></div>
 </div>
@@ -10069,23 +9851,23 @@ TEMPLATES = {
 ''',
     'index.html': r'''{% extends "base.html" %}
 {% block title %}ダッシュボード{% endblock %}
-{% macro num(v, digits=0) -%}{% if v is none %}－{% else %}{{ ('%.' ~ digits ~ 'f')|format(v) }}{% endif %}{%- endmacro %}
-{% macro delta(cur, prev, unit='', better='up', digits=0) -%}
-{%- if cur is not none and prev is not none -%}
-{%- set d = cur - prev -%}
-{%- set good = (d > 0 and better == 'up') or (d < 0 and better == 'down') -%}
-{%- set bad = (d < 0 and better == 'up') or (d > 0 and better == 'down') -%}
-<span class="sa-delta{% if good %} is-good{% elif bad %} is-bad{% endif %}">{{ '▲' if d > 0 else ('▼' if d < 0 else '±') }}{{ ('%.' ~ digits ~ 'f')|format(d|abs) }}{{ unit }}</span>
-{%- endif -%}
-{%- endmacro %}
-{% macro card(icon, tile, label, value, unit, tip='') -%}
-<div class="col-6 col-lg-3">
-  <div class="card stat h-100"><div class="card-body">
-    <div class="stat-head"><span class="stat-tile {{ tile }}"><i class="bi {{ icon }}"></i></span><span class="stat-label">{{ label }}{% if tip %}{{ C.tip(tip) }}{% endif %}</span></div>
-    <div class="stat-value">{{ value }}<span class="stat-unit">{{ unit }}</span></div>
-    <div class="stat-sub">{{ caller() }}</div>
-  </div></div>
-</div>
+{% from "stats/_macros.html" import num, delta, card, chart_card with context %}
+{% macro bar_list(title, rows, label_width='9rem', bar_cls='', empty='データなし') -%}
+  <div class="col-lg-4">
+    <div class="card h-100"><div class="card-body">
+      <h5 class="card-title">{{ title }}</h5>
+      {% set top = (rows|map(attribute=1)|max) if rows else 1 %}
+      {% for label, n in rows %}
+      <div class="d-flex align-items-center small mb-1">
+        <div style="width: {{ label_width }}">{{ label }}</div>
+        <div class="progress flex-grow-1" style="height: 14px"><div class="progress-bar{% if bar_cls %} {{ bar_cls }}{% endif %}" style="width: {{ (n / (top or 1) * 100)|round }}%"></div></div>
+        <div style="width: 3rem" class="text-end">{{ n }} 人</div>
+      </div>
+      {% else %}{% if empty %}
+      <p class="text-muted small mb-0">{{ empty }}</p>
+      {% endif %}{% endfor %}
+    </div></div>
+  </div>
 {%- endmacro %}
 {% block content %}
 {% if k.task_count == 0 %}
@@ -10117,14 +9899,8 @@ TEMPLATES = {
   {% call card('bi-lightning-charge', 'tile-orange', '廃止・統合・簡素化・自動化', pr.done_decisions|sum(attribute=1), '件', '完了した案件のうち、決めた改善の方向（ECRS と自動化・高度化）ごとの件数') %}{% for d, n in pr.done_decisions %}{{ d }} {{ n }}{% if not loop.last %}・{% endif %}{% else %}完了した改善はまだありません{% endfor %}{% endcall %}
 </div>
 <div class="row g-3 mb-2">
-  <div class="col-lg-7"><div class="card h-100"><div class="card-body">
-    <h5 class="card-title">改善案件の段階{{ C.tip("いまどの段階にある案件が何件あるか（開始 → 要求定義 → 要件定義 → 作成 → テスト → 確認 → 完了）") }}</h5>
-    <div class="chart-box" style="height: 260px"><canvas id="dash-stages"></canvas></div>
-  </div></div></div>
-  <div class="col-lg-5"><div class="card h-100"><div class="card-body">
-    <h5 class="card-title">改善の方向{{ C.tip("改善の方向を決めた案件（完了していないものも含む）の内訳") }}</h5>
-    <div class="chart-box" style="height: 260px"><canvas id="dash-decisions"></canvas></div>
-  </div></div></div>
+  {% call chart_card('dash-stages', 'col-lg-7') %}改善案件の段階{{ C.tip("いまどの段階にある案件が何件あるか（開始 → 要求定義 → 要件定義 → 作成 → テスト → 確認 → 完了）") }}{% endcall %}
+  {% call chart_card('dash-decisions', 'col-lg-5') %}改善の方向{{ C.tip("改善の方向を決めた案件（完了していないものも含む）の内訳") }}{% endcall %}
 </div>
 
 <h2 class="section-title">柱② AI活用（業務の見える化）{{ C.tip("登録した業務の情報がそろい、業務の全体像が見えてきているか") }}</h2>
@@ -10144,49 +9920,9 @@ TEMPLATES = {
 </div>
 <h5 class="sub-title mt-3 mb-2"><span>意欲と技術{{ C.tip("回答した人（対象外を除く）で数えます。月次アンケートの改善の進め方は、直近" ~ C.STANCE_MONTHS ~ "か月の答えで数えます。") }}</span></h5>
 <div class="row g-3 mb-4">
-  <div class="col-lg-4">
-    <div class="card h-100"><div class="card-body">
-      <h5 class="card-title">意欲（自動化アイテム登録と直近の月次）</h5>
-      {% set maxc = (wish_counts|map(attribute=1)|max) if wish_counts else 1 %}
-      {% for opt, n in wish_counts %}
-      <div class="d-flex align-items-center small mb-1">
-        <div style="width: 15rem">{{ opt }}</div>
-        <div class="progress flex-grow-1" style="height: 14px"><div class="progress-bar" style="width: {{ (n / (maxc or 1) * 100)|round }}%"></div></div>
-        <div style="width: 3rem" class="text-end">{{ n }} 人</div>
-      </div>
-      {% endfor %}
-    </div></div>
-  </div>
-  <div class="col-lg-4">
-    <div class="card h-100"><div class="card-body">
-      <h5 class="card-title">現在使える技術</h5>
-      {% set maxh = (have[0][1] if have else 1) %}
-      {% for skill, n in have %}
-      <div class="d-flex align-items-center small mb-1">
-        <div style="width: 9rem">{{ skill }}</div>
-        <div class="progress flex-grow-1" style="height: 14px"><div class="progress-bar" style="width: {{ (n / maxh * 100)|round }}%"></div></div>
-        <div style="width: 3rem" class="text-end">{{ n }} 人</div>
-      </div>
-      {% else %}
-      <p class="text-muted small mb-0">データなし</p>
-      {% endfor %}
-    </div></div>
-  </div>
-  <div class="col-lg-4">
-    <div class="card h-100"><div class="card-body">
-      <h5 class="card-title">学びたい技術</h5>
-      {% set maxl = (learn[0][1] if learn else 1) %}
-      {% for skill, n in learn %}
-      <div class="d-flex align-items-center small mb-1">
-        <div style="width: 9rem">{{ skill }}</div>
-        <div class="progress flex-grow-1" style="height: 14px"><div class="progress-bar bg-success" style="width: {{ (n / maxl * 100)|round }}%"></div></div>
-        <div style="width: 3rem" class="text-end">{{ n }} 人</div>
-      </div>
-      {% else %}
-      <p class="text-muted small mb-0">データなし</p>
-      {% endfor %}
-    </div></div>
-  </div>
+  {{ bar_list('意欲（自動化アイテム登録と直近の月次）', wish_counts, '15rem', empty='') }}
+  {{ bar_list('現在使える技術', have) }}
+  {{ bar_list('学びたい技術', learn, bar_cls='bg-success') }}
 </div>
 
 <h2 class="section-title">活動定着{{ C.tip("アンケートへの参加と、Gr・役割ごとの活動の広がり") }}</h2>
@@ -10197,10 +9933,7 @@ TEMPLATES = {
   {% call card('bi-diagram-3', 'tile-purple', '参加している Gr・役割', pr.active_workplaces, '', '回答した人か、登録された業務がある Gr・役割') %}全 {{ pr.workplaces|length }} の Gr・役割のうち{% endcall %}
 </div>
 <div class="row g-3 mb-2">
-  <div class="col-lg-5"><div class="card h-100"><div class="card-body">
-    <h5 class="card-title">アンケートの推移{{ C.tip("月次アンケートの回答率・PCの定型・定期業務あり率・自分で・一緒に取り組みたい率") }}</h5>
-    <div class="chart-box" style="height: 260px"><canvas id="dash-survey"></canvas></div>
-  </div></div></div>
+  {% call chart_card('dash-survey', 'col-lg-5') %}アンケートの推移{{ C.tip("月次アンケートの回答率・PCの定型・定期業務あり率・自分で・一緒に取り組みたい率") }}{% endcall %}
   <div class="col-lg-7"><div class="card h-100"><div class="card-body">
     <h5 class="card-title">Gr・役割別の参加状況{{ C.tip("回答した人は、業務を1件以上登録したか、月次アンケートに回答した人（対象外は除く）を、いまのGr・役割（月次アンケートか「自動化アイテム登録」のいちばん新しい回答で選んだGr・役割）で1人1回数えます。自主改善者はそのうち自ら改善に取り組みたい人です。回答率はいちばん新しい月度のもの（人財一覧のGr・役割で数えます）。業務・完了・年間削減工数は、業務を登録したときのGr・役割で数えます。") }}</h5>
     <div class="table-responsive">
@@ -10273,17 +10006,10 @@ TEMPLATES = {
 <script>
 (function () {
   var d = JSON.parse(document.getElementById("chart-data").textContent);
-  var COL = { blue: "#0a84ff", sky: "#64d2ff", green: "#30d158", orange: "#ff9f0a", purple: "#bf5af2", red: "#ff453a", teal: "#00a99d", gray: "#aeaeb2", indigo: "#5e5ce6", yellow: "#ffd60a" };
   chartTheme();
-  var X = { grid: { display: false }, border: { display: false } };
-  var PCT = { suggestedMax: 100, ticks: { callback: function (v) { return v + "%"; } } };
-  function Y(extra) { return Object.assign({ beginAtZero: true, grid: { color: "#ececf0" }, border: { display: false } }, extra || {}); }
-  function opts(extra) { return Object.assign({ responsive: true, maintainAspectRatio: false, plugins: { legend: { position: "bottom" } } }, extra || {}); }
-  function draw(id, cfg) { var el = document.getElementById(id); if (el) new Chart(el, cfg); }
-  function col(rows, key) { return rows.map(function (r) { return r[key] === null || r[key] === undefined ? null : Math.round(r[key] * 10) / 10; }); }
-  function line(label, data, color, axis) { return { type: "line", label: label, data: data, borderColor: color, backgroundColor: color, tension: 0.3, pointRadius: 2.5, borderWidth: 2.5, yAxisID: axis || "y", spanGaps: true }; }
-  function bar(label, data, color, axis) { return { type: "bar", label: label, data: data, backgroundColor: color, borderRadius: 4, borderSkipped: false, barPercentage: 0.6, yAxisID: axis || "y" }; }
-  var tl = d.timeline || [], L = tl.map(function (m) { return m.label.replace("年", "/").replace("月度", ""); });
+  var K = chartKit, COL = K.COL, X = K.X, PCT = K.PCT, Y = K.Y, opts = K.opts, draw = K.draw, bar = K.bar, line = K.lineOf(2.5);
+  function col(rows, key) { return K.col(rows, key, 1); }
+  var tl = d.timeline || [], L = tl.map(function (m) { return K.short(m.label); });
   draw("dash-progress", { type: "bar", data: { labels: L, datasets: [bar("登録された業務", col(tl, "new"), COL.sky), bar("完了した案件", col(tl, "done"), COL.green), line("年間削減工数の累計（時間）", col(tl, "saved_annual"), COL.orange, "y1")] },
     options: opts({ scales: { x: X, y: Y({ ticks: { precision: 0 } }), y1: Y({ position: "right", grid: { display: false } }) } }) });
   var st = d.stages || [];
@@ -10582,9 +10308,7 @@ TEMPLATES = {
     sync();
     var btn = this; btn.disabled = true; note("保存中…", true);
     try {
-      var r = await fetch("{{ url_for('monthly.survey_admin_save') }}", { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" },
-        body: JSON.stringify({ period: "{{ period }}", questions: questions, is_active: active ? active.checked : true }) });
-      var j = await r.json();
+      var j = await sendJson("{{ url_for('monthly.survey_admin_save') }}", { period: "{{ period }}", questions: questions, is_active: active ? active.checked : true });
       note(j.message || (j.success ? "保存しました" : "保存できませんでした"), !!j.success);
       if (j.success) setTimeout(function () { window.location.reload(); }, 600);
     } catch (e) { note("保存できませんでした。通信状態を確認してください。", false); }
@@ -10593,9 +10317,7 @@ TEMPLATES = {
   if (LOCKED && active) active.addEventListener("change", async function () {
     var want = active.checked;
     try {
-      var r = await fetch("{{ url_for('monthly.survey_admin_active') }}", { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" },
-        body: JSON.stringify({ period: "{{ period }}", is_active: want }) });
-      var j = await r.json();
+      var j = await sendJson("{{ url_for('monthly.survey_admin_active') }}", { period: "{{ period }}", is_active: want });
       note(j.message || (j.success ? "保存しました" : "保存できませんでした"), !!j.success);
       if (!j.success) active.checked = !want;
     } catch (e) { active.checked = !want; note("保存できませんでした。通信状態を確認してください。", false); }
@@ -10919,8 +10641,7 @@ TEMPLATES = {
     var payload = { period: form.period.value, emp_id: form.emp_id.value.trim(), workplace_id: form.workplace_id.value, work_pattern: form.work_pattern.value, shift_team: form.shift_team.value, answers: answers, comment: form.comment.value.trim() };
     submitBtn.disabled = true; submitBtn.textContent = "送信中…";
     try {
-      var r = await fetch(form.action, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify(payload) });
-      var j = await r.json();
+      var j = await sendJson(form.action, payload);
       if (j.success) {
         form.classList.add("d-none");
         document.getElementById("mq-success-msg").textContent = j.message;
@@ -10978,24 +10699,10 @@ TEMPLATES = {
 ''',
     'monthly/results.html': r'''{% extends "base.html" %}
 {% block title %}アンケート結果分析{% endblock %}
-{% macro num(v, digits=0) -%}{% if v is none %}－{% else %}{{ ('%.' ~ digits ~ 'f')|format(v) }}{% endif %}{%- endmacro %}
+{% from "stats/_macros.html" import num, delta, card, chart_card with context %}
 {% macro val(v, m) -%}{{ num(v, m.digits) }}{% if v is not none and m.unit != '人' %}{{ m.unit }}{% endif %}{%- endmacro %}
-{% macro delta(cur, prev, m) -%}
-{%- if cur is not none and prev is not none -%}
-{%- set d = cur - prev -%}
-{%- set good = (d > 0 and m.better == 'up') or (d < 0 and m.better == 'down') -%}
-{%- set bad = (d < 0 and m.better == 'up') or (d > 0 and m.better == 'down') -%}
-<span class="sa-delta{% if good %} is-good{% elif bad %} is-bad{% endif %}">{{ '▲' if d > 0 else ('▼' if d < 0 else '±') }}{{ ('%.' ~ m.digits ~ 'f')|format(d|abs) }}{{ 'pt' if m.unit == '%' else m.unit }}</span>
-{%- endif -%}
-{%- endmacro %}
 {% macro kpi(m, cur, prev, note) -%}
-<div class="col-6 col-md-4 col-xl-2">
-  <div class="card stat h-100"><div class="card-body">
-    <div class="stat-head"><span class="stat-label">{{ m.label }}{{ C.tip(m.tip) }}</span></div>
-    <div class="stat-value">{{ num(cur, m.digits) }}<span class="stat-unit">{{ m.unit }}</span></div>
-    <div class="stat-sub">{{ delta(cur, prev, m) }}{% if cur is not none and prev is not none %} <span class="text-muted">{{ note }}</span>{% endif %}</div>
-  </div></div>
-</div>
+{% call card('', '', m.label, num(cur, m.digits), m.unit, m.tip, 'col-6 col-md-4 col-xl-2') %}{{ delta(cur, prev, 'pt' if m.unit == '%' else m.unit, m.better, m.digits) }}{% if cur is not none and prev is not none %} <span class="text-muted">{{ note }}</span>{% endif %}{% endcall %}
 {%- endmacro %}
 {% macro task_table(t) -%}
 <div class="table-responsive">
@@ -11043,9 +10750,9 @@ TEMPLATES = {
   <div>
     <label class="form-label small mb-0" for="sa-from">期間</label>
     <div class="d-flex align-items-center gap-1">
-      <select id="sa-from" name="from" class="form-select form-select-sm w-auto">{% for p in periods %}<option value="{{ p }}"{% if p == start %} selected{% endif %}>{{ period_labels[p] }}</option>{% endfor %}</select>
+      <select id="sa-from" name="from" class="form-select form-select-sm w-auto">{% for p in periods %}<option value="{{ p }}"{% if p == start %} selected{% endif %}>{{ C.period_label(p) }}</option>{% endfor %}</select>
       <span>〜</span>
-      <select name="to" class="form-select form-select-sm w-auto" aria-label="期間の終わり">{% for p in periods %}<option value="{{ p }}"{% if p == to %} selected{% endif %}>{{ period_labels[p] }}</option>{% endfor %}</select>
+      <select name="to" class="form-select form-select-sm w-auto" aria-label="期間の終わり">{% for p in periods %}<option value="{{ p }}"{% if p == to %} selected{% endif %}>{{ C.period_label(p) }}</option>{% endfor %}</select>
     </div>
   </div>
   <button class="btn btn-sm btn-primary">表示</button>
@@ -11062,26 +10769,14 @@ TEMPLATES = {
 
 <h2 class="section-title">回答の状況{{ C.tip("回答者数・回答率と、回答の続き具合（はじめて回答した人、前の月度にも回答した人、前の月度は回答したがその月度は回答しなかった人）") }}</h2>
 <div class="row g-3 mb-2">
-  <div class="col-lg-6"><div class="card h-100"><div class="card-body">
-    <h5 class="card-title">回答者数と回答率</h5>
-    <div class="chart-box" style="height: 260px"><canvas id="sa-resp"></canvas></div>
-  </div></div></div>
-  <div class="col-lg-6"><div class="card h-100"><div class="card-body">
-    <h5 class="card-title">回答の続き具合</h5>
-    <div class="chart-box" style="height: 260px"><canvas id="sa-continuity"></canvas></div>
-  </div></div></div>
+  {% call chart_card('sa-resp', 'col-lg-6') %}回答者数と回答率{% endcall %}
+  {% call chart_card('sa-continuity', 'col-lg-6') %}回答の続き具合{% endcall %}
 </div>
 
 <h2 class="section-title">PCの定型・定期業務の量と変化{{ C.tip("推計 月間時間（勤務形態で積み上げ）と1人あたりの時間。右は、前の月度とその月度の両方に答えた人の1シフトあたりの時間を、本人どうしで比べた増減") }}</h2>
 <div class="row g-3 mb-2">
-  <div class="col-lg-6"><div class="card h-100"><div class="card-body">
-    <h5 class="card-title">推計 月間時間と1人あたり</h5>
-    <div class="chart-box" style="height: 260px"><canvas id="sa-hours"></canvas></div>
-  </div></div></div>
-  <div class="col-lg-6"><div class="card h-100"><div class="card-body">
-    <h5 class="card-title">本人どうしで比べた時間の増減（人）</h5>
-    <div class="chart-box" style="height: 260px"><canvas id="sa-change"></canvas></div>
-  </div></div></div>
+  {% call chart_card('sa-hours', 'col-lg-6') %}推計 月間時間と1人あたり{% endcall %}
+  {% call chart_card('sa-change', 'col-lg-6') %}本人どうしで比べた時間の増減（人）{% endcall %}
 </div>
 
 <h2 class="section-title">割合の推移{{ C.tip("定型・定期業務あり率、先月比（減った・増えた）、自動化したい率、進め方の割合") }}</h2>
@@ -11154,14 +10849,8 @@ TEMPLATES = {
 {% if now.n %}
 <h2 class="section-title">回答の状況{{ C.tip("対象者のうち回答した人の割合（Gr・役割は人財一覧のもの）と、その月の回答で選んだ Gr・役割ごとの推計 月間時間") }}</h2>
 <div class="row g-3 mb-2">
-  <div class="col-lg-6"><div class="card h-100"><div class="card-body">
-    <h5 class="card-title">Gr・役割別の回答率</h5>
-    <div class="chart-box" style="height: {{ 70 + 30 * month.groups.wp.rows|length }}px"><canvas id="sa-m-rate"></canvas></div>
-  </div></div></div>
-  <div class="col-lg-6"><div class="card h-100"><div class="card-body">
-    <h5 class="card-title">Gr・役割別の推計 月間時間</h5>
-    <div class="chart-box" style="height: {{ 70 + 30 * month.groups.wp.rows|length }}px"><canvas id="sa-m-hours"></canvas></div>
-  </div></div></div>
+  {% call chart_card('sa-m-rate', 'col-lg-6', (70 + 30 * month.groups.wp.rows|length) ~ 'px') %}Gr・役割別の回答率{% endcall %}
+  {% call chart_card('sa-m-hours', 'col-lg-6', (70 + 30 * month.groups.wp.rows|length) ~ 'px') %}Gr・役割別の推計 月間時間{% endcall %}
 </div>
 
 <h2 class="section-title">属性別の比較{{ C.tip("Gr・役割、勤務形態・班ごとの指標。対象者と回答率は人財一覧の Gr・役割・勤務形態・班で、ほかはその月の回答で選んだもので数えます。交代勤務の人は「交代勤務」と班の両方の行に入ります") }}</h2>
@@ -11298,19 +10987,8 @@ TEMPLATES = {
 (function () {
   var d = JSON.parse(document.getElementById("sa-data").textContent);
   chartTheme();
-  var COL = { blue: "#0a84ff", sky: "#64d2ff", green: "#30d158", orange: "#ff9f0a", purple: "#bf5af2", red: "#ff453a", pink: "#ff6482", teal: "#00a99d", gray: "#aeaeb2" };
-  var X = { grid: { display: false }, border: { display: false } };
-  var PCT = { suggestedMax: 100, ticks: { callback: function (v) { return v + "%"; } } };
-  function Y(extra) { return Object.assign({ beginAtZero: true, grid: { color: "#ececf0" }, border: { display: false } }, extra || {}); }
-  function opts(extra) { return Object.assign({ responsive: true, maintainAspectRatio: false, plugins: { legend: { position: "bottom" } } }, extra || {}); }
-  function draw(id, cfg) { var el = document.getElementById(id); if (el) new Chart(el, cfg); }
-  function round(v, n) { if (v === null || v === undefined) return null; var k = Math.pow(10, n || 0); return Math.round(v * k) / k; }
-  function col(rows, key, n) { return rows.map(function (r) { return round(r[key], n); }); }
-  function line(label, data, color, axis) { return { type: "line", label: label, data: data, borderColor: color, backgroundColor: color, tension: 0.3, pointRadius: 3, borderWidth: 2.5, yAxisID: axis || "y", spanGaps: true }; }
-  function bar(label, data, color, stack, axis) { return { type: "bar", label: label, data: data, backgroundColor: color, borderRadius: 4, borderSkipped: false, barPercentage: 0.6, stack: stack, yAxisID: axis || "y" }; }
+  var K = chartKit, COL = K.COL, X = K.X, PCT = K.PCT, Y = K.Y, opts = K.opts, draw = K.draw, col = K.col, bar = K.bar, short = K.short, line = K.lineOf(3), esc = escHtml;
   function stacked(extra) { return opts({ scales: Object.assign({ x: Object.assign({ stacked: true }, X), y: Y({ stacked: true }) }, extra || {}) }); }
-  function esc(v) { return String(v).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
-  function short(label) { return label.replace("年", "/").replace("月度", ""); }
   var METRIC = {};
   (d.metrics || []).forEach(function (m) { METRIC[m.key] = m; });
   function fmt(v, m) { return v === null || v === undefined ? "－" : v.toFixed(m.digits) + (m.unit === "人" ? "" : m.unit); }
@@ -11411,6 +11089,32 @@ TEMPLATES = {
 })();
 </script>
 {% endblock %}
+''',
+    'stats/_macros.html': r'''
+{% macro num(v, digits=0) -%}{% if v is none %}－{% else %}{{ ('%.' ~ digits ~ 'f')|format(v) }}{% endif %}{%- endmacro %}
+{% macro delta(cur, prev, unit='', better='up', digits=0) -%}
+{%- if cur is not none and prev is not none -%}
+{%- set d = cur - prev -%}
+{%- set good = (d > 0 and better == 'up') or (d < 0 and better == 'down') -%}
+{%- set bad = (d < 0 and better == 'up') or (d > 0 and better == 'down') -%}
+<span class="sa-delta{% if good %} is-good{% elif bad %} is-bad{% endif %}">{{ '▲' if d > 0 else ('▼' if d < 0 else '±') }}{{ ('%.' ~ digits ~ 'f')|format(d|abs) }}{{ unit }}</span>
+{%- endif -%}
+{%- endmacro %}
+{% macro card(icon, tile, label, value, unit, tip='', cols='col-6 col-lg-3') -%}
+<div class="{{ cols }}">
+  <div class="card stat h-100"><div class="card-body">
+    <div class="stat-head">{% if icon %}<span class="stat-tile {{ tile }}"><i class="bi {{ icon }}"></i></span>{% endif %}<span class="stat-label">{{ label }}{% if tip %}{{ C.tip(tip) }}{% endif %}</span></div>
+    <div class="stat-value">{{ value }}<span class="stat-unit">{{ unit }}</span></div>
+    <div class="stat-sub">{{ caller() }}</div>
+  </div></div>
+</div>
+{%- endmacro %}
+{% macro chart_card(id, cols='col-lg-6', height='260px') -%}
+<div class="{{ cols }}"><div class="card h-100"><div class="card-body">
+    <h5 class="card-title">{{ caller() }}</h5>
+    <div class="chart-box" style="height: {{ height }}"><canvas id="{{ id }}"></canvas></div>
+  </div></div></div>
+{%- endmacro %}
 ''',
     'survey/index.html': r'''{% extends "base.html" %}
 {% block title %}自動化アイテム登録{% endblock %}
@@ -11598,6 +11302,40 @@ window.chartTheme = function () {
   d.animation.easing = "easeOutQuart";
 };
 
+// グラフの部品（軸・オプション・系列の作り方・色）。ダッシュボードとアンケート結果分析で同じものを使う
+window.chartKit = (function () {
+  var X = { grid: { display: false }, border: { display: false } };
+  var PCT = { suggestedMax: 100, ticks: { callback: function (v) { return v + "%"; } } };
+  function Y(extra) { return Object.assign({ beginAtZero: true, grid: { color: "#ececf0" }, border: { display: false } }, extra || {}); }
+  function opts(extra) { return Object.assign({ responsive: true, maintainAspectRatio: false, plugins: { legend: { position: "bottom" } } }, extra || {}); }
+  function draw(id, cfg) { var el = document.getElementById(id); if (el) new Chart(el, cfg); }
+  function round(v, n) { if (v === null || v === undefined) return null; var k = Math.pow(10, n || 0); return Math.round(v * k) / k; }
+  function col(rows, key, n) { return rows.map(function (r) { return round(r[key], n); }); }
+  function lineOf(radius) {
+    return function (label, data, color, axis) { return { type: "line", label: label, data: data, borderColor: color, backgroundColor: color, tension: 0.3, pointRadius: radius, borderWidth: 2.5, yAxisID: axis || "y", spanGaps: true }; };
+  }
+  function bar(label, data, color, stack, axis) { return { type: "bar", label: label, data: data, backgroundColor: color, borderRadius: 4, borderSkipped: false, barPercentage: 0.6, stack: stack, yAxisID: axis || "y" }; }
+  function short(label) { return label.replace("年", "/").replace("月度", ""); }
+  var COL = { blue: "#0a84ff", sky: "#64d2ff", green: "#30d158", orange: "#ff9f0a", purple: "#bf5af2", red: "#ff453a", pink: "#ff6482", teal: "#00a99d", gray: "#aeaeb2", indigo: "#5e5ce6" };
+  return { COL: COL, X: X, PCT: PCT, Y: Y, opts: opts, draw: draw, col: col, lineOf: lineOf, bar: bar, short: short };
+})();
+
+// JSON を POST して、返ってきた JSON を受け取る（失敗は呼び出し側の try/catch へ）
+window.sendJson = function (url, body) {
+  return fetch(url, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify(body) }).then(function (r) { return r.json(); });
+};
+
+// 要素を作る小さな道具（クラスと文字つき）
+window.uiEl = function (tag, cls, text) {
+  var e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined && text !== null) e.textContent = text;
+  return e;
+};
+
+// HTML に埋め込む文字を逃がす
+window.escHtml = function (v) { return String(v).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); };
+
 document.addEventListener("DOMContentLoaded", function () {
   document.querySelectorAll("form[data-confirm]").forEach(function (form) {
     form.addEventListener("submit", function (e) {
@@ -11610,7 +11348,7 @@ document.addEventListener("DOMContentLoaded", function () {
 
 (function () {
   if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-  var targets = document.querySelectorAll(".stat-value, .mini-value, .kpi-value");
+  var targets = document.querySelectorAll(".stat-value, .kpi-value");
   var ease = function (t) { return 1 - Math.pow(1 - t, 3); };
   targets.forEach(function (el, i) {
     var node = el.firstChild;
@@ -11886,7 +11624,6 @@ document.addEventListener("DOMContentLoaded", function () {
     return svg;
   }
   function glyph(shape) { return '<svg class="ks" viewBox="0 0 18 14" aria-hidden="true">' + (KC.glyphs[shape] || KC.glyphs.rect) + "</svg>"; }
-  function escHtml(v) { return String(v).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
   function renderLegend() {
     var box = document.getElementById("fe-kind-legend");
     if (!box) return;
@@ -11926,9 +11663,7 @@ document.addEventListener("DOMContentLoaded", function () {
     var sent = {};
     list.forEach(function (n) { classifySeq[n.id] = (classifySeq[n.id] || 0) + 1; sent[n.id] = { seq: classifySeq[n.id], type: typeOf(n), text: n.text, who: n.who || "" }; });
     try {
-      var r = await fetch(KC.classify_url, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" },
-        body: JSON.stringify({ items: list.map(function (n) { return { id: n.id, type: typeOf(n), text: n.text, who: n.who || "", workplace: n.group_title || "" }; }) }) });
-      var j = await r.json();
+      var j = await sendJson(KC.classify_url, { items: list.map(function (n) { return { id: n.id, type: typeOf(n), text: n.text, who: n.who || "", workplace: n.group_title || "" }; }) });
       var changed = false;
       (j.items || []).forEach(function (it) {
         var n = nodeById(it.id), was = sent[it.id];
@@ -12017,58 +11752,25 @@ document.addEventListener("DOMContentLoaded", function () {
     if (selected.indexOf(n.id) !== -1) div.classList.add("fe-selected");
     if (linkSource === n.id) div.classList.add("fe-link-source");
 
-    var btns = document.createElement("div");
-    btns.className = "fe-btns";
+    var btns = uiEl("div", "fe-btns");
     if (n.url) btns.appendChild(btn("↗", "案件詳細を開く", "fe-btn-open", function () { window.open(n.url, "_blank"); }));
     btns.appendChild(btn("🔗", "この箱から矢印を引く", "fe-btn-link", function () { startLink(n.id); }));
     btns.appendChild(btn("➕", "つながる箱を追加", "fe-btn-add", function () { addChild(n.id); }));
     btns.appendChild(btn("🎨", "種類・だれ・媒体・色", "fe-btn-color", function (e) { openNodePopover(n.id, e); }));
-    btns.appendChild(btn("✕", n.source === "manual" ? "削除" : "非表示にする", "fe-btn-del", function () { deleteNode(n.id); }));
+    btns.appendChild(btn("✕", n.source === "manual" ? "削除" : "非表示にする", "fe-btn-del", function () { deleteNodes([n.id]); }));
     div.appendChild(btns);
 
-    if (showWho(n)) {
-      var whoEl = document.createElement("div");
-      whoEl.className = "fe-who";
-      whoEl.textContent = n.who;
-      div.appendChild(whoEl);
-    }
-    var label = document.createElement("div");
-    label.className = "fe-label";
+    if (showWho(n)) div.appendChild(uiEl("div", "fe-who", n.who));
+    var label = uiEl("div", "fe-label");
     if (n.same) {
-      var sameMark = document.createElement("i");
-      sameMark.className = "bi bi-exclamation-circle-fill fe-icon same-mark";
-      sameMark.title = KC.tips.same;
-      label.appendChild(sameMark);
+      label.appendChild(uiEl("i", "bi bi-exclamation-circle-fill fe-icon same-mark")).title = KC.tips.same;
     }
-    if (ic[0]) {
-      var icon = document.createElement("i");
-      icon.className = "bi " + ic[0] + " fe-icon fi " + ic[1];
-      label.appendChild(icon);
-    }
-    var text = document.createElement("div");
-    text.className = "fe-text";
-    text.textContent = n.text || "";
-    label.appendChild(text);
-    if (STATUS_MARKS[n.cls]) {
-      var state = document.createElement("span");
-      state.className = "fe-state";
-      state.textContent = STATUS_MARKS[n.cls];
-      label.appendChild(state);
-    }
+    if (ic[0]) label.appendChild(uiEl("i", "bi " + ic[0] + " fe-icon fi " + ic[1]));
+    var text = label.appendChild(uiEl("div", "fe-text", n.text || ""));
+    if (STATUS_MARKS[n.cls]) label.appendChild(uiEl("span", "fe-state", STATUS_MARKS[n.cls]));
     div.appendChild(label);
-    if (n.group_title) {
-      var sub = document.createElement("div");
-      sub.className = "fe-sub";
-      sub.textContent = n.group_title;
-      div.appendChild(sub);
-    }
-    if (n.text_edited) {
-      var mark = document.createElement("span");
-      mark.className = "fe-edited";
-      mark.title = "名前を手で修正";
-      mark.textContent = "✎";
-      div.appendChild(mark);
-    }
+    if (n.group_title) div.appendChild(uiEl("div", "fe-sub", n.group_title));
+    if (n.text_edited) div.appendChild(uiEl("span", "fe-edited", "✎")).title = "名前を手で修正";
 
     text.addEventListener("dblclick", function (e) { e.stopPropagation(); startEdit(n.id); });
     div.addEventListener("mousedown", function (e) {
@@ -12094,11 +11796,9 @@ document.addEventListener("DOMContentLoaded", function () {
   }
 
   function btn(label, title, cls, onClick) {
-    var b = document.createElement("button");
+    var b = uiEl("button", "fe-btn " + cls, label);
     b.type = "button";
-    b.className = "fe-btn " + cls;
     b.title = title;
-    b.textContent = label;
     b.addEventListener("mousedown", function (e) { e.stopPropagation(); e.preventDefault(); });
     b.addEventListener("click", function (e) { e.stopPropagation(); onClick(e); });
     return b;
@@ -12282,18 +11982,11 @@ document.addEventListener("DOMContentLoaded", function () {
     return true;
   }
 
-  function deleteNode(id) {
-    if (!dropNode(id)) return;
-    selected = selected.filter(function (s) { return s !== id; });
-    closePopovers();
-    renderAll();
-    pushHistory();
-  }
-
-  function deleteSelected() {
-    if (!selected.length) return;
-    selected.forEach(function (id) { dropNode(id); });
-    selected = [];
+  // 箱をまとめて消す（選択からも外す）
+  function deleteNodes(ids) {
+    var gone = ids.filter(function (id) { return dropNode(id); });
+    if (!gone.length) return;
+    selected = selected.filter(function (s) { return gone.indexOf(s) === -1; });
     closePopovers();
     renderAll();
     pushHistory();
@@ -12525,7 +12218,7 @@ document.addEventListener("DOMContentLoaded", function () {
     drawEdges();
     pushHistory();
   });
-  document.getElementById("fe-node-delete").addEventListener("click", function () { if (popNodeId) deleteNode(popNodeId); });
+  document.getElementById("fe-node-delete").addEventListener("click", function () { if (popNodeId) deleteNodes([popNodeId]); });
   document.getElementById("fe-node-close").addEventListener("click", closePopovers);
   document.getElementById("fe-edge-reverse").addEventListener("click", function () { if (popEdgeId) { reverseEdge(popEdgeId); } });
   document.getElementById("fe-edge-delete").addEventListener("click", function () { if (popEdgeId) deleteEdge(popEdgeId); });
@@ -12671,7 +12364,7 @@ document.addEventListener("DOMContentLoaded", function () {
     if (typing) return;
     if (ctrl === "z" && !e.shiftKey) { e.preventDefault(); undo(); }
     else if (ctrl === "y" || (ctrl === "z" && e.shiftKey)) { e.preventDefault(); redo(); }
-    else if (e.key === "Delete" || e.key === "Backspace") { if (selected.length) { e.preventDefault(); deleteSelected(); } }
+    else if (e.key === "Delete" || e.key === "Backspace") { if (selected.length) { e.preventDefault(); deleteNodes(selected); } }
     else if (e.key === "Escape") {
       if (!linkSource && !app.querySelector(".fe-popover.fe-show") && app.classList.contains("is-max") && !document.fullscreenElement) setMax(false);
       cancelLink(); closePopovers(); selectOnly(null);
@@ -13333,8 +13026,6 @@ h6 { font-size: 0.95rem; font-weight: 700; }
 a { color: var(--ui-accent); text-decoration: none; }
 a:hover { color: var(--ui-accent-hover); text-decoration: underline; }
 .text-muted { color: var(--ui-text-2) !important; }
-.text-green { color: var(--ui-green) !important; }
-.text-blue { color: var(--ui-accent) !important; }
 main.container { padding-top: 2rem !important; padding-bottom: 4rem !important; }
 /* 画面の幅いっぱいに使う（Bootstrap の段階的な固定幅をやめ、左右の余白は画面幅に合わせて 16〜40px） */
 .container { width: 100%; max-width: none; padding-left: clamp(16px, 2.5vw, 40px); padding-right: clamp(16px, 2.5vw, 40px); }
@@ -13389,7 +13080,6 @@ hr { border-color: var(--ui-line); opacity: 1; }
 .stat-value { font-size: 2.4rem; font-weight: 700; letter-spacing: -0.04em; line-height: 1; color: var(--ui-text); font-variant-numeric: tabular-nums; }
 .stat-unit { font-size: 0.95rem; font-weight: 600; color: var(--ui-text-2); margin-left: 0.3rem; letter-spacing: 0; }
 .stat-sub { font-size: 0.8rem; color: var(--ui-text-2); margin-top: 0.6rem; line-height: 1.45; }
-.mini-value { font-size: 1.5rem; font-weight: 700; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; }
 .kpi-card .kpi-value { font-size: 2.1rem; font-weight: 700; line-height: 1.1; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; color: var(--ui-text); }
 .kpi-card .kpi-label, .kpi-label { font-size: 0.78rem; font-weight: 600; color: var(--ui-text-2); }
 .kpi-card .kpi-sub { color: var(--ui-text-3); font-size: 0.78rem; }
@@ -13661,10 +13351,7 @@ summary { transition: color 0.15s ease; }
   .pb-track { animation: none !important; }
 }
 
-/* ダッシュボードの1行リンク・保留ボタン */
-.dash-link { margin: -0.5rem 0 1.5rem; font-size: 0.95rem; }
-.dash-link a { font-weight: 600; text-decoration: none; }
-.dash-link .bi-kanban { margin-right: 0.4rem; }
+/* 保留ボタン */
 .btn-outline-warning { --bs-btn-color: #8a6500; --bs-btn-border-color: #f1d27a; --bs-btn-hover-bg: var(--ui-yellow-soft); --bs-btn-hover-color: #8a6500; --bs-btn-hover-border-color: #e3bd4f; --bs-btn-active-bg: #ffe9a8; --bs-btn-active-color: #8a6500; --bs-btn-active-border-color: #e3bd4f; }
 
 /* ---- ログイン ---- */
@@ -13820,8 +13507,6 @@ summary { transition: color 0.15s ease; }
 .sa-matrix td { min-width: 4.2rem; }
 .sa-move td.is-same { background: #f2f2f7; }
 .trend-table th, .trend-table td { white-space: nowrap; font-variant-numeric: tabular-nums; font-size: 0.85rem; }
-.trend-table .cell-sub { font-size: 0.72rem; color: var(--ui-text-3); }
-.section-title form .form-select { font-weight: 500; }
 
 /* ---- 進捗掲示板: 成果と自動化アイテム登録への導線 ---- */
 .pb-wins { margin: 0.25rem 0 1rem; display: grid; gap: 0.75rem; animation: ui-fade-up 0.55s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
@@ -13957,12 +13642,7 @@ summary { transition: color 0.15s ease; }
 
   // ---------- 小さな道具 ----------
   function $(id) { return document.getElementById(id); }
-  function el(tag, cls, text) {
-    var e = document.createElement(tag);
-    if (cls) e.className = cls;
-    if (text !== undefined && text !== null) e.textContent = text;
-    return e;
-  }
+  var el = uiEl;
   function button(cls, text, onClick) {
     var b = el("button", cls, text);
     b.type = "button";
@@ -14096,7 +13776,7 @@ summary { transition: color 0.15s ease; }
   var empInput = idWrap.querySelector("input");
   var found = null, idProblem = "", confirmedId = "";
   var ID_OK = "ユーザーIDを確認しました";
-  var NOT_FOUND = "このユーザーIDは見つかりません。IDを確かめてください（初めて回答する人で見つからないときは、改善チームに連絡してください）";
+  var NOT_FOUND = O.emp_not_found;
   function normId(v) { return (v || "").normalize("NFKC").trim().toLowerCase(); }
   function setIdentity(text, ng) { identity.textContent = text || ""; identity.classList.toggle("is-ng", !!ng); }
   function fillSelects(workplaceId, pattern, team) {
@@ -14766,7 +14446,7 @@ def create_app(test_config=None):
 
     @app.errorhandler(404)
     def not_found(_error):
-        return render_template("errors/404.html"), 404
+        return render_template("errors/error.html", icon="bi-signpost-split", heading="ページが見つかりません", detail="URLが変わったか、削除された可能性があります。"), 404
 
     @app.errorhandler(413)
     def too_large(_error):
@@ -14779,7 +14459,8 @@ def create_app(test_config=None):
     def server_error(_error):
         db.session.rollback()
         try:
-            return render_template("errors/500.html"), 500
+            return render_template("errors/error.html", icon="bi-exclamation-triangle", heading="エラーが発生しました",
+                                   detail="しばらくしてからもう一度お試しください。続くときは推進メンバーに知らせてください。"), 500
         except Exception:
             return "<h1>エラーが発生しました</h1><p>しばらくしてからもう一度お試しください。</p>", 500
 
