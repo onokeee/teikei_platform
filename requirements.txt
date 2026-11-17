@@ -4,4 +4,5 @@ SQLAlchemy==2.0.36
 Jinja2==3.1.4
 MarkupSafe==3.0.2
 waitress==3.0.2
+certifi>=2024.8.30  # AI の接続先の証明書を確かめる一覧（openai ライブラリと同じもの）。新しいほど良いので、版は下限だけ決める
 # ldap3  （LDAP サーバーへ直接照会するとき＝config.py の LDAP_SERVER を使うときだけ入れる）

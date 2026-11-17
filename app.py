@@ -9,6 +9,7 @@ import mimetypes
 import os
 import re
 import secrets
+import ssl
 import sys
 import unicodedata
 import contextvars
@@ -4487,6 +4488,48 @@ def _ai_request_body(system, items, max_tokens=None, with_reasoning=True, tools=
     return body
 
 
+# AI の接続先の証明書は、OS（Windows）の証明書ストアに加えて certifi の一覧（openai ライブラリが使う一覧）でも確かめる。
+# Windows のストアは発行元を必要になったときに取り寄せる仕組みで、Python（urllib）は取り寄せないため、
+# 発行元がまだ入っていないと、openai ライブラリならつながる相手でも「(_ssl.c:…)」で止まる
+_AI_SSL = {}
+
+
+def _ai_ssl_context():
+    if "ctx" not in _AI_SSL:
+        ctx = ssl.create_default_context()
+        try:
+            import certifi
+
+            ctx.load_verify_locations(cafile=certifi.where())
+            _AI_SSL["certifi"] = True
+        except (ImportError, OSError, ssl.SSLError) as e:
+            log.warning("ChatGPT API: certifi の一覧を読めないため、OS の証明書ストアだけで証明書を確かめます（%s）", e)
+            _AI_SSL["certifi"] = False
+        _AI_SSL["ctx"] = ctx
+    return _AI_SSL["ctx"]
+
+
+# 接続できなかったときの英語の文面は「(_ssl.c:1007)」のような行番号ばかり目に入るので、原因の見当を日本語で添える（元の文面も残す）
+CONNECT_HINTS = (
+    (("Hostname mismatch", "IP address mismatch"), "URL のホスト名が、接続先の証明書の名前と違います"),
+    (("CERTIFICATE_VERIFY_FAILED",), "接続先の証明書の発行元を確かめられません"),
+    (("WRONG_VERSION_NUMBER",), "接続先が HTTPS で応答していません（URL の https・http とポート番号を確かめてください）"),
+    (("EOF occurred", "UNEXPECTED_EOF"), "暗号化通信の途中で接続を切られました（ファイアウォールやプロキシで止められていないか確かめてください）"),
+    (("timed out",), "時間内に応答がありませんでした"),
+    (("getaddrinfo failed", "Name or service not known"), "URL のホスト名が見つかりません"),
+    (("Connection refused",), "接続先が受け付けていません（ポート番号を確かめてください）"),
+)
+
+
+def _connect_error_text(e):
+    text = str(e)
+    hint = next((h for keys, h in CONNECT_HINTS if any(k in text for k in keys)), "")
+    if "CERTIFICATE_VERIFY_FAILED" in text and "mismatch" not in text:
+        hint += ("（OS の証明書ストアにも certifi の一覧にもない発行元です。社内の認証局なら、その証明書をサーバーの「信頼されたルート証明機関」に入れてください）"
+                 if _AI_SSL.get("certifi") else "（certifi が入っていないため、OS の証明書ストアだけで確かめています。pip install certifi で入れてください）")
+    return f"接続できません: {hint}（{text}）" if hint else f"接続できません（{text}）"
+
+
 def _ai_post(body):
     req = urllib.request.Request(
         _api_url(),
@@ -4496,7 +4539,7 @@ def _ai_post(body):
     )
     timeout = float(conf.get("OPENAI_API_TIMEOUT", 90) or 90)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout, context=_ai_ssl_context()) as resp:
             status, raw = resp.status, resp.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
         try:
@@ -4565,7 +4608,7 @@ def _ai_turn(system, items, max_tokens=None, tools=None, tool_choice="auto"):
                 _NO_TOOLS.add(key)
     except OSError as e:
         log.warning("ChatGPT API: 接続できません: %s", e)
-        _LAST_ERROR["text"] = f"接続できません（{e}）"
+        _LAST_ERROR["text"] = _connect_error_text(e)
         return None, []
 
     if not isinstance(payload, dict):
