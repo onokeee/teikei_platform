@@ -2,7 +2,6 @@
 import csv
 import hashlib
 import hmac
-import http.client
 import io
 import json
 import logging
@@ -10,16 +9,16 @@ import mimetypes
 import os
 import re
 import secrets
-import ssl
 import sys
+import threading
+import time
 import unicodedata
 import contextvars
-import urllib.error
-import urllib.request
 import zipfile
 from collections import Counter, OrderedDict, defaultdict
 from contextlib import contextmanager
 from datetime import datetime, timedelta
+from types import SimpleNamespace as _NS
 
 from flask import Blueprint, Flask, Response, abort, flash, g, has_request_context, jsonify, redirect, render_template, request, session, url_for
 from flask_sqlalchemy import SQLAlchemy
@@ -3142,8 +3141,7 @@ def review_same_with_ai(workplace_id, domain_id):
     payload, index, cut = _same_ai_payload(graph, targets, rule, distinct)
     if len(index) < 2:
         return "info", "見直す箱がありません。"
-    budget = max(int(conf.get("OPENAI_MAX_OUTPUT_TOKENS", 4000) or 4000), 8000)
-    text = _call_ai(SAME_AI_PROMPT, json.dumps(payload, ensure_ascii=False), max_tokens=budget)
+    text = _call_ai(SAME_AI_PROMPT, json.dumps(payload, ensure_ascii=False))
     data = _extract_json(text)
     if not isinstance(data, dict):
         why = "答えを読み取れませんでした" if text else (_LAST_ERROR["text"] or "原因不明")
@@ -4316,7 +4314,7 @@ def tip(text):
     body = re.sub(r"[ \t]*\n[ \t]*", "\n", str(text or "").strip())
     return Markup('<span class="tip" tabindex="0" role="button" aria-label="説明" data-tip="{}"><i class="bi bi-info-circle" aria-hidden="true"></i></span>').format(body)
 
-# ===== AI連携（社内 Azure OpenAI の ChatGPT API を Responses API で呼ぶ。なければルールベース） =====
+# ===== AI連携（社内の中継サービス経由の ChatGPT API を、AIワークハブと同じ呼び方で使う。なければルールベース） =====
 AI_SETTING_LABELS = (("openai_api_url", "URL"), ("openai_api_key", "API キー"), ("openai_model", "モデル名"))
 AI_OFF_MSG = "AI連携が無効です。管理画面の「AI連携」で URL・API キー・モデル名を設定してください。"
 
@@ -4347,131 +4345,309 @@ def ai_status_text():
     missing = [label for key, label in AI_SETTING_LABELS if not _ai_setting(key)]
     if missing:
         return "ChatGPT API の " + "・".join(missing) + " が未設定（ルールベースで動作中）"
-    text = f"ChatGPT API 連携 有効（モデル: {_model()}、Responses API）"
+    text = f"ChatGPT API 連携 有効（モデル: {_model()}）"
     if _LAST_ERROR["text"]:
         text += f"／直近のエラー: {_LAST_ERROR['text']}"
     return text
 
-# ----- 共通: ChatGPT API（Responses API）呼び出し。標準ライブラリの urllib だけで呼ぶ -----
+# ----- 共通: ChatGPT API の呼び出し（AIワークハブ＝aiagent_rag_bundle の brain.py と同じ作り） -----
+# 同じ本番環境で GPT-5 系・GPT-6 系とも動いている AIワークハブに合わせている。
+#   ・公式の openai ライブラリで呼ぶ（証明書・プロキシ・タイムアウト・再試行はライブラリの既定のまま）
+#   ・まず chat/completions を呼ぶ。モデルに断られたら理由を読んで直し、モデルごとに覚える（400 は推論の前に弾かれるので費用はかからない）
+#   ・chat/completions で道具を使えないモデル（GPT-6 系）は Responses API に切り替える
+# AIワークハブと違うのは temperature / top_p を送らないことだけ（どちらも GPT-5 以降は受け付けない）
 AI_TOOL_ROUNDS = 10
 AI_TOOL_ROWS = 40
+AI_MAX_FIX = 6  # 1回の呼び出しで引数を直しにいく上限
+AI_RATE_LIMIT_RETRIES = 3
+AI_RATE_LIMIT_MAX_WAIT = 20.0
+AI_RATE_LIMIT_MAX_WAITERS = 8  # レート制限で同時に待つ上限（全員が待つとサーバーのスレッドが埋まる）
+AI_EFFORT_ORDER = ("none", "minimal", "low", "medium", "high", "xhigh")  # reasoning_effort の、考える量が少ない順
+AI_URL_HINT = "URL の形が正しくありません（https:// から書いてください）"
+_SUPPORTED_VALUES = re.compile(r"supported values are:?\s*(.+)", re.IGNORECASE)
+_RETRY_IN = re.compile(r"try again in\s+([\d.]+)\s*(ms|s|m)\b", re.IGNORECASE)
+_LLM = {"key": None, "client": None}
+_QUIRKS = {}  # モデル名 -> 覚えた呼び方 {"set": {引数: 値}, "drop": {引数, ...}, "api": "responses"}
+_waiting = [0]
+_waiting_lock = threading.Lock()
 
 
-def _tools_flat(tool_defs):
-    return [
-        {"type": "function", "name": t["function"]["name"], "description": t["function"].get("description") or "",
-         "parameters": t["function"].get("parameters") or {"type": "object", "properties": {}}}
-        for t in (tool_defs or []) if t.get("type") == "function"
-    ]
+class AIRateLimited(Exception):
+    """待って投げ直しても解消しなかったレート制限"""
 
 
-def _ai_request_body(system, items, max_tokens=None, with_reasoning=True, tools=None):
-    body = {
-        "model": _model(),
-        "store": False,
-        "instructions": system,
-        "input": items,
-        "max_output_tokens": int(max_tokens or conf.get("OPENAI_MAX_OUTPUT_TOKENS", 4000) or 4000),
-    }
-    if tools:
-        body["tools"] = _tools_flat(tools)
-        body["tool_choice"] = "auto"
-    effort = str(conf.get("OPENAI_REASONING_EFFORT", "low") or "").strip()
-    if effort and with_reasoning:
-        body["reasoning"] = {"effort": effort}
-    return body
+class AIResponseError(Exception):
+    """API が応答の中で返してきたエラー"""
 
 
-# AI の接続先の証明書は、OS（Windows）の証明書ストアに加えて certifi の一覧（openai ライブラリが使う一覧）でも確かめる。
-# Windows のストアは発行元を必要になったときに取り寄せる仕組みで、Python（urllib）は取り寄せないため、
-# 発行元がまだ入っていないと、openai ライブラリならつながる相手でも「(_ssl.c:…)」で止まる
-_AI_SSL = {}
+def _api_base():
+    """管理画面の URL から、openai ライブラリに渡す base_url を作る（/chat/completions や /responses はライブラリが付ける）"""
+    url = _api_url().rstrip("/")
+    for suffix in ("/chat/completions", "/responses"):
+        if url.endswith(suffix):
+            return url[: -len(suffix)]
+    return url
 
 
-def _ai_ssl_context():
-    if "ctx" not in _AI_SSL:
-        ctx = ssl.create_default_context()
+def _llm_client():
+    key = (_api_base(), _api_key())
+    if _LLM["key"] != key:
+        from openai import OpenAI
+
+        _LLM.update(key=key, client=OpenAI(base_url=key[0], api_key=key[1] or "not-set"))
+    return _LLM["client"]
+
+
+def reset_llm_client():
+    """接続先やキーを変えたら、クライアントと、覚えた呼び方を捨てる（接続先が変わると受け付ける引数も変わる）"""
+    _LLM.update(key=None, client=None)
+    _QUIRKS.clear()
+    _NO_TOOLS.clear()
+
+
+def _apply_quirks(kwargs):
+    q = _QUIRKS.get(str(kwargs.get("model") or ""))
+    if not q:
+        return kwargs
+    out = {k: v for k, v in kwargs.items() if k not in q.get("drop", set())}
+    out.update(q.get("set", {}))
+    return out
+
+
+def _learn(model, set_=None, drop=None, api=None):
+    q = _QUIRKS.setdefault(model, {"set": {}, "drop": set()})
+    if set_:
+        q["set"].update(set_)
+    if drop:
+        q["drop"].add(drop)
+        q["set"].pop(drop, None)
+    if api:
+        q["api"] = api
+    log.info("ChatGPT API: %s の呼び方を調整しました: set=%s drop=%s api=%s", model, q["set"], sorted(q["drop"]), q.get("api", "chat"))
+
+
+def _pick_effort(message_low, current):
+    """エラー文の「Supported values are: 'low', …」から、いちばん軽い値を選ぶ。一覧がなければ 'none'"""
+    m = _SUPPORTED_VALUES.search(message_low)
+    if m:
+        offered = set(re.findall(r"'([a-z]+)'", m.group(1)))
+        for v in C.AI_EFFORT_ORDER:
+            if v in offered and v != current:
+                return v
+    return "none"
+
+
+def _fix_for(message, kwargs):
+    """エラー文から、次に試す直し方を決める。戻り値は (set_, drop) か None"""
+    low = message.lower()
+    if "reasoning_effort" in low and ("function tools" in low or "does not support" in low):
+        return {"reasoning_effort": _pick_effort(low, kwargs.get("reasoning_effort"))}, None
+    if "reasoning_effort" in low and "unrecognized" in low:
+        return None, "reasoning_effort"
+    return None
+
+
+def _is_rate_limit(e):
+    if getattr(e, "status_code", None) == 429:
+        return True
+    s = str(e).lower()
+    return "rate limit" in s or "rate_limit_exceeded" in s or "too many requests" in s
+
+
+def _rate_limit_wait(e, attempt):
+    """次に待つ秒数（サーバーの指示 → エラー文の「try again in」→ 2秒・4秒・8秒）"""
+    try:
+        raw = e.response.headers.get("retry-after")
+        if raw:
+            return min(float(raw), C.AI_RATE_LIMIT_MAX_WAIT)
+    except Exception:
+        pass
+    m = _RETRY_IN.search(str(e))
+    if m:
+        value, unit = float(m.group(1)), m.group(2).lower()
+        sec = value / 1000 if unit == "ms" else (value * 60 if unit == "m" else value)
+        return min(sec + 0.5, C.AI_RATE_LIMIT_MAX_WAIT)
+    return min(2.0 ** attempt, C.AI_RATE_LIMIT_MAX_WAIT)
+
+
+def _api_for(model):
+    return str((_QUIRKS.get(model) or {}).get("api") or "chat")
+
+
+def _wants_responses(message_low, attempt):
+    """このエラーは「Responses API に切り替えないと道具が使えない」か"""
+    if "reasoning_effort" not in message_low:
+        return False
+    if "'none'" in message_low and "does not support" in message_low:
+        return True
+    return "function tools" in message_low and "/v1/responses" in message_low and attempt.get("reasoning_effort") not in (None, "none")
+
+
+def _responses_request(attempt):
+    """chat/completions の引数を Responses API の引数に変換する"""
+    req = {"model": attempt.get("model"), "store": False}
+    instructions, items = [], []
+    for m in attempt.get("messages") or []:
+        role, content = m.get("role"), m.get("content")
+        if role == "system":
+            if content:
+                instructions.append(str(content))
+        elif role == "user":
+            if isinstance(content, list):
+                parts = []
+                for p in content:
+                    if p.get("type") == "text":
+                        parts.append({"type": "input_text", "text": str(p.get("text") or "")})
+                    elif p.get("type") == "image_url":
+                        u = p.get("image_url") or {}
+                        part = {"type": "input_image", "image_url": str(u.get("url") or "")}
+                        if u.get("detail"):
+                            part["detail"] = u["detail"]
+                        parts.append(part)
+                items.append({"role": "user", "content": parts or ""})
+            else:
+                items.append({"role": "user", "content": str(content or "")})
+        elif role == "assistant":
+            if content:
+                items.append({"role": "assistant", "content": str(content)})
+            for tc in m.get("tool_calls") or []:
+                fn = tc.get("function") or {}
+                items.append({"type": "function_call", "call_id": str(tc.get("id") or ""), "name": str(fn.get("name") or ""), "arguments": str(fn.get("arguments") or "{}")})
+        elif role == "tool":
+            items.append({"type": "function_call_output", "call_id": str(m.get("tool_call_id") or ""), "output": str(content or "")})
+    if instructions:
+        req["instructions"] = "\n\n".join(instructions)
+    req["input"] = items
+    if attempt.get("tools"):
+        req["tools"] = [{"type": "function", "name": t["function"]["name"], "description": t["function"].get("description") or "",
+                         "parameters": t["function"].get("parameters") or {"type": "object", "properties": {}}}
+                        for t in attempt["tools"] if t.get("type") == "function"]
+        if attempt.get("tool_choice"):
+            req["tool_choice"] = attempt["tool_choice"]
+    effort = attempt.get("reasoning_effort")
+    if effort and effort != "none":
+        req["reasoning"] = {"effort": effort}
+    return req
+
+
+def _finish_of(resp, n_tools):
+    reason = getattr(getattr(resp, "incomplete_details", None), "reason", None)
+    if reason == "max_output_tokens":
+        return "length"
+    return "tool_calls" if n_tools else "stop"
+
+
+def _completion_from_response(resp):
+    """Responses API の応答を chat/completions の応答の形にする"""
+    content, refusal, calls = "", None, []
+    for item in getattr(resp, "output", None) or []:
+        typ = getattr(item, "type", "")
+        if typ == "message":
+            for p in getattr(item, "content", None) or []:
+                part = getattr(p, "type", "")
+                if part == "output_text":
+                    content += getattr(p, "text", "") or ""
+                elif part == "refusal":
+                    refusal = getattr(p, "refusal", "") or "（理由なし）"
+        elif typ == "function_call":
+            calls.append(_NS(id=getattr(item, "call_id", None) or getattr(item, "id", "") or "", type="function",
+                             function=_NS(name=getattr(item, "name", "") or "", arguments=getattr(item, "arguments", "") or "")))
+    message = _NS(content=content, tool_calls=calls or None, refusal=refusal)
+    return _NS(choices=[_NS(message=message, finish_reason=_finish_of(resp, len(calls)))], usage=getattr(resp, "usage", None))
+
+
+def _llm_dispatch(model, attempt):
+    if _api_for(model) != "responses":
+        return _llm_client().chat.completions.create(**attempt)
+    resp = _llm_client().responses.create(**_responses_request(attempt))
+    err = getattr(resp, "error", None)
+    if err:
+        raise AIResponseError(getattr(err, "message", None) or str(err))
+    return _completion_from_response(resp)
+
+
+def _create(**kwargs):
+    """AI 呼び出しの入口。モデルが受け付けない引数を、エラーの内容を見て直しながら投げ直す。戻りは常に chat/completions の形"""
+    model = str(kwargs.get("model") or "")
+    attempt = _apply_quirks(kwargs)
+    fixes = waits = 0
+    waited_total = 0.0
+    while fixes < C.AI_MAX_FIX:
         try:
-            import certifi
+            return _llm_dispatch(model, attempt)
+        except Exception as e:
+            if _is_rate_limit(e):
+                if waits >= C.AI_RATE_LIMIT_RETRIES:
+                    raise AIRateLimited(f"混み合っています（レート制限）。{waits}回・合計{waited_total:.1f}秒待ちましたが解消しませんでした。少し時間をおいてからもう一度お試しください") from e
+                waits += 1
+                sec = _rate_limit_wait(e, waits)
+                waited_total += sec
+                with _waiting_lock:
+                    _waiting[0] += 1
+                    n = _waiting[0]
+                try:
+                    if n > C.AI_RATE_LIMIT_MAX_WAITERS:
+                        raise AIRateLimited(f"混み合っています（レート制限）。いま{n}件が待っているため止めました。少し時間をおいてからもう一度お試しください") from e
+                    log.warning("ChatGPT API: レート制限。%.1f秒待って投げ直します（%s/%s回目・待ち%s件）", sec, waits, C.AI_RATE_LIMIT_RETRIES, n)
+                    time.sleep(sec)
+                finally:
+                    with _waiting_lock:
+                        _waiting[0] -= 1
+                continue
+            fixes += 1
+            # 道具のために 'none' を送って断られた（GPT-6 系）→ このモデルは Responses API に切り替える
+            if _api_for(model) != "responses" and _wants_responses(str(e).lower(), attempt):
+                _learn(model, api="responses", drop="reasoning_effort")
+                attempt = _apply_quirks(kwargs)
+                continue
+            fix = _fix_for(str(e), attempt)
+            if fix is None:
+                raise
+            set_, drop = fix
+            if (set_ and all(attempt.get(k) == v for k, v in set_.items())) or (drop and drop not in attempt):
+                raise
+            _learn(model, set_=set_, drop=drop)
+            attempt = _apply_quirks(kwargs)
+    return _llm_dispatch(model, attempt)
 
-            ctx.load_verify_locations(cafile=certifi.where())
-            _AI_SSL["certifi"] = True
-        except (ImportError, OSError, ssl.SSLError) as e:
-            log.warning("ChatGPT API: certifi の一覧を読めないため、OS の証明書ストアだけで証明書を確かめます（%s）", e)
-            _AI_SSL["certifi"] = False
-        _AI_SSL["ctx"] = ctx
-    return _AI_SSL["ctx"]
 
-
-# 接続できなかったときの英語の文面は「(_ssl.c:1007)」のような行番号ばかり目に入るので、原因の見当を日本語で添える（元の文面も残す）
+# 接続できなかったときの英語の文面だけでは分かりにくいので、原因の見当を日本語で添える（元の文面も残す）
 CONNECT_HINTS = (
     (("Hostname mismatch", "IP address mismatch"), "URL のホスト名が、接続先の証明書の名前と違います"),
-    (("CERTIFICATE_VERIFY_FAILED",), "接続先の証明書の発行元を確かめられません"),
+    (("CERTIFICATE_VERIFY_FAILED", "証明書チェーン", "certificate chain"), "接続先の証明書の発行元を確かめられません"),
     (("WRONG_VERSION_NUMBER",), "接続先が HTTPS で応答していません（URL の https・http とポート番号を確かめてください）"),
     (("EOF occurred", "UNEXPECTED_EOF"), "暗号化通信の途中で接続を切られました（ファイアウォールやプロキシで止められていないか確かめてください）"),
     (("timed out",), "時間内に応答がありませんでした"),
     (("getaddrinfo failed", "Name or service not known"), "URL のホスト名が見つかりません"),
-    (("Connection refused",), "接続先が受け付けていません（ポート番号を確かめてください）"),
-    (("unknown url type", "no host given", "nonnumeric port"), "URL の形が正しくありません（https:// から書いてください）"),
+    (("Connection refused", "10061"), "接続先が受け付けていません（ポート番号を確かめてください）"),
+    (("missing an 'http://'", "unsupported protocol", "Invalid port"), AI_URL_HINT),
 )
-
-
 HTTP_HINTS = {401: "APIキーが無効か、権限がありません", 403: "APIキーが無効か、権限がありません",
-              404: "URL が違います（管理画面の URL が Responses API のものか確認）", 429: "利用量の上限（レート制限）に達しました"}
+              404: "URL かモデル名が違います（管理画面の URL は …/chat/completions まで書きます）", 429: "利用量の上限（レート制限）に達しました"}
 
 
-def _connect_error_text(e):
-    text = str(e)
+def _ai_error_text(e):
+    """AI の呼び出しが失敗した理由を、管理画面に出す文にする"""
+    if isinstance(e, ImportError):
+        return "openai ライブラリ（1.x 以降）が見つかりません。AIワークハブと同じ Python で動かすか、pip install -U openai で入れてください"
+    if isinstance(e, AIRateLimited):
+        return str(e)
+    if isinstance(e, AIResponseError):
+        return f"エラー応答: {e}"
+    status = getattr(e, "status_code", None)
+    if status:
+        body = getattr(e, "body", None)
+        detail = re.sub(r"\s+", " ", str((body.get("message") if isinstance(body, dict) else None) or e))[:300]
+        return f"HTTP {status}: {HTTP_HINTS.get(status) or detail}"
+    texts, x = [], e  # openai ライブラリは「Connection error.」とだけ言うので、元の例外の文面も集める
+    while x is not None and len(texts) < 4:
+        t = str(x).strip()
+        if t and t not in texts:
+            texts.append(t)
+        x = x.__cause__ or x.__context__
+    text = " ／ ".join(texts) or type(e).__name__
     hint = next((h for keys, h in CONNECT_HINTS if any(k in text for k in keys)), "")
-    if not hint and isinstance(e, ValueError) and not isinstance(e, OSError):
-        hint = "URL の形が正しくありません（https:// から書いてください）"
-    elif not hint and isinstance(e, http.client.HTTPException):
-        hint = "接続先が HTTP として応答していません（URL とポート番号を確かめてください）"
-    if "CERTIFICATE_VERIFY_FAILED" in text and "mismatch" not in text:
-        hint += ("（OS の証明書ストアにも certifi の一覧にもない発行元です。社内の認証局なら、その証明書をサーバーの「信頼されたルート証明機関」に入れてください）"
-                 if _AI_SSL.get("certifi") else "（certifi が入っていないため、OS の証明書ストアだけで確かめています。pip install certifi で入れてください）")
     return f"接続できません: {hint}（{text}）" if hint else f"接続できません（{text}）"
-
-
-def _ai_post(body):
-    req = urllib.request.Request(
-        _api_url(),
-        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-        method="POST",
-        headers={"Content-Type": "application/json", "Authorization": "Bearer " + _api_key()},
-    )
-    timeout = float(conf.get("OPENAI_API_TIMEOUT", 90) or 90)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout, context=_ai_ssl_context()) as resp:
-            status, raw = resp.status, resp.read().decode("utf-8", "replace")
-    except urllib.error.HTTPError as e:
-        try:
-            raw = e.read().decode("utf-8", "replace")
-        except Exception:
-            raw = ""
-        return e.code, raw
-    try:
-        return status, json.loads(raw)
-    except ValueError:
-        return status, raw
-
-
-def _parse_response(payload):
-    texts, calls, refusal = [], [], None
-    for item in payload.get("output") or []:
-        typ = item.get("type")
-        if typ == "message":
-            for part in item.get("content") or []:
-                if part.get("type") == "output_text":
-                    texts.append(part.get("text") or "")
-                elif part.get("type") == "refusal":
-                    refusal = part.get("refusal") or "（理由なし）"
-        elif typ == "function_call":
-            calls.append({"id": item.get("call_id") or item.get("id") or "", "name": item.get("name") or "", "arguments": item.get("arguments") or "{}"})
-    content = "".join(texts)
-    if not content and not calls and payload.get("output_text"):
-        content = str(payload["output_text"])
-    return content, calls, refusal
 
 
 def _extract_json(text, brackets="{}"):
@@ -4491,44 +4667,43 @@ def _extract_json(text, brackets="{}"):
         return None
 
 
-def _ai_turn(system, items, max_tokens=None, tools=None):
-    key = (_api_url(), _model())
+def _ai_turn(messages, tools=None):
+    """AI に1回聞く。戻り値は (文章, 道具の呼び出しの一覧)。失敗したら (None, []) で、理由は _LAST_ERROR に残す"""
+    key = (_api_base(), _model())
     if tools and key in _NO_TOOLS:
         tools = None
-    with_reasoning = True
-    body = _ai_request_body(system, items, max_tokens, tools=tools)
+    if not key[0].startswith(("http://", "https://")):
+        _LAST_ERROR["text"] = "接続できません: " + C.AI_URL_HINT
+        return None, []
+    kwargs = {"model": _model(), "messages": messages}
+    if tools:
+        kwargs.update(tools=tools, tool_choice="auto")
     try:
-        status, payload = _ai_post(body)
-        if status == 400 and "reasoning" in body and "reasoning" in str(payload):
-            log.warning("ChatGPT API: reasoning が拒否されたため外して再試行します")
-            with_reasoning = False
-            status, payload = _ai_post(_ai_request_body(system, items, max_tokens, with_reasoning=False, tools=tools))
-        if status == 400 and tools:
-            log.warning("ChatGPT API: 道具（tools）つきの呼び出しが拒否されたため、道具なしで再試行します")
-            plain = [i for i in items if not (isinstance(i, dict) and i.get("type") in ("function_call", "function_call_output"))] if isinstance(items, list) else items
-            status, payload = _ai_post(_ai_request_body(system, plain, max_tokens, with_reasoning=with_reasoning))
-            if status == 200 and isinstance(payload, dict) and not payload.get("error"):
-                _NO_TOOLS.add(key)
-    except (OSError, ValueError, http.client.HTTPException) as e:
-        log.warning("ChatGPT API: 接続できません: %s", e)
-        _LAST_ERROR["text"] = _connect_error_text(e)
+        try:
+            resp = _create(**kwargs)
+        except Exception as e:
+            if not tools or getattr(e, "status_code", None) != 400:
+                raise
+            log.warning("ChatGPT API: 道具（tools）つきの呼び出しが拒否されたため、道具なしで再試行します: %s", e)
+            resp = _create(model=_model(), messages=[{"role": m["role"], "content": m["content"]} for m in messages if m["role"] != "tool" and m.get("content")])
+            _NO_TOOLS.add(key)
+    except Exception as e:
+        log.warning("ChatGPT API: 呼び出しに失敗しました: %s", e)
+        _LAST_ERROR["text"] = _ai_error_text(e)
         return None, []
-
-    if not isinstance(payload, dict):
-        snippet = re.sub(r"\s+", " ", str(payload or ""))[:160]
-        log.warning("ChatGPT API: HTTP %s %s", status, snippet)
-        _LAST_ERROR["text"] = "応答が JSON ではありません（管理画面の URL を確認）" if status == 200 else f"HTTP {status}: {HTTP_HINTS.get(status) or snippet}"
+    choices = getattr(resp, "choices", None)
+    if not choices:
+        err = getattr(resp, "error", None)
+        _LAST_ERROR["text"] = ("応答が JSON ではありません（管理画面の URL を確認）" if isinstance(resp, str)
+                               else f"エラー応答: {err.get('message') if isinstance(err, dict) else err}" if err else "応答に答えがありません（管理画面の URL を確認）")
+        log.warning("ChatGPT API: %s", _LAST_ERROR["text"])
         return None, []
-    if payload.get("error"):
-        err = payload["error"]
-        msg = err.get("message") if isinstance(err, dict) else str(err)
-        log.warning("ChatGPT API: エラー応答: %s", msg)
-        _LAST_ERROR["text"] = f"エラー応答: {msg}"
-        return None, []
-    if payload.get("status") == "incomplete":
-        reason = (payload.get("incomplete_details") or {}).get("reason", "")
-        log.warning("ChatGPT API: 応答が途中で終わりました（%s）。OPENAI_MAX_OUTPUT_TOKENS を増やしてください", reason)
-    content, calls, refusal = _parse_response(payload)
+    msg = choices[0].message
+    if choices[0].finish_reason == "length":
+        log.warning("ChatGPT API: 応答が上限で途中まででした")
+    content = msg.content or ""
+    calls = [{"id": tc.id or "", "name": tc.function.name or "", "arguments": tc.function.arguments or "{}"} for tc in (msg.tool_calls or [])]
+    refusal = getattr(msg, "refusal", None)
     if not content and not calls and refusal:
         log.warning("ChatGPT API: 応答が拒否されました: %s", refusal)
         _LAST_ERROR["text"] = "応答が拒否されました"
@@ -4599,21 +4774,17 @@ class _ToolGuard:
         return self.repeats >= self.LIMIT
 
 
-def _call_ai(system, user_input, max_tokens=None, tools=None, handlers=None):
+def _call_ai(system, user_input, tools=None, handlers=None):
+    """AI に聞いて文章を返す（失敗は None）。user_input は文章か、会話（{"role", "content"} の並び）"""
+    messages = [{"role": "system", "content": system}] + (list(user_input) if isinstance(user_input, list) else [{"role": "user", "content": str(user_input)}])
     if not tools:
-        text, _ = _ai_turn(system, user_input, max_tokens)
-        return text
-    items = list(user_input) if isinstance(user_input, list) else [{"role": "user", "content": str(user_input)}]
+        return _ai_turn(messages)[0]
     guard = _ToolGuard()
     retried_empty = False
     for _ in range(C.AI_TOOL_ROUNDS):
-        text, calls = _ai_turn(system, items, max_tokens, tools=tools)
+        text, calls = _ai_turn(messages, tools=tools)
         if text is None and not calls:
             return None
-        if text:
-            items.append({"role": "assistant", "content": text})
-        for c in calls:
-            items.append({"type": "function_call", "call_id": c["id"], "name": c["name"], "arguments": c["arguments"]})
         if not calls:
             if (text or "").strip():
                 return text
@@ -4621,17 +4792,18 @@ def _call_ai(system, user_input, max_tokens=None, tools=None, handlers=None):
                 retried_empty = True
                 continue
             break
+        messages.append({"role": "assistant", "content": text or None,
+                         "tool_calls": [{"id": c["id"], "type": "function", "function": {"name": c["name"], "arguments": c["arguments"]}} for c in calls]})
         for c in calls:
             result = guard.before(c)
             if result is None:
                 result = _dispatch(handlers, c["name"], c["arguments"])
                 guard.after(c, result)
-            items.append({"type": "function_call_output", "call_id": c["id"], "output": result["llm_content"]})
+            messages.append({"role": "tool", "tool_call_id": c["id"], "content": result["llm_content"]})
         if guard.stuck:
             break
-    items.append({"role": "user", "content": "道具の往復はここまでです。ここまでの結果を使って、指示どおりの形で最終回答を返してください。"})
-    text, _ = _ai_turn(system, items, max_tokens)
-    return text
+    messages.append({"role": "user", "content": "道具の往復はここまでです。ここまでの結果を使って、指示どおりの形で最終回答を返してください。"})
+    return _ai_turn(messages)[0]
 
 
 # ----- 自動化アイテム登録: 聞き取りの会話と、その結果からの登録内容・ECRS の案 -----
@@ -4806,7 +4978,7 @@ def _clean_state(data, mask=True):
 
 def ai_intake(messages, state, image=None, work_pattern="", handlers=None, tools=None, origin=""):
     recent = messages[-24:]
-    with_image = lambda text: [{"type": "input_text", "text": text}, {"type": "input_image", "image_url": image}]
+    with_image = lambda text: [{"type": "text", "text": text}, {"type": "image_url", "image_url": {"url": image, "detail": "auto"}}]
     items = []
     for i, m in enumerate(recent):
         role = "assistant" if m.get("role") == "ai" else "user"
@@ -4862,7 +5034,7 @@ def ai_finalize(state, messages, wish, domains, candidates, shift="", handlers=N
     return data if isinstance(data, dict) else None
 
 
-# ----- 道具（aiagent_rag_bundle と同じ chat 形式の定義。送るときに平らな形に直す） -----
+# ----- 道具（aiagent_rag_bundle と同じ chat 形式の定義。Responses API で呼ぶときは平らな形に直す） -----
 _SEARCH_SIMILAR_TOOL = {"type": "function", "function": {
     "name": "search_similar_tasks",
     "description": "登録済みの業務から、名前・成果物・手順が似ているものを探す。同じ業務の二重登録や、他の人が同じ成果物を作っている重複を見つける。",
@@ -7102,7 +7274,7 @@ def _save_ai_form():
         Setting.set(key, (request.form.get(key) or "").strip())
     db.session.commit()
     _LAST_ERROR["text"] = ""
-    _NO_TOOLS.clear()
+    reset_llm_client()
 
 
 @bp_admin.post("/ai")
@@ -8530,9 +8702,9 @@ TEMPLATES = {
     <form method="post" action="{{ url_for('admin.save_ai_settings') }}" class="card mb-3" autocomplete="off"><div class="card-body">
       <h5 class="card-title">AI連携（ChatGPT API）{{ C.tip("空欄のままなら AI は使わず、ルールベースで同じ形式の分析をします（既定の URL やモデル名はありません）。保存すればすぐ反映され、再起動は不要です。temperature / top_p は送りません。") }}</h5>
       <p class="mb-2">{{ ai_status }}</p>
-      <div class="mb-2"><label class="form-label small mb-0">API の URL（Responses API）</label><input type="text" name="openai_api_url" class="form-control form-control-sm" value="{{ settings.openai_api_url }}" placeholder="社内の中継サービスの Responses API の URL"></div>
+      <div class="mb-2"><label class="form-label small mb-0">API の URL（/chat/completions まで）</label><input type="text" name="openai_api_url" class="form-control form-control-sm" value="{{ settings.openai_api_url }}" placeholder="AIワークハブと同じ、社内の中継サービスの URL"></div>
       <div class="mb-2"><label class="form-label small mb-0">API キー</label><input type="text" name="openai_api_key" class="form-control form-control-sm" value="{{ settings.openai_api_key }}"></div>
-      <div class="mb-2"><label class="form-label small mb-0">モデル名</label><input type="text" name="openai_model" class="form-control form-control-sm" value="{{ settings.openai_model }}" placeholder="社内で案内されている GPT-6 系の名前"></div>
+      <div class="mb-2"><label class="form-label small mb-0">モデル名</label><input type="text" name="openai_model" class="form-control form-control-sm" value="{{ settings.openai_model }}" placeholder="社内で案内されている GPT-5 系・GPT-6 系の名前"></div>
       <div class="d-flex flex-wrap gap-2">
         <button class="btn btn-primary btn-sm">保存</button>
         <button class="btn btn-outline-secondary btn-sm" formaction="{{ url_for('admin.test_ai_settings') }}">保存して接続テスト</button>
