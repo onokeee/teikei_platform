@@ -4807,63 +4807,203 @@ def _call_ai(system, user_input, tools=None, handlers=None):
 
 
 # ----- 自動化アイテム登録: 聞き取りの会話と、その結果からの登録内容・ECRS の案 -----
-INTAKE_PROMPT = """あなたは製造部「PC定型業務ゼロ化プロジェクト」の聞き取り担当です。本人と短い会話をしながら、その人が行っているPCの定型・定期業務の「現状の流れ（手順）」を組み立てます。
-
-進め方:
-- 1回の返事で質問は1つだけ。60字以内。やさしい言葉で、相手の答えに一言だけ反応してから聞く（例:「なるほど、まず実績を出すんですね。次に何をしますか？」）。
-- 答えが選択で済むときは chips に2〜6個の選択肢を入れる（「分からない」「特にない」も入れる）。自由に書いてほしいときは chips を空にする。
-- 聞く順番: ①最初に何をするか → ②次に何をするか（相手が「ここまで」と言うか、手順が {step_limit} 個になるまで繰り返す）→（交代勤務の人だけ）この業務をいつやるか（昼勤／夜勤／昼勤・夜勤の両方）→ ③情報の取り出し元（システム・ファイル・紙・人）と受け取り方（chips に「システムで見る／共有フォルダ／メールで届く／紙で届く／人に聞く」を入れてよい）→ ④できるものと、それを誰にどうやって渡し、何に使われるか（渡す相手・渡し方・使いみちを1つの質問で聞く。例:「できた『日次実績集計表』は、誰にどうやって渡し、何に使われますか？」。chips に渡し方（{methods}）を入れてよい）→ ⑤頻度 → ⑥1回にかかる時間。困っていることは、余裕があれば最後に1問だけ。
-- 頻度を聞くときの chips は必ず次のとおり: {frequencies}
-- 時間を聞くときの chips は必ず次のとおり: {durations}
-- すでに state に入っていることは聞き直さない。相手がまとめて書いたり、手順書や画面の写真を送ったりしたら、読み取れることをすべて state に入れ、足りないことだけ聞く。
-- 手順を聞いている間は、毎回「次に何をしますか？」と聞き、chips に「ここまで（手順はこれで全部）」を入れる。相手が「ここまで」「以上」「終わり」「最後」などと答えたら手順は確定とし、それまでは別のことを聞かない。
-- 特定の手順について聞くときは、必ず番号と手順名を添える（例:「①の『装置のトラブル状況を確認する』は、何を見て確認しますか？」）。「確認には何を使いますか？」のように、どの手順の話か分からない聞き方はしない。
-- 手順ごとに、流れ図の必須要素をそろえる:
-  ・だれが: 基本は本人。上司・他部署・システム（自動）など本人以外がやる手順だけ who に書く。
-  ・なにを・どこから: その手順で使う情報・物と、その受け取り元。受け取り元ごとに receive に1件ずつ書き、それぞれから何を受け取るかを対応づける（例:「PMKからトラブル装置の対応状況と、ライン管理から生産状況」→ receive は「PMK／トラブル装置の対応状況」「ライン管理／生産状況」の2件）。並べ方の決まりに頼らず、文の意味で対応づける。前の手順でできたものを使うときは、what にその名前を書く。
-  ・どのように: 受け取り方（receive の how）と、渡す手順の渡し方（how）。
-  ・どこへ・だれに: 入力先・書き込み先（system）や渡す相手（to）と、渡したものが何に使われるか（use）。
-  ・どうする: action は「何を・どこから・どうする」が分かる文に書き直す（例:「生産管理システムから前日の実績を集める」）。
-- 本人の答えから読み取れる要素は聞き直さず、自分で整理して state に入れる。「情報を集める」「資料を作る」「確認する」のように、必須要素が足りない・あいまいなときは、その手順の番号と名前を添えて短く確かめる（例:「①で、PMKからは何で受け取りますか？」「②の『原因を調べる』は、何を見て調べますか？」）。同じ手順の足りない要素は1回の質問にまとめてよい。手順を聞いている途中でもよい。
-- 本人が「分からない」と答えた要素は unknowns に入れて先へ進む。
-- 初めて「次に何をしますか？」と聞くときは「全部なら『ここまで』を押してください」と添える。
-- 相手が「意味が分からない」「おかしい」と言ったら、謝らずに言い換えて、同じことを聞き直す。
-
-使える道具（function tools）:
-- person_history: 聞き取りの最初に1回だけ呼び、本人の登録済み業務・月次アンケートの答え・勤務形態を見てから質問を始める。
-- list_known_systems: 手順にシステム・ファイル・帳票・できるものの名前が出たら1回呼び、既存の呼び方があればそれにそろえる（名寄せ）。できるもの（outputs と steps の output）も、同じものが登録済みならその呼び方にそろえる。
-- check_duplicate: 業務名が決まったら1回呼ぶ。本人が同じ名前を登録済みなら、そのことを伝えて「別の業務として続けるか」を聞く。二重登録でなければ、そのことには触れない（「二重登録ではありません」などと書かない）。本人は登録を取り消せないので取り消しは勧めず、取り消したいと言われたら改善チームに連絡するよう伝える。
-- search_similar_tasks: 手順が2つそろったら1回呼び、他の人が同じ成果物を作っていれば「同じGr・役割で同じものを作っている人がいます。同じ流れですか？」と確かめる。
-- 道具の結果は事実として使い、結果に無いことは言わない。同じ道具を同じ引数で2回呼ばない。道具を呼んだ往復でも、最後は必ず上の JSON だけで返す。
-- 道具の結果は次のターンでは見えない。分かったこと（例: 二重登録なし、Gr・役割の常用システムは生産管理システム、同じ成果物を同じGr・役割の別の人も作成）は state.notes に短く残し、notes にあることは調べ直さない。渡されていない道具はもう調べ済み。
-- 手順を聞く「次に何をしますか？」と、必須要素を確かめる質問は回数に数えない。それ以外の質問（頻度・時間・困りごとなど）が全部で {max_q} 回まで。remaining は「この先あと何回聞くつもりか（必須要素の確認も含む）」。手順が2つ以上あり、各手順の必須要素がそろう（本人が分からないと答えたものを除く）うえで、できるものと渡す相手（使いみち）、頻度、時間がそろったら done を true にし、reply は「この流れで合っていますか？」と確認の一言にする（chips は空）。使いみちを相手が分からないと答えたら unknowns に入れて先へ進む。
-- 相手が「違う」「直したい」と言ったら、state を直して done は false のまま確認し直す。
-- 写真が読めないときは、そう伝えて文字で教えてほしいと頼む。
-- 推測で手順を作らない。相手が言ったことだけを入れる。
-- 人の名前（氏名・〇〇さん）は返事の文には書かない。state の steps の who・receive の from・to には、本人が人の名前で答えたらその名前をそのまま書く（管理者が見る図だけに出る）。名前が分からないとき、本人が名前で答えなかったときは、Gr・役割・役職・部署で書く（例: 製造1課の担当者、品質保証課 課長）。
-- 渡す手順（送る・渡す・提出する）の output には、渡したものの名前を入れる。
-- sources・outputs と steps の receive の what・output には情報の名前だけを書く（「〜をメール送付」「〜を印刷」のような渡し方・作業は how や action に書く）。
-- 引き継ぎの話が出たら、前の勤務からの引き継ぎは情報の取り出し元（sources と steps の receive）、次の勤務への引き継ぎは渡す相手（recipients と steps の to）として扱う。
-
-state は次の形（必ず全部のキーを返す。不明は "" か [] か null）:
-{
-  "title": "<業務名。『〜を〜する』で短く>",
-  "steps": [{"no": 1, "action": "<その手順でやること（何を・どこから・どうする）>", "who": "<その手順をやる人。本人なら空。上司・他部署・システム（自動）など本人以外のときだけ（本人が名前で答えたらそのまま）>", "receive": [{"from": "<受け取り元（システム・ファイル・紙・所属・部署・役職・人。人は本人が名前で答えたらそのまま）>", "what": "<そこから受け取る情報・物の名前>", "how": "<受け取り方（システムで見る・共有フォルダ・メールで届く・紙で届く・電話で聞く・口頭など）。分からなければ空>"}], "system": "<作業に使う・入力する・書き込むシステムやファイル（受け取り元は receive に書く）。なければ空>", "output": "<その手順でできるもの。なければ空>", "to": "<渡す相手（Gr・役割・役職・部署・人。人は本人が名前で答えたらそのまま）。なければ空>", "how": "<to がある手順の渡し方（メール・手渡し・共有フォルダなど）。なければ空>", "use": "<渡す相手がそれを何に使うか。分からなければ空>"}],
-  "sources": ["<情報の取り出し元（システム名・帳票名・人）>"],
-  "outputs": ["<最終的にできるもの>"],
-  "recipients": ["<最終的に渡す相手。人・部署を1つずつ>"],
-  "purpose": "<できたものの使いみち・この業務をする理由（本人の言葉で）。分からなければ空>",
-  "frequency": "<頻度。上の選択肢の中の1つ。不明なら null>",
-  "duration": "<1回の時間。上の選択肢の中の1つ。不明なら null>",
-  "shift": "<交代勤務の人だけ: 昼勤／夜勤／昼勤・夜勤の両方。普通勤務の人は「普通勤務」。不明なら null>",
-  "pains": ["<困っていること>"],
-  "unknowns": ["<相手が『分からない』と答えたこと>"],
-  "notes": ["<道具で分かったこと・確認済みのことの短いメモ>"]
+# ----- AI の聞き取りの設定（管理メニューで変えられる。指示書はここから組み立てる） -----
+INTAKE_CONFIG_KEY = "intake_config"
+INTAKE_RULE_LIMITS = {"max_questions": (1, 20), "step_limit": (3, 30), "min_steps": (1, 30), "reply_chars": (20, 200), "chips_min": (1, 10), "chips_max": (1, 10)}
+INTAKE_WHEN = (("all", "全員"), ("shift", "交代勤務の人だけ"), ("normal", "普通勤務の人だけ"))
+INTAKE_FIXED_CHIPS = {"shift": SHIFT_OPTIONS, "frequency": FREQUENCIES, "duration": DURATIONS}
+INTAKE_ELEMENTS = (
+    ("who", "だれが", "基本は本人。上司・他部署・システム（自動）など本人以外がやる手順だけ who に書く。"),
+    ("receive", "なにを・どこから", "その手順で使う情報・物と、その受け取り元。受け取り元ごとに receive に1件ずつ書き、それぞれから何を受け取るかを対応づける（例:「PMKからトラブル装置の対応状況と、ライン管理から生産状況」→ receive は「PMK／トラブル装置の対応状況」「ライン管理／生産状況」の2件）。並べ方の決まりに頼らず、文の意味で対応づける。前の手順でできたものを使うときは、what にその名前を書く。"),
+    ("how", "どのように", "受け取り方（receive の how）と、渡す手順の渡し方（how）。"),
+    ("to_use", "どこへ・だれに", "入力先・書き込み先（system）や渡す相手（to）と、渡したものが何に使われるか（use）。"),
+)
+INTAKE_TOOL_LINES = (
+    ("person_history", "本人の履歴（登録済みの業務・月次アンケートの答え）", "聞き取りの最初に1回だけ呼び、本人の登録済み業務・月次アンケートの答え・勤務形態を見てから質問を始める。"),
+    ("list_known_systems", "既存の呼び方にそろえる（名寄せ）", "手順にシステム・ファイル・帳票・できるものの名前が出たら1回呼び、既存の呼び方があればそれにそろえる（名寄せ）。できるもの（outputs と steps の output）も、同じものが登録済みならその呼び方にそろえる。"),
+    ("check_duplicate", "二重登録の確認", "業務名が決まったら1回呼ぶ。本人が同じ名前を登録済みなら、そのことを伝えて「別の業務として続けるか」を聞く。二重登録でなければ、そのことには触れない（「二重登録ではありません」などと書かない）。本人は登録を取り消せないので取り消しは勧めず、取り消したいと言われたら改善チームに連絡するよう伝える。"),
+    ("search_similar_tasks", "似た業務（同じ成果物を作っている人）", "手順が2つそろったら1回呼び、他の人が同じ成果物を作っていれば「同じGr・役割で同じものを作っている人がいます。同じ流れですか？」と確かめる。"),
+)
+# 聞く項目の既定（key, 項目名, 聞き方, 選択肢, 対象, 回数に数える, 任意, 使う）。選択肢の {methods} は業務マップの区分の方法、{done} は手順の終わりの語、{step_limit} は手順の上限
+INTAKE_ITEMS = (
+    ("steps", "手順", "最初に何をするか → 次に何をするか（相手が「{done}」と言うか、手順が {step_limit} 個になるまで繰り返す）", "", "all", False, False, True),
+    ("shift", "いつやるか", "この業務をいつやるか。手順が2つ以上そろったら一度だけ聞き、答えを state.shift に入れる", "", "shift", True, False, True),
+    ("sources", "情報の取り出し元と受け取り方", "情報の取り出し元（システム・ファイル・紙・人）と受け取り方", "システムで見る、共有フォルダ、メールで届く、紙で届く、人に聞く", "all", True, False, True),
+    ("outputs", "できるものと渡す相手・使いみち", "できるものと、それを誰にどうやって渡し、何に使われるか（渡す相手・渡し方・使いみちを1つの質問で聞く。例:「できた『日次実績集計表』は、誰にどうやって渡し、何に使われますか？」）", "{methods}", "all", True, False, True),
+    ("purpose", "この業務をする理由", "できたものの使いみち・この業務をする理由（本人の言葉で）。答えは state.purpose に入れる", "", "all", True, False, False),
+    ("frequency", "頻度", "頻度", "", "all", True, False, True),
+    ("duration", "1回の時間", "1回にかかる時間", "", "all", True, False, True),
+    ("pains", "困っていること", "困っていること（余裕があれば最後に1問だけ）", "", "all", True, True, True),
+)
+DEFAULT_INTAKE_CONFIG = {
+    "max_questions": INTAKE_MAX_QUESTIONS, "step_limit": INTAKE_STEP_LIMIT, "min_steps": 2, "reply_chars": 60, "chips_min": 2, "chips_max": 6,
+    "chip_done": "ここまで（手順はこれで全部）", "unknown_chips": "分からない、特にない",
+    "tone": "やさしい言葉で、相手の答えに一言だけ反応してから聞く（例:「なるほど、まず実績を出すんですね。次に何をしますか？」）",
+    "items": [{"key": k, "label": label, "ask": ask, "chips": chips, "when": when, "counted": counted, "optional": optional, "on": on} for k, label, ask, chips, when, counted, optional, on in INTAKE_ITEMS],
+    "elements": {k: True for k, _l, _t in INTAKE_ELEMENTS}, "tools": {k: True for k, _l, _t in INTAKE_TOOL_LINES}, "extra": "", "finalize_extra": "",
 }
 
-出力はこの JSON オブジェクトだけ（前後に説明を付けない）:
-{"reply": "<相手への一言と次の質問>", "chips": ["<選択肢>"], "done": false, "remaining": <残り質問数>, "state": {...}}
-日本語で。"""
+
+def _split_choices(text):
+    """「、」「,」「／」「/」「改行」で区切った選択肢（重複と空は除く）"""
+    return list(dict.fromkeys(x.strip() for x in re.split(r"[、,，／/\n]", str(text or "")) if x.strip()))
+
+
+def _clean_intake_config(data):
+    """管理画面から来た設定を、形・範囲をそろえて返す（足りない項目は既定で埋める）"""
+    base = json.loads(json.dumps(DEFAULT_INTAKE_CONFIG))
+    data = data if isinstance(data, dict) else {}
+    out = {}
+    for key, (lo, hi) in INTAKE_RULE_LIMITS.items():
+        out[key] = min(hi, max(lo, _int_or(data.get(key), base[key])))
+    out["chips_min"] = min(out["chips_min"], out["chips_max"])
+    out["min_steps"] = min(out["min_steps"], out["step_limit"])
+    for key, limit in (("chip_done", 40), ("unknown_chips", 100), ("tone", 300), ("extra", 2000), ("finalize_extra", 2000)):
+        out[key] = str(data[key]).strip()[:limit] if data.get(key) is not None else base[key]
+    out["chip_done"] = out["chip_done"] or base["chip_done"]
+    defaults = {x["key"]: x for x in base["items"]}
+    items, seen, n_custom = [], set(), 0
+    for raw in (data["items"] if isinstance(data.get("items"), list) else base["items"]):
+        if not isinstance(raw, dict):
+            continue
+        key = str(raw.get("key") or "")
+        if key in defaults:
+            if key in seen:
+                continue
+            seen.add(key)
+            d, label = defaults[key], defaults[key]["label"]
+        else:
+            label = str(raw.get("label") or "").strip()[:30]
+            if not label or n_custom >= 10:
+                continue
+            n_custom += 1
+            key, d = f"c{n_custom}", {"ask": "", "chips": "", "when": "all", "counted": True, "optional": False, "on": True}
+        items.append({"key": key, "label": label,
+                      "ask": (str(raw["ask"]).strip()[:300] if raw.get("ask") is not None else d["ask"]) or d["ask"],
+                      "chips": str(raw["chips"]).strip()[:200] if raw.get("chips") is not None else d["chips"],
+                      "when": raw.get("when") if raw.get("when") in {w for w, _l in INTAKE_WHEN} else d["when"],
+                      "counted": bool(raw.get("counted", d["counted"])), "optional": bool(raw.get("optional", d["optional"])),
+                      "on": True if key == "steps" else bool(raw.get("on", d["on"]))})
+    items += [dict(d) for key, d in defaults.items() if key not in seen]
+    out["items"] = items
+    posted = data.get("elements") if isinstance(data.get("elements"), dict) else {}
+    out["elements"] = {k: bool(posted.get(k, True)) for k, _l, _t in INTAKE_ELEMENTS}
+    posted = data.get("tools") if isinstance(data.get("tools"), dict) else {}
+    out["tools"] = {k: bool(posted.get(k, True)) for k, _l, _t in INTAKE_TOOL_LINES}
+    return out
+
+
+def _intake_config():
+    try:
+        raw = Setting.get(INTAKE_CONFIG_KEY, "")
+    except RuntimeError:  # アプリの文脈の外（単体の呼び出し）では既定
+        raw = ""
+    return _clean_intake_config(_json_typed(raw, {}))
+
+
+def build_intake_prompt(cfg, work_pattern=None, methods=None):
+    """聞き取りの指示書を設定から組み立てる。work_pattern を渡すと、その人に聞かない項目を外す。methods が None なら {methods} のまま"""
+    done_short = cfg["chip_done"].split("（")[0].strip() or cfg["chip_done"]
+    fill = {"{done}": done_short, "{step_limit}": str(cfg["step_limit"]), "{frequencies}": "／".join(C.FREQUENCIES), "{durations}": "／".join(C.DURATIONS),
+            "{methods}": "／".join(methods) if methods is not None else "{methods}"}
+
+    def sub(text):
+        for k, v in fill.items():
+            text = text.replace(k, v)
+        return text
+
+    def chips_line(item):
+        fixed = INTAKE_FIXED_CHIPS.get(item["key"])
+        if fixed:
+            return "chips は必ず次のとおり: " + "／".join(fixed)
+        raw = item["chips"].strip()
+        return ("chips に「" + "／".join(sub(x) for x in _split_choices(raw)) + "」を入れてよい") if raw else ""
+
+    allowed = None if not work_pattern else {"all", "shift" if work_pattern == C.SHIFT_PATTERN else "normal"}
+    items = [x for x in cfg["items"] if x["on"] and (allowed is None or x["when"] in allowed)]
+    order = []
+    for n, item in enumerate(items, 1):
+        note = "" if allowed is not None else {"shift": "（交代勤務の人だけ）", "normal": "（普通勤務の人だけ）"}.get(item["when"], "")
+        parts = [(sub(item["ask"]) or item["label"]).rstrip("。")]
+        if chips_line(item):
+            parts.append(chips_line(item))
+        if item["key"].startswith("c"):
+            parts.append(f"答えは state.notes に「{item['label']}: <答え>」として残す")
+        order.append(f"  {n}. {note}{item['label']}: " + "。".join(parts) + "。")
+    unknown = _split_choices(cfg["unknown_chips"])
+    elements = [f"  ・{label}: {text}" for key, label, text in INTAKE_ELEMENTS if cfg["elements"].get(key, True)]
+    elements.append("  ・どうする: action は「何を・どこから・どうする」が分かる文に書き直す（例:「生産管理システムから前日の実績を集める」）。")
+    tools = [f"- {name}: {text}" for name, _label, text in INTAKE_TOOL_LINES if cfg["tools"].get(name, True)]
+    counted = [x["label"] for x in items if x["counted"] and x["key"] != "steps"]
+    uncounted = [x["label"] for x in items if not x["counted"] and x["key"] != "steps"]
+    required = [x["label"] for x in items if x["key"] != "steps" and not x["optional"]]
+    extra = [l.strip() for l in cfg["extra"].splitlines() if l.strip()]
+    freq_text, dur_text = fill["{frequencies}"], fill["{durations}"]
+    lines = [
+        "あなたは製造部「PC定型業務ゼロ化プロジェクト」の聞き取り担当です。本人と短い会話をしながら、その人が行っているPCの定型・定期業務の「現状の流れ（手順）」を組み立てます。",
+        "",
+        "進め方:",
+        f"- 1回の返事で質問は1つだけ。{cfg['reply_chars']}字以内。" + (cfg["tone"].rstrip("。") + "。" if cfg["tone"] else ""),
+        f"- 答えが選択で済むときは chips に{cfg['chips_min']}〜{cfg['chips_max']}個の選択肢を入れる" + (f"（{''.join('「' + u + '」' for u in unknown)}も入れる）" if unknown else "") + "。自由に書いてほしいときは chips を空にする。",
+        "- 聞く順番:",
+        *order,
+        "- すでに state に入っていることは聞き直さない。相手がまとめて書いたり、手順書や画面の写真を送ったりしたら、読み取れることをすべて state に入れ、足りないことだけ聞く。",
+        f"- 手順を聞いている間は、毎回「次に何をしますか？」と聞き、chips に「{cfg['chip_done']}」を入れる。相手が「{done_short}」「以上」「終わり」「最後」などと答えたら手順は確定とし、それまでは別のことを聞かない。",
+        "- 特定の手順について聞くときは、必ず番号と手順名を添える（例:「①の『装置のトラブル状況を確認する』は、何を見て確認しますか？」）。「確認には何を使いますか？」のように、どの手順の話か分からない聞き方はしない。",
+        "- 手順ごとに、流れ図の必須要素をそろえる:",
+        *elements,
+        "- 本人の答えから読み取れる要素は聞き直さず、自分で整理して state に入れる。「情報を集める」「資料を作る」「確認する」のように、必須要素が足りない・あいまいなときは、その手順の番号と名前を添えて短く確かめる（例:「①で、PMKからは何で受け取りますか？」「②の『原因を調べる』は、何を見て調べますか？」）。同じ手順の足りない要素は1回の質問にまとめてよい。手順を聞いている途中でもよい。",
+        "- 本人が「分からない」と答えた要素は unknowns に入れて先へ進む。",
+        f"- 初めて「次に何をしますか？」と聞くときは「全部なら『{done_short}』を押してください」と添える。",
+        "- 相手が「意味が分からない」「おかしい」と言ったら、謝らずに言い換えて、同じことを聞き直す。",
+    ]
+    if extra:
+        lines += ["", "追加の指示:"] + [l if l.startswith("-") else "- " + l for l in extra]
+    lines += ["", "使える道具（function tools）:"]
+    if tools:
+        lines += tools + [
+            "- 道具の結果は事実として使い、結果に無いことは言わない。同じ道具を同じ引数で2回呼ばない。道具を呼んだ往復でも、最後は必ず上の JSON だけで返す。",
+            "- 道具の結果は次のターンでは見えない。分かったこと（例: 二重登録なし、Gr・役割の常用システムは生産管理システム、同じ成果物を同じGr・役割の別の人も作成）は state.notes に短く残し、notes にあることは調べ直さない。渡されていない道具はもう調べ済み。",
+        ]
+    else:
+        lines.append("- なし（道具は呼ばない）。")
+    lines += [
+        "- 手順を聞く「次に何をしますか？」と、必須要素を確かめる質問は回数に数えない。" + (f"{'・'.join(uncounted)}も数えない。" if uncounted else "")
+        + f"それ以外の質問（{'・'.join(counted) or 'なし'}）が全部で {cfg['max_questions']} 回まで。remaining は「この先あと何回聞くつもりか（必須要素の確認も含む）」。"
+        + f"手順が{cfg['min_steps']}つ以上あり、各手順の必須要素がそろう（本人が分からないと答えたものを除く）うえで、" + (f"{'、'.join(required)}がそろったら" if required else "")
+        + " done を true にし、reply は「この流れで合っていますか？」と確認の一言にする（chips は空）。使いみちを相手が分からないと答えたら unknowns に入れて先へ進む。",
+        "- 相手が「違う」「直したい」と言ったら、state を直して done は false のまま確認し直す。",
+        "- 写真が読めないときは、そう伝えて文字で教えてほしいと頼む。",
+        "- 推測で手順を作らない。相手が言ったことだけを入れる。",
+        "- 人の名前（氏名・〇〇さん）は返事の文には書かない。state の steps の who・receive の from・to には、本人が人の名前で答えたらその名前をそのまま書く（管理者が見る図だけに出る）。名前が分からないとき、本人が名前で答えなかったときは、Gr・役割・役職・部署で書く（例: 製造1課の担当者、品質保証課 課長）。",
+        "- 渡す手順（送る・渡す・提出する）の output には、渡したものの名前を入れる。",
+        "- sources・outputs と steps の receive の what・output には情報の名前だけを書く（「〜をメール送付」「〜を印刷」のような渡し方・作業は how や action に書く）。",
+        "- 引き継ぎの話が出たら、前の勤務からの引き継ぎは情報の取り出し元（sources と steps の receive）、次の勤務への引き継ぎは渡す相手（recipients と steps の to）として扱う。",
+        "",
+        'state は次の形（必ず全部のキーを返す。不明は "" か [] か null）:',
+        "{",
+        '  "title": "<業務名。『〜を〜する』で短く>",',
+        '  "steps": [{"no": 1, "action": "<その手順でやること（何を・どこから・どうする）>", "who": "<その手順をやる人。本人なら空。上司・他部署・システム（自動）など本人以外のときだけ（本人が名前で答えたらそのまま）>", "receive": [{"from": "<受け取り元（システム・ファイル・紙・所属・部署・役職・人。人は本人が名前で答えたらそのまま）>", "what": "<そこから受け取る情報・物の名前>", "how": "<受け取り方（システムで見る・共有フォルダ・メールで届く・紙で届く・電話で聞く・口頭など）。分からなければ空>"}], "system": "<作業に使う・入力する・書き込むシステムやファイル（受け取り元は receive に書く）。なければ空>", "output": "<その手順でできるもの。なければ空>", "to": "<渡す相手（Gr・役割・役職・部署・人。人は本人が名前で答えたらそのまま）。なければ空>", "how": "<to がある手順の渡し方（メール・手渡し・共有フォルダなど）。なければ空>", "use": "<渡す相手がそれを何に使うか。分からなければ空>"}],',
+        '  "sources": ["<情報の取り出し元（システム名・帳票名・人）>"],',
+        '  "outputs": ["<最終的にできるもの>"],',
+        '  "recipients": ["<最終的に渡す相手。人・部署を1つずつ>"],',
+        '  "purpose": "<できたものの使いみち・この業務をする理由（本人の言葉で）。分からなければ空>",',
+        f'  "frequency": "<頻度。次の中の1つ: {freq_text}。不明なら null>",',
+        f'  "duration": "<1回の時間。次の中の1つ: {dur_text}。不明なら null>",',
+        '  "shift": "<交代勤務の人だけ: 昼勤／夜勤／昼勤・夜勤の両方。普通勤務の人は「普通勤務」。不明なら null>",',
+        '  "pains": ["<困っていること>"],',
+        '  "unknowns": ["<相手が『分からない』と答えたこと>"],',
+        '  "notes": ["<道具で分かったこと・確認済みのことの短いメモ>"]',
+        "}",
+        "",
+        "出力はこの JSON オブジェクトだけ（前後に説明を付けない）:",
+        '{"reply": "<相手への一言と次の質問>", "chips": ["<選択肢>"], "done": false, "remaining": <残り質問数>, "state": {...}}',
+        "日本語で。",
+    ]
+    return "\n".join(lines)
+
+
+INTAKE_PROMPT = build_intake_prompt(DEFAULT_INTAKE_CONFIG)  # 既定の指示書（管理画面で変えると、実際に送る指示書は変わる）
 
 FINALIZE_PROMPT = """あなたは製造部「PC定型業務ゼロ化プロジェクト」の業務分析アシスタントです。聞き取りで組み立てた1件のPCの定型・定期業務の現状の流れ（state と会話記録）を読み、改善チームが使う情報を JSON で返します。
 
@@ -4917,13 +5057,18 @@ def _fill_prompt(template, **values):
     return template
 
 
-def _intake_prompt():
-    methods = [r["label"] for r in map_vocab()["methods"] if r["kind"] == "channel" and r["key"] != "other"]
-    return _fill_prompt(INTAKE_PROMPT, frequencies=C.FREQUENCIES, durations=C.DURATIONS, max_q=C.INTAKE_MAX_QUESTIONS, step_limit=C.INTAKE_STEP_LIMIT, methods=methods)
+def _intake_methods():
+    return [r["label"] for r in map_vocab()["methods"] if r["kind"] == "channel" and r["key"] != "other"]
+
+
+def _intake_prompt(work_pattern=None, cfg=None):
+    return build_intake_prompt(cfg or _intake_config(), work_pattern, _intake_methods())
 
 
 def _finalize_prompt():
-    return _fill_prompt(FINALIZE_PROMPT, output_users=C.OUTPUT_USERS, input_sources=C.INPUT_SOURCES, tools=C.TOOLS, natures=C.NATURES, pains=C.PAINS)
+    prompt = _fill_prompt(FINALIZE_PROMPT, output_users=C.OUTPUT_USERS, input_sources=C.INPUT_SOURCES, tools=C.TOOLS, natures=C.NATURES, pains=C.PAINS)
+    extra = _intake_config()["finalize_extra"].strip()
+    return prompt + ("\n\n追加の指示:\n" + extra if extra else "")
 
 
 def _intake_state_default():
@@ -4962,7 +5107,7 @@ def _clean_state(data, mask=True):
             "output": field("output", 200), "to": field("to", 100), "how": field("how", 60), "use": field("use", 120),
             "how_from": field("how_from", 60) or (hows[0] if len(hows) == 1 else ""),
         })
-        if len(steps) >= C.INTAKE_STEP_LIMIT:
+        if len(steps) >= _intake_config()["step_limit"]:
             break
     base["steps"] = steps
     for key in ("sources", "outputs", "recipients", "pains", "unknowns"):
@@ -4994,13 +5139,15 @@ def ai_intake(messages, state, image=None, work_pattern="", handlers=None, tools
         items.append({"role": "user", "content": start})
     elif image and items[-1]["role"] != "user":
         items.append({"role": "user", "content": with_image("この写真の手順を読み取ってください")})
-    if work_pattern == "交代勤務":
-        pattern_note = "\n\n## 本人の勤務形態\n交代勤務（昼勤・夜勤あり）。手順が2つ以上そろったら一度だけ「この業務はいつやりますか？」と聞き、chips は必ず「昼勤」「夜勤」「昼勤・夜勤の両方」の3つ。答えを state.shift に入れる。"
+    cfg = _intake_config()
+    if work_pattern == C.SHIFT_PATTERN:
+        asks_shift = any(x["key"] == "shift" and x["on"] and x["when"] != "normal" for x in cfg["items"])
+        pattern_note = "\n\n## 本人の勤務形態\n交代勤務（昼勤・夜勤あり）。" + ("「いつやるか」の答えは state.shift に入れる。" if asks_shift else "いつやるかは聞かず、state.shift は null のまま（登録のときに本人が選ぶ）。")
     elif work_pattern:
         pattern_note = "\n\n## 本人の勤務形態\n普通勤務（日勤のみ）。勤務時間帯は聞かず、state.shift は「普通勤務」にする。"
     else:
         pattern_note = ""
-    system = _intake_prompt() + pattern_note + "\n\n## 現在の state\n" + json.dumps(state, ensure_ascii=False)
+    system = _intake_prompt(work_pattern, cfg) + pattern_note + "\n\n## 現在の state\n" + json.dumps(state, ensure_ascii=False)
     data = _extract_json(_call_ai(system, items, tools=INTAKE_TOOLS if tools is None else tools, handlers=handlers))
     if not isinstance(data, dict):
         return None
@@ -5167,9 +5314,12 @@ def _duplicate_check_key(name):
 def intake_tools_for(state):
     checked = set(state.get("checked") or [])
     title_key = _duplicate_check_key(state.get("title"))
+    enabled = _intake_config()["tools"]
     out = []
     for t in INTAKE_TOOLS:
         name = t["function"]["name"]
+        if not enabled.get(name, True):
+            continue
         if name == "person_history" and name in checked:
             continue
         if name == "check_duplicate" and title_key in checked:
@@ -7536,6 +7686,30 @@ def map_vocab_try():
         "handoff": vocab["handoff"][handoff]["label"] if handoff in vocab["handoff"] else "（決まらない）",
     })
 
+# ----- AI の聞き取り（自動化アイテム登録）の設定 -----
+def _intake_choices():
+    return {"fixed_keys": [k for k, *_rest in INTAKE_ITEMS], "labels": {k: label for k, label, *_rest in INTAKE_ITEMS},
+            "fixed_chips": {k: list(v) for k, v in INTAKE_FIXED_CHIPS.items()}, "when": [list(x) for x in INTAKE_WHEN],
+            "elements": {k: label for k, label, _t in INTAKE_ELEMENTS}, "tools": {k: label for k, label, _t in INTAKE_TOOL_LINES},
+            "limits": INTAKE_RULE_LIMITS, "work_patterns": list(C.WORK_PATTERNS)}
+
+@bp_admin.route("/intake")
+def intake_page():
+    return render_template("admin/intake.html", intake_json=_script_json(_intake_config()), choices_json=_script_json(_intake_choices()))
+
+@bp_admin.post("/intake")
+def intake_save():
+    data = request.get_json(silent=True) or {}
+    Setting.set(INTAKE_CONFIG_KEY, "" if data.get("reset") else json.dumps(_clean_intake_config(data.get("config")), ensure_ascii=False))
+    db.session.commit()
+    return jsonify({"success": True, "config": _intake_config()})
+
+@bp_admin.post("/intake/preview")
+def intake_preview():
+    data = request.get_json(silent=True) or {}
+    cfg = _clean_intake_config(data.get("config")) if isinstance(data.get("config"), dict) else _intake_config()
+    return jsonify({"prompt": _intake_prompt(str(data.get("work_pattern") or "") or None, cfg)})
+
 # ----- デモデータ -----
 @bp_admin.post("/demo/load")
 def load_demo():
@@ -8494,6 +8668,184 @@ TEMPLATES = {
 </script>
 {% endblock %}
 ''',
+    'admin/intake.html': r'''{% extends "base.html" %}
+{% block title %}AI の聞き取りの設定{% endblock %}
+{% block content %}
+<nav aria-label="breadcrumb"><ol class="breadcrumb small mb-2">
+  <li class="breadcrumb-item"><a href="{{ url_for('admin.index') }}">管理</a></li>
+  <li class="breadcrumb-item active">AI の聞き取りの設定</li>
+</ol></nav>
+<h2 class="mb-3">AI の聞き取りの設定{{ C.tip("自動化アイテム登録で AI が本人に聞くときの、項目・順番・聞き方・ルール・道具を決めます。保存するとすぐ効きます（再起動は不要）。ここで変えられないのは、1回に1問だけ聞くこと、答えの形（JSON と state）、推測で手順を作らないこと、返事に氏名を書かないこと、「分からない」を unknowns に入れて先へ進むことです。") }}</h2>
+<div id="iq-app">
+  <div class="card mb-3"><div class="card-body">
+    <h5 class="card-title">聞き方のルール{{ C.tip("返事の長さは1回の返事の字数の上限。選択肢の数は、答えが選択で済むときに AI が出すボタンの数。「必ず入れる選択肢」は、どの質問の選択肢にも足す語（空なら足さない）。「手順の終わりの選択肢」は、手順を聞いている間に毎回出すボタンの文言。「回数に数える質問の上限」は、手順を聞く質問と必須要素の確認を除いた質問の数。「完了に必要な手順の数」に届き、任意でない項目がそろうと、AI は「この流れで合っていますか？」と確認に入ります。") }}</h5>
+    <div class="row g-2 align-items-end">
+      <div class="col-6 col-md-3 col-xl-2"><label class="form-label small mb-0" for="iq-reply_chars">返事の長さ（字以内）</label><input type="number" class="form-control form-control-sm" id="iq-reply_chars"></div>
+      <div class="col-6 col-md-3 col-xl-2"><label class="form-label small mb-0" for="iq-chips_min">選択肢の数（最少）</label><input type="number" class="form-control form-control-sm" id="iq-chips_min"></div>
+      <div class="col-6 col-md-3 col-xl-2"><label class="form-label small mb-0" for="iq-chips_max">選択肢の数（最多）</label><input type="number" class="form-control form-control-sm" id="iq-chips_max"></div>
+      <div class="col-6 col-md-3 col-xl-2"><label class="form-label small mb-0" for="iq-max_questions">回数に数える質問の上限</label><input type="number" class="form-control form-control-sm" id="iq-max_questions"></div>
+      <div class="col-6 col-md-3 col-xl-2"><label class="form-label small mb-0" for="iq-step_limit">手順の上限（個）</label><input type="number" class="form-control form-control-sm" id="iq-step_limit"></div>
+      <div class="col-6 col-md-3 col-xl-2"><label class="form-label small mb-0" for="iq-min_steps">完了に必要な手順の数</label><input type="number" class="form-control form-control-sm" id="iq-min_steps"></div>
+      <div class="col-md-6"><label class="form-label small mb-0" for="iq-unknown_chips">必ず入れる選択肢（「、」区切り）</label><input type="text" class="form-control form-control-sm" id="iq-unknown_chips" maxlength="100"></div>
+      <div class="col-md-6"><label class="form-label small mb-0" for="iq-chip_done">手順の終わりの選択肢</label><input type="text" class="form-control form-control-sm" id="iq-chip_done" maxlength="40"></div>
+      <div class="col-12"><label class="form-label small mb-0" for="iq-tone">話し方</label><input type="text" class="form-control form-control-sm" id="iq-tone" maxlength="300"></div>
+    </div>
+  </div></div>
+  <div class="card mb-3"><div class="card-body">
+    <h5 class="card-title">質問の項目と順番{{ C.tip("上から順に聞きます。「使う」を外した項目は聞きません（頻度・時間は登録のときに本人が選びます）。「聞き方」は AI への指示で、{step_limit} は手順の上限、{done} は手順の終わりの語に置き換わります。「選択肢」は「、」区切りで、{methods} と書くと業務マップの区分の「方法」が入ります（いつやるか・頻度・時間の選択肢は固定）。「対象」で交代勤務の人だけに聞く質問にできます。「数える」を外した質問は回数の上限に数えません。「任意」の項目は、聞けなくても完了してよい項目です。追加した質問の答えは state の notes に「項目名: 答え」として残り、案件詳細の聞き取りの記録で見られます。") }}</h5>
+    <div class="table-responsive"><table class="table table-sm align-middle iq-table"><thead><tr><th></th><th>使う</th><th>項目</th><th>聞き方（AI への指示）</th><th>選択肢</th><th>対象</th><th>数える</th><th>任意</th><th></th></tr></thead><tbody id="iq-items"></tbody></table></div>
+    <button type="button" class="btn btn-sm btn-outline-primary" id="iq-add"><i class="bi bi-plus-lg"></i> 質問を追加</button>
+  </div></div>
+  <div class="row g-3 mb-3">
+    <div class="col-lg-6"><div class="card h-100"><div class="card-body">
+      <h5 class="card-title">手順ごとに確かめる要素{{ C.tip("手順を聞くたびに AI がそろえようとする要素。足りなければ、その手順の番号と名前を添えて確かめます。「どうする」（何を・どこから・どうするが分かる文に直す）はいつも確かめます。") }}</h5>
+      <div id="iq-elements"></div>
+    </div></div></div>
+    <div class="col-lg-6"><div class="card h-100"><div class="card-body">
+      <h5 class="card-title">AI が使う道具{{ C.tip("聞き取りの途中で AI が自分で呼ぶ、このアプリの中の検索です（外部には出ません）。外した道具は AI に渡しません。") }}</h5>
+      <div id="iq-tools"></div>
+    </div></div></div>
+  </div>
+  <div class="card mb-3"><div class="card-body">
+    <h5 class="card-title">追加の指示{{ C.tip("上の設定で足りないことを、文章で AI に伝えます。1行に1つ。聞き取りの指示は会話の指示書の「進め方」の後ろに、分析の指示は登録のときに動く AI 分析の指示書の最後に付きます。") }}</h5>
+    <div class="row g-2">
+      <div class="col-lg-6"><label class="form-label small mb-0" for="iq-extra">聞き取り（会話）への指示</label><textarea class="form-control form-control-sm" id="iq-extra" rows="4" maxlength="2000"></textarea></div>
+      <div class="col-lg-6"><label class="form-label small mb-0" for="iq-finalize_extra">登録のときの AI 分析への指示</label><textarea class="form-control form-control-sm" id="iq-finalize_extra" rows="4" maxlength="2000"></textarea></div>
+    </div>
+  </div></div>
+  <div class="card mb-3"><div class="card-body">
+    <h5 class="card-title">指示書の確認{{ C.tip("いま画面にある設定（保存前でも）で、AI に送る指示書がどうなるかを出します。本人の勤務形態で、聞く項目が変わります。") }}</h5>
+    <div class="d-flex flex-wrap gap-2 align-items-center">
+      <select class="form-select form-select-sm w-auto" id="iq-preview-pattern" aria-label="勤務形態"></select>
+      <button type="button" class="btn btn-sm btn-outline-secondary" id="iq-preview-btn">いまの設定で表示</button>
+    </div>
+    <pre class="iq-pre mt-2 mb-0 d-none" id="iq-preview"></pre>
+  </div></div>
+  <div class="mv-savebar">
+    <button type="button" class="btn btn-primary" id="iq-save"><i class="bi bi-check2"></i> 保存</button>
+    <button type="button" class="btn btn-outline-danger" id="iq-reset">既定に戻す</button>
+    <span class="small" id="iq-msg" role="status"></span>
+  </div>
+</div>
+<script type="application/json" id="iq-data">{{ intake_json|safe }}</script>
+<script type="application/json" id="iq-choices">{{ choices_json|safe }}</script>
+{% endblock %}
+{% block scripts %}
+<script>
+(function () {
+  var V = JSON.parse(document.getElementById("iq-data").textContent);
+  var CH = JSON.parse(document.getElementById("iq-choices").textContent);
+  var msg = document.getElementById("iq-msg");
+  var dirty = false;
+  var el = uiEl;
+  function touch() { dirty = true; msg.className = "small text-muted"; msg.textContent = "未保存の変更があります"; }
+  function input(value, ph, onInput, max, cls) {
+    var i = el("input", "form-control form-control-sm" + (cls ? " " + cls : "")); i.type = "text"; i.value = value || ""; if (ph) i.placeholder = ph; if (max) i.maxLength = max;
+    i.addEventListener("input", function () { onInput(i.value); touch(); });
+    return i;
+  }
+  function check(value, onChange, disabled, title) {
+    var c = el("input", "form-check-input"); c.type = "checkbox"; c.checked = !!value; c.disabled = !!disabled; if (title) c.title = title;
+    c.addEventListener("change", function () { onChange(c.checked); touch(); });
+    return c;
+  }
+  function select(pairs, value, onChange) {
+    var s = el("select", "form-select form-select-sm");
+    pairs.forEach(function (p) { var o = el("option", null, p[1]); o.value = p[0]; if (p[0] === value) o.selected = true; s.appendChild(o); });
+    s.addEventListener("change", function () { onChange(s.value); touch(); });
+    return s;
+  }
+  function cell(tr, child, cls) { var td = el("td", cls); td.appendChild(child); tr.appendChild(td); return td; }
+  function isCustom(it) { return CH.fixed_keys.indexOf(it.key) < 0; }
+  var NUMS = ["reply_chars", "chips_min", "chips_max", "max_questions", "step_limit", "min_steps"];
+  var TEXTS = ["unknown_chips", "chip_done", "tone", "extra", "finalize_extra"];
+  function renderRules() {
+    NUMS.forEach(function (k) { var i = document.getElementById("iq-" + k); i.value = V[k]; i.min = CH.limits[k][0]; i.max = CH.limits[k][1]; });
+    TEXTS.forEach(function (k) { document.getElementById("iq-" + k).value = V[k] || ""; });
+  }
+  function renderChecks(id, map, values, prefix) {
+    var box = document.getElementById(id);
+    box.innerHTML = "";
+    Object.keys(map).forEach(function (k) {
+      var row = el("div", "form-check");
+      var c = check(values[k] !== false, function (v) { values[k] = v; }, false); c.id = prefix + k;
+      var lab = el("label", "form-check-label", map[k]); lab.htmlFor = c.id;
+      row.appendChild(c); row.appendChild(lab); box.appendChild(row);
+    });
+  }
+  function renderItems() {
+    var tbody = document.getElementById("iq-items");
+    tbody.innerHTML = "";
+    V.items.forEach(function (it, i) {
+      var tr = el("tr");
+      var mv = el("div", "mv-move");
+      var up = el("button", "btn btn-sm btn-light", "▲"); up.type = "button"; up.disabled = i === 0; up.title = "上へ（先に聞く）";
+      var dn = el("button", "btn btn-sm btn-light", "▼"); dn.type = "button"; dn.disabled = i === V.items.length - 1; dn.title = "下へ";
+      up.addEventListener("click", function () { V.items.splice(i - 1, 0, V.items.splice(i, 1)[0]); touch(); renderItems(); });
+      dn.addEventListener("click", function () { V.items.splice(i + 1, 0, V.items.splice(i, 1)[0]); touch(); renderItems(); });
+      mv.appendChild(up); mv.appendChild(dn);
+      cell(tr, mv, "text-nowrap");
+      cell(tr, check(it.on, function (v) { it.on = v; }, it.key === "steps", it.key === "steps" ? "手順はいつも聞きます" : ""), "text-center");
+      if (isCustom(it)) cell(tr, input(it.label, "項目名", function (v) { it.label = v; }, 30));
+      else { var name = el("div", "d-flex align-items-center gap-1"); name.appendChild(el("span", "fw-semibold text-nowrap", it.label)); cell(tr, name); }
+      cell(tr, input(it.ask, "AI にどう聞かせるか", function (v) { it.ask = v; }, 300, "iq-ask"));
+      if (CH.fixed_chips[it.key]) cell(tr, el("span", "small text-muted", CH.fixed_chips[it.key].join("／") + "（固定）"), "iq-chips");
+      else cell(tr, input(it.chips, it.key === "steps" ? "（手順の終わりの選択肢を使います）" : "「、」区切り", function (v) { it.chips = v; }, 200, "iq-chips"));
+      cell(tr, select(CH.when, it.when, function (v) { it.when = v; }));
+      cell(tr, check(it.counted, function (v) { it.counted = v; }, it.key === "steps", it.key === "steps" ? "手順を聞く質問は数えません" : ""), "text-center");
+      cell(tr, check(it.optional, function (v) { it.optional = v; }, it.key === "steps"), "text-center");
+      var del = el("button", "btn btn-sm btn-outline-danger", "削除"); del.type = "button";
+      del.disabled = !isCustom(it); if (!isCustom(it)) del.title = "組み込みの項目は消せません（「使う」を外してください）";
+      del.addEventListener("click", function () { V.items.splice(i, 1); touch(); renderItems(); });
+      cell(tr, del);
+      tbody.appendChild(tr);
+    });
+  }
+  function renderAll() {
+    renderRules();
+    renderItems();
+    renderChecks("iq-elements", CH.elements, V.elements, "iq-el-");
+    renderChecks("iq-tools", CH.tools, V.tools, "iq-tool-");
+  }
+  NUMS.forEach(function (k) { document.getElementById("iq-" + k).addEventListener("input", function (e) { var v = parseInt(e.target.value, 10); if (!isNaN(v)) V[k] = v; touch(); }); });
+  TEXTS.forEach(function (k) { document.getElementById("iq-" + k).addEventListener("input", function (e) { V[k] = e.target.value; touch(); }); });
+  document.getElementById("iq-add").addEventListener("click", function () {
+    V.items.push({ key: "", label: "", ask: "", chips: "", when: "all", counted: true, optional: false, on: true });
+    touch(); renderItems();
+    var inputs = document.querySelectorAll("#iq-items tr:last-child input[type=text]");
+    if (inputs[0]) inputs[0].focus();
+  });
+  var pat = document.getElementById("iq-preview-pattern");
+  CH.work_patterns.forEach(function (p) { var o = el("option", null, p + "の人"); o.value = p; pat.appendChild(o); });
+  document.getElementById("iq-preview-btn").addEventListener("click", async function () {
+    var pre = document.getElementById("iq-preview");
+    try {
+      var j = await sendJson("{{ url_for('admin.intake_preview') }}", { config: V, work_pattern: pat.value });
+      pre.textContent = j.prompt || ""; pre.classList.remove("d-none");
+    } catch (e) { pre.textContent = "表示できませんでした"; pre.classList.remove("d-none"); }
+  });
+  document.getElementById("iq-save").addEventListener("click", async function () {
+    try {
+      var j = await sendJson("{{ url_for('admin.intake_save') }}", { config: V });
+      if (!j.success) throw new Error("failed");
+      V = j.config; dirty = false; renderAll();
+      msg.className = "small text-success"; msg.textContent = "保存しました";
+    } catch (e) { msg.className = "small text-danger"; msg.textContent = "保存できませんでした"; }
+  });
+  document.getElementById("iq-reset").addEventListener("click", async function () {
+    if (!confirm("聞き取りの設定を既定に戻しますか？（追加した質問も消えます）")) return;
+    try {
+      var j = await sendJson("{{ url_for('admin.intake_save') }}", { reset: true });
+      V = j.config; dirty = false; renderAll();
+      msg.className = "small text-success"; msg.textContent = "既定に戻しました";
+    } catch (e) { msg.className = "small text-danger"; msg.textContent = "戻せませんでした"; }
+  });
+  window.addEventListener("beforeunload", function (e) { if (dirty) { e.preventDefault(); e.returnValue = ""; } });
+  renderAll();
+})();
+</script>
+{% endblock %}
+''',
     'admin/map_vocab.html': r'''{% extends "base.html" %}
 {% block title %}業務マップの区分{% endblock %}
 {% block content %}
@@ -8697,6 +9049,11 @@ TEMPLATES = {
       <div class="d-flex flex-wrap gap-2">
         <a class="btn btn-sm btn-outline-primary" href="{{ url_for('monthly.survey_admin') }}">月次の設問を編集</a>
       </div>
+    </div></div>
+
+    <div class="card mb-3"><div class="card-body">
+      <h5 class="card-title">AI の聞き取り（自動化アイテム登録）{{ C.tip("AI が本人に聞く項目・順番・聞き方・ルール・使う道具を決めます。保存するとすぐ効きます。") }}</h5>
+      <a class="btn btn-sm btn-outline-primary" href="{{ url_for('admin.intake_page') }}"><i class="bi bi-chat-dots"></i> 聞き取りの設定</a>
     </div></div>
 
     <form method="post" action="{{ url_for('admin.save_ai_settings') }}" class="card mb-3" autocomplete="off"><div class="card-body">
@@ -13093,6 +13450,10 @@ body.flow-max-open { overflow: hidden; }
 .mv-table td:nth-child(2) { min-width: 11rem; }
 .mv-table td:nth-child(4) { min-width: 7rem; }
 .mv-icon { font-size: 1.15rem; width: 1.3rem; text-align: center; }
+.iq-table td { vertical-align: top; }
+.iq-table .iq-ask { min-width: 24rem; }
+.iq-table .iq-chips { min-width: 13rem; display: inline-block; }
+.iq-pre { white-space: pre-wrap; font-size: 0.8rem; max-height: 30rem; overflow: auto; background: #f7f7f9; padding: 0.75rem; border-radius: 8px; }
 .mv-savebar { position: sticky; bottom: 0; z-index: 5; display: flex; gap: 0.5rem; align-items: center; padding: 0.75rem 0; background: linear-gradient(to top, #f5f6f8 70%, rgba(245, 246, 248, 0)); }
 .member-wrap { overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
 .member-wrap::-webkit-scrollbar { display: none; }
